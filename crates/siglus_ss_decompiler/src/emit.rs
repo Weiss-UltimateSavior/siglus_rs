@@ -151,15 +151,15 @@ impl Expr {
             return false;
         }
 
-        match (side, parent_op, self) {
+        match (side, parent_op, self, parent_prec) {
             // Siglus binary operators are emitted as left-associative.  The
             // right child needs parentheses on equal precedence unless flattening
             // the exact same associative operator is semantics-preserving.
-            (ChildSide::Right, Some(parent), Expr::Binary { op: child, .. }) => {
+            (ChildSide::Right, Some(parent), Expr::Binary { op: child, .. }, _) => {
                 !can_flatten_same_precedence(parent, *child)
             }
             // Avoid ambiguous spellings such as --x or ~~x for nested unary ops.
-            (ChildSide::Right, Some(_), Expr::Unary { .. }) if parent_prec == PREC_UNARY => true,
+            (ChildSide::Right, Some(_), Expr::Unary { .. }, PREC_UNARY) => true,
             _ => false,
         }
     }

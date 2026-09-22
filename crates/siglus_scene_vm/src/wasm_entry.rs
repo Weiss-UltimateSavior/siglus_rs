@@ -248,23 +248,17 @@ impl WasmApp {
                     .to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
                 host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
-                    match state {
-                        ElementState::Pressed => {
-                            if matches!(b, VmMouseButton::Left) {
-                                let (x, y) = current_mouse_pos(host);
-                                host.touch(0, x, y);
-                            } else {
-                                host.mouse_down(b);
-                            }
+                    match (state, b) {
+                        (ElementState::Pressed, VmMouseButton::Left) => {
+                            let (x, y) = current_mouse_pos(host);
+                            host.touch(0, x, y);
                         }
-                        ElementState::Released => {
-                            if matches!(b, VmMouseButton::Left) {
-                                let (x, y) = current_mouse_pos(host);
-                                host.touch(2, x, y);
-                            } else {
-                                host.mouse_up(b);
-                            }
+                        (ElementState::Released, VmMouseButton::Left) => {
+                            let (x, y) = current_mouse_pos(host);
+                            host.touch(2, x, y);
                         }
+                        (ElementState::Pressed, b) => host.mouse_down(b),
+                        (ElementState::Released, b) => host.mouse_up(b),
                     }
                 }
             }

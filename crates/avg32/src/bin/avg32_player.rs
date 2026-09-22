@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -701,33 +701,43 @@ impl ApplicationHandler for App {
                     state.drive(state.pointer_input(0))
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(
-                        event.physical_key,
-                        PhysicalKey::Code(KeyCode::Enter | KeyCode::Space | KeyCode::ArrowDown)
-                    ) =>
-            {
-                state.drive(Input::Advance)
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Digit1)) =>
-            {
-                state.drive(Input::Choice(0))
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Digit2)) =>
-            {
-                state.drive(Input::Choice(1))
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Digit3)) =>
-            {
-                state.drive(Input::Choice(2))
-            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key:
+                            PhysicalKey::Code(KeyCode::Enter | KeyCode::Space | KeyCode::ArrowDown),
+                        ..
+                    },
+                ..
+            } => state.drive(Input::Advance),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Digit1),
+                        ..
+                    },
+                ..
+            } => state.drive(Input::Choice(0)),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Digit2),
+                        ..
+                    },
+                ..
+            } => state.drive(Input::Choice(1)),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Digit3),
+                        ..
+                    },
+                ..
+            } => state.drive(Input::Choice(2)),
             WindowEvent::RedrawRequested => state.render(),
             _ => Ok(()),
         };

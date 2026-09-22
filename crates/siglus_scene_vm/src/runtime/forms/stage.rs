@@ -5209,17 +5209,11 @@ fn sample_object_pixel_component(
         return 0;
     }
 
-    match &obj.backend {
-        ObjectBackend::Movie {
-            image_id: Some(id), ..
-        } if obj.object_type == 9 && cut_no == 0 => {
+    match (&obj.backend, obj.object_type, cut_no) {
+        (ObjectBackend::Movie { image_id: Some(id), .. }, 9, 0) => {
             return sample_image_component(ctx, id, x, y, channel);
         }
-        ObjectBackend::Rect {
-            layer_id,
-            sprite_id,
-            ..
-        } if matches!(obj.object_type, 8 | 10 | 11) && cut_no == 0 => {
+        (ObjectBackend::Rect { layer_id, sprite_id, .. }, 8 | 10 | 11, 0) => {
             return sample_sprite_component(ctx, *layer_id, *sprite_id, x, y, channel);
         }
         _ => {}
@@ -7188,7 +7182,11 @@ fn clone_object_from_element(
         crate::runtime::forms::codes::STAGE_ELM_OBJECT
     };
     match parse_target(ctx, element)? {
-        StageTarget::ChildItemRef { stage, child, idx } if child == stage_object && idx >= 0 => st
+        StageTarget::ChildItemRef {
+            stage,
+            child,
+            idx: idx @ 0..,
+        } if child == stage_object => st
             .object_lists
             .get(&stage)
             .and_then(|list| list.get(idx as usize))
@@ -7196,10 +7194,10 @@ fn clone_object_from_element(
         StageTarget::ChildItemOp {
             stage,
             child,
-            idx,
+            idx: idx @ 0..,
             op,
             tail,
-        } if child == stage_object && idx >= 0 => {
+        } if child == stage_object => {
             let base = st
                 .object_lists
                 .get(&stage)
@@ -10338,15 +10336,19 @@ fn dispatch_object_state_op(
         if al_id == Some(1) {
             if let Some(Value::Element(e)) = script_args.first() {
                 match parse_target(ctx, e) {
-                    Some(StageTarget::ChildItemOp { child, idx, .. })
-                        if child == crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP =>
-                    {
+                    Some(StageTarget::ChildItemOp {
+                        child: crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP,
+                        idx,
+                        ..
+                    }) => {
                         obj.button.group_no = idx.max(0);
                         obj.button.group_idx_override = Some(idx.max(0) as usize);
                     }
-                    Some(StageTarget::ChildItemRef { child, idx, .. })
-                        if child == crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP =>
-                    {
+                    Some(StageTarget::ChildItemRef {
+                        child: crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP,
+                        idx,
+                        ..
+                    }) => {
                         obj.button.group_no = idx.max(0);
                         obj.button.group_idx_override = Some(idx.max(0) as usize);
                     }

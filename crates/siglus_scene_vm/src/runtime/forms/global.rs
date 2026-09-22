@@ -178,7 +178,7 @@ fn front_mwnd_element(no: usize) -> Vec<i32> {
 
 fn mwnd_ref_from_value(v: &Value) -> Option<(i64, usize)> {
     match v.unwrap_named() {
-        Value::Int(n) if *n >= 0 => Some((1, *n as usize)),
+        Value::Int(n @ 0..) => Some((1, *n as usize)),
         Value::Element(chain) => mwnd_ref_from_element(chain),
         _ => None,
     }
@@ -1545,7 +1545,7 @@ fn dispatch_global_wipe_command(
         let key_wait_mode = args
             .iter()
             .find_map(|v| match v {
-                Value::NamedArg { id, value } if *id == 0 => parse_i32_value(value),
+                Value::NamedArg { id: 0, value } => parse_i32_value(value),
                 _ => None,
             })
             .unwrap_or(-1);
@@ -2231,7 +2231,7 @@ pub fn dispatch_global_form(
         let arg = args.first().map(Value::unwrap_named);
         let element = match (al_id, arg) {
             (Some(0), Some(Value::Element(chain))) => Some(chain.clone()),
-            (Some(1), Some(Value::Int(no))) if *no >= 0 => Some(front_mwnd_element(*no as usize)),
+            (Some(1), Some(Value::Int(no @ 0..))) => Some(front_mwnd_element(*no as usize)),
             _ => None,
         };
 

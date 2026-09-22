@@ -67,7 +67,7 @@ fn split_lines(text: String) -> Vec<String> {
 fn strlist_key_from_value(value: &Value) -> Option<u32> {
     match value.unwrap_named() {
         Value::Element(chain) => chain.first().copied().map(|v| v as u32),
-        Value::Int(v) if *v >= 0 => Some(*v as u32),
+        Value::Int(v @ 0..) => Some(*v as u32),
         _ => None,
     }
 }
@@ -151,7 +151,7 @@ fn preload_omv(ctx: &mut CommandContext, name: &str) {
 pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
     let parsed = prop_access::parse_element_chain_ctx(ctx, form_id, args);
     let (chain_pos, chain) = match parsed {
-        Some((pos, ch)) if ch.len() >= 2 => (Some(pos), Some(ch)),
+        Some((pos, ch @ [_, _, ..])) => (Some(pos), Some(ch)),
         _ => (None, None),
     };
 

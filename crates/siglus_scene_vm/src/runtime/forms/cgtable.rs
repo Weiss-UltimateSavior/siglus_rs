@@ -69,7 +69,7 @@ pub(crate) fn mark_look_by_name(ctx: &mut CommandContext, name: &str) {
 pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
     let parsed = prop_access::parse_element_chain_ctx(ctx, form_id, args);
     let (chain_pos, chain) = match parsed {
-        Some((pos, ch)) if ch.len() >= 2 => (Some(pos), Some(ch)),
+        Some((pos, ch @ [_, _, ..])) => (Some(pos), Some(ch)),
         _ => (None, None),
     };
 

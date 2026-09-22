@@ -1276,27 +1276,28 @@ fn source_expr(ctx: &Context<'_>, inst: &Instruction, param_index: usize, count:
 }
 
 fn register_base(ctx: &Context<'_>, reg: RegisterKey) -> String {
-    match reg.ty {
-        RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate => {
+    match (reg.ty, ctx.shader.kind) {
+        (RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate, _) => {
             temp_name(reg, ctx.shader.kind)
         }
-        RegisterType::Texture if ctx.shader.kind == ShaderKind::Vertex => {
-            temp_name(reg, ctx.shader.kind)
-        }
-        RegisterType::Texture | RegisterType::Input | RegisterType::MiscType => {
+        (RegisterType::Texture, ShaderKind::Vertex) => temp_name(reg, ctx.shader.kind),
+        (RegisterType::Texture | RegisterType::Input | RegisterType::MiscType, _) => {
             format!("input.{}", input_field_name(reg))
         }
-        RegisterType::Const => const_row_expr(ctx, reg.number),
-        RegisterType::ConstInt => int_const_expr(ctx, reg.number),
-        RegisterType::ConstBool => bool_const_expr(ctx, reg.number),
-        RegisterType::Sampler => sampler_name(ctx, reg.number),
-        RegisterType::ColorOut
-        | RegisterType::DepthOut
-        | RegisterType::RastOut
-        | RegisterType::AttrOut
-        | RegisterType::Output => format!("output.{}", output_field_name(reg)),
-        RegisterType::Loop => "_loop".to_string(),
-        RegisterType::Label => format!("label{}", reg.number),
+        (RegisterType::Const, _) => const_row_expr(ctx, reg.number),
+        (RegisterType::ConstInt, _) => int_const_expr(ctx, reg.number),
+        (RegisterType::ConstBool, _) => bool_const_expr(ctx, reg.number),
+        (RegisterType::Sampler, _) => sampler_name(ctx, reg.number),
+        (
+            RegisterType::ColorOut
+            | RegisterType::DepthOut
+            | RegisterType::RastOut
+            | RegisterType::AttrOut
+            | RegisterType::Output,
+            _,
+        ) => format!("output.{}", output_field_name(reg)),
+        (RegisterType::Loop, _) => "_loop".to_string(),
+        (RegisterType::Label, _) => format!("label{}", reg.number),
         _ => format!("u{}", reg.number),
     }
 }
@@ -1331,10 +1332,10 @@ fn output_field_name(reg: RegisterKey) -> String {
 }
 
 fn temp_name(reg: RegisterKey, kind: ShaderKind) -> String {
-    match reg.ty {
-        RegisterType::Texture if kind == ShaderKind::Vertex => format!("a{}", reg.number),
-        RegisterType::Predicate => format!("p{}", reg.number),
-        RegisterType::TempFloat16 => format!("h{}", reg.number),
+    match (reg.ty, kind) {
+        (RegisterType::Texture, ShaderKind::Vertex) => format!("a{}", reg.number),
+        (RegisterType::Predicate, _) => format!("p{}", reg.number),
+        (RegisterType::TempFloat16, _) => format!("h{}", reg.number),
         _ => format!("r{}", reg.number),
     }
 }
@@ -1349,8 +1350,11 @@ fn temp_type(reg: RegisterKey) -> &'static str {
 }
 
 fn input_field_type(ctx: &Context<'_>, reg: RegisterKey) -> &'static str {
-    match reg.ty {
-        RegisterType::MiscType if reg.number == 1 => "float",
+    match reg {
+        RegisterKey {
+            ty: RegisterType::MiscType,
+            number: 1,
+        } => "float",
         _ => {
             if let Some(decl) = ctx.decls.get(&reg) {
                 if decl.semantic.starts_with("TEXCOORD") {
@@ -1366,9 +1370,15 @@ fn input_field_type(ctx: &Context<'_>, reg: RegisterKey) -> &'static str {
 }
 
 fn output_field_type(reg: RegisterKey) -> &'static str {
-    match reg.ty {
-        RegisterType::DepthOut => "float",
-        RegisterType::RastOut if reg.number == 1 || reg.number == 2 => "float",
+    match reg {
+        RegisterKey {
+            ty: RegisterType::DepthOut,
+            ..
+        } => "float",
+        RegisterKey {
+            ty: RegisterType::RastOut,
+            number: 1 | 2,
+        } => "float",
         _ => "float4",
     }
 }

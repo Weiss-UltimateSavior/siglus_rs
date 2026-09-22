@@ -11513,8 +11513,8 @@ fn weather_pattern(obj: &mut globals::ObjectState, idx: usize) -> i64 {
     let first = p.pat_no_00.min(p.pat_no_01);
     let last = p.pat_no_00.max(p.pat_no_01);
     let span = (last - first + 1).max(1);
-    match p.pat_mode {
-        1 if p.pat_time > 0 => {
+    match (p.pat_mode, p.pat_time) {
+        (1, 1..) => {
             let t = obj
                 .weather_work
                 .sub
@@ -11523,7 +11523,7 @@ fn weather_pattern(obj: &mut globals::ObjectState, idx: usize) -> i64 {
                 .unwrap_or(0);
             first + t.saturating_mul(span) / p.pat_time
         }
-        2 => first + obj.weather_work.rand_mod(span),
+        (2, _) => first + obj.weather_work.rand_mod(span),
         _ => p.pat_no_00,
     }
 }
@@ -13634,37 +13634,37 @@ fn append_object_tree_nodes(
     } else {
         info.child_sort_type
     };
-    match tree_sort_type {
-        0 | 1 => {
+    match (tree_sort_type, obj.object_type) {
+        (0 | 1, _) => {
             // DEFAULT is sorted at tree-flatten time because one child object
             // may expand to several sibling nodes (STRING/NUMBER/WEATHER).
             // NONE preserves insertion order.
         }
-        2 => {
+        (2, _) => {
             children.sort_by(|(lhs_idx, lhs), (rhs_idx, rhs)| {
                 object_tree_texture_key(ctx, stage_idx, *lhs_idx, lhs)
                     .cmp(&object_tree_texture_key(ctx, stage_idx, *rhs_idx, rhs))
             });
         }
-        3 if obj.object_type == 0 => {
+        (3, 0) => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 0));
         }
-        4 if obj.object_type == 0 => {
+        (4, 0) => {
             children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 0)));
         }
-        5 if obj.object_type == 0 => {
+        (5, 0) => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 1));
         }
-        6 if obj.object_type == 0 => {
+        (6, 0) => {
             children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 1)));
         }
-        7 if obj.object_type == 0 => {
+        (7, 0) => {
             children.sort_by_key(|(_, child)| object_tree_stored_axis(child, 2));
         }
-        8 if obj.object_type == 0 => {
+        (8, 0) => {
             children.sort_by_key(|(_, child)| std::cmp::Reverse(object_tree_stored_axis(child, 2)));
         }
-        3..=8 => {
+        (3..=8, _) => {
             // In the original source, X/Y/Z child sorting is implemented only
             // for TYPE_NONE. Other object types append no children for these
             // modes.
@@ -14357,16 +14357,9 @@ fn collect_selbtn_sprite_visuals_recursive(
     text_color: Option<(u8, u8, u8)>,
     map: &mut HashMap<(LayerId, SpriteId), SelBtnSpriteVisual>,
 ) {
-    match &obj.backend {
-        globals::ObjectBackend::Gfx | globals::ObjectBackend::None => {}
-        globals::ObjectBackend::String {
-            layer_id,
-            shadow_sprite_id,
-            fuchi_sprite_id,
-            sprite_id,
-            glyphs,
-            ..
-        } if component == 2 => {
+    match (&obj.backend, component) {
+        (globals::ObjectBackend::Gfx | globals::ObjectBackend::None, _) => {}
+        (globals::ObjectBackend::String { layer_id, shadow_sprite_id, fuchi_sprite_id, sprite_id, glyphs, .. }, 2) => {
             // The original text item owns three sprites per glyph.  Only body
             // sprites switch between normal/hit colours; shadow and fuchi
             // retain their configured colours.

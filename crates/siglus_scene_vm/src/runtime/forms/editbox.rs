@@ -74,7 +74,7 @@ fn apply_exact_op(
 
     let eb = &mut list.boxes[idx];
     match op {
-        x if x == constants::elm_value::EDITBOX_CREATE => {
+        constants::elm_value::EDITBOX_CREATE => {
             let x = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let w = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -85,11 +85,11 @@ fn apply_exact_op(
             eb.frame(0);
             (None, Some(Some((form_id, idx))))
         }
-        x if x == constants::elm_value::EDITBOX_DESTROY => {
+        constants::elm_value::EDITBOX_DESTROY => {
             eb.destroy_like();
             (None, Some(None))
         }
-        x if x == constants::elm_value::EDITBOX_SET_TEXT => {
+        constants::elm_value::EDITBOX_SET_TEXT => {
             eb.set_text_like(
                 params
                     .iter()
@@ -99,24 +99,22 @@ fn apply_exact_op(
             );
             (None, None)
         }
-        x if x == constants::elm_value::EDITBOX_GET_TEXT => {
-            (Some(Value::Str(eb.text.clone())), None)
-        }
-        x if x == constants::elm_value::EDITBOX_SET_FOCUS => {
+        constants::elm_value::EDITBOX_GET_TEXT => (Some(Value::Str(eb.text.clone())), None),
+        constants::elm_value::EDITBOX_SET_FOCUS => {
             if eb.created {
                 (None, Some(Some((form_id, idx))))
             } else {
                 (None, None)
             }
         }
-        x if x == constants::elm_value::EDITBOX_CLEAR_INPUT => {
+        constants::elm_value::EDITBOX_CLEAR_INPUT => {
             eb.clear_input();
             (None, None)
         }
-        x if x == constants::elm_value::EDITBOX_CHECK_DECIDED => {
+        constants::elm_value::EDITBOX_CHECK_DECIDED => {
             (Some(Value::Int(if eb.is_decided() { 1 } else { 0 })), None)
         }
-        x if x == constants::elm_value::EDITBOX_CHECK_CANCELED => {
+        constants::elm_value::EDITBOX_CHECK_CANCELED => {
             (Some(Value::Int(if eb.is_canceled() { 1 } else { 0 })), None)
         }
         _ => {

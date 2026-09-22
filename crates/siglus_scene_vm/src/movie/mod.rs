@@ -4849,8 +4849,8 @@ fn convert_omv_frame(
 
     let mut rgba = vec![0u8; dw.saturating_mul(dh).saturating_mul(4)];
 
-    match theora_type {
-        siglus_assets::omv::OMV_THEORA_TYPE_RGB => {
+    match (theora_type, fmt) {
+        (siglus_assets::omv::OMV_THEORA_TYPE_RGB, _) => {
             for y in 0..dh {
                 for x in 0..dw {
                     let b = get_plane_sample(data, y_off, sw, x, y, 0);
@@ -4864,7 +4864,7 @@ fn convert_omv_frame(
                 }
             }
         }
-        siglus_assets::omv::OMV_THEORA_TYPE_RGBA => {
+        (siglus_assets::omv::OMV_THEORA_TYPE_RGBA, _) => {
             // Original layout: visible B/G/R occupy the first `dh` rows of
             // the three 4:4:4 planes. Alpha follows below that visible region:
             // top third in Y, middle third in U, bottom third in V.
@@ -4892,7 +4892,7 @@ fn convert_omv_frame(
                 }
             }
         }
-        _ if fmt == siglus_omv_decoder::TH_PF_444 => {
+        (_, siglus_omv_decoder::TH_PF_444) => {
             // This is the exact tona3 YUV path: all three source planes are
             // sampled at the same x/y and the float result is truncated by the
             // C++ `(int)` cast before clamping.

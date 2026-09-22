@@ -39,9 +39,9 @@ fn decode_shader_version(tok: u32) -> Option<(ShaderKind, u8, u8)> {
     let major = ((tok >> 8) & 0xff) as u8;
     let minor = (tok & 0xff) as u8;
 
-    match tok & 0xffff_0000 {
-        0xffff_0000 if major == 2 => Some((ShaderKind::Pixel, major, minor)),
-        0xfffe_0000 if major == 2 => Some((ShaderKind::Vertex, major, minor)),
+    match (tok & 0xffff_0000, major) {
+        (0xffff_0000, 2) => Some((ShaderKind::Pixel, major, minor)),
+        (0xfffe_0000, 2) => Some((ShaderKind::Vertex, major, minor)),
         _ => None,
     }
 }

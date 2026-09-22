@@ -4353,6 +4353,23 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F2),
+                        ..
+                    },
+                ..
+            } => {
+                if self.hud.is_some() {
+                    self.close_hud();
+                } else if let Err(err) = self.open_hud(elwt) {
+                    eprintln!("open HUD failed: {err:#}");
+                    self.close_hud();
+                }
+                return;
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
                         physical_key: PhysicalKey::Code(code),
                         text,
                         repeat,
@@ -4360,18 +4377,7 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                if code == KeyCode::F2 {
-                    if self.hud.is_some() {
-                        self.close_hud();
-                    } else if let Err(err) = self.open_hud(elwt) {
-                        eprintln!("open HUD failed: {err:#}");
-                        self.close_hud();
-                    }
-                    return;
-                }
-                if code == KeyCode::F3
-                    && let Some(hud) = self.hud.as_mut()
-                {
+                if let (KeyCode::F3, Some(hud)) = (code, self.hud.as_mut()) {
                     hud.preview_refresh_requested = true;
                     hud.window.request_redraw();
                     return;
@@ -4405,14 +4411,20 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(KeyCode::F2),
+                        ..
+                    },
+                ..
+            } => return,
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
                         physical_key: PhysicalKey::Code(code),
                         ..
                     },
                 ..
             } => {
-                if code == KeyCode::F2 {
-                    return;
-                }
                 if let Some(vm) = self.vm.as_mut()
                     && let Some(k) = map_keycode(code)
                 {

@@ -554,13 +554,13 @@ fn texture_expr(ctx: &Context<'_>, inst: &Instruction) -> String {
     let tex = format!("tex_s{}", sampler);
     let samp = format!("samp_s{}", sampler);
     let controls = inst.texld_controls();
-    match inst.opcode {
-        Opcode::TexLdl => {
+    match (inst.opcode, controls) {
+        (Opcode::TexLdl, _) => {
             let coord = source_expr(ctx, inst, 1, dim);
             let lod = source_component_expr(ctx, inst, 1, 3);
             format!("textureSampleLevel({}, {}, {}, {})", tex, samp, coord, lod)
         }
-        Opcode::TexLdd => {
+        (Opcode::TexLdd, _) => {
             let coord = source_expr(ctx, inst, 1, dim);
             let ddx = source_expr(ctx, inst, 3, dim);
             let ddy = source_expr(ctx, inst, 4, dim);
@@ -569,12 +569,12 @@ fn texture_expr(ctx: &Context<'_>, inst: &Instruction) -> String {
                 tex, samp, coord, ddx, ddy
             )
         }
-        Opcode::Tex if controls == 1 => {
+        (Opcode::Tex, 1) => {
             let coord = source_expr(ctx, inst, 1, dim);
             let w = source_component_expr(ctx, inst, 1, 3);
             format!("textureSample({}, {}, ({} / {}))", tex, samp, coord, w)
         }
-        Opcode::Tex if controls == 2 => {
+        (Opcode::Tex, 2) => {
             let coord = source_expr(ctx, inst, 1, dim);
             let bias = source_component_expr(ctx, inst, 1, 3);
             format!("textureSampleBias({}, {}, {}, {})", tex, samp, coord, bias)
@@ -617,34 +617,47 @@ fn source_component_expr(
 }
 
 fn register_is_scalar_source(ctx: &Context<'_>, reg: RegisterKey) -> bool {
-    match reg.ty {
-        RegisterType::ConstBool | RegisterType::Loop | RegisterType::Label => true,
-        RegisterType::MiscType if ctx.shader.kind == ShaderKind::Pixel && reg.number == 1 => true,
+    match (reg, ctx.shader.kind) {
+        (
+            RegisterKey {
+                ty: RegisterType::ConstBool | RegisterType::Loop | RegisterType::Label,
+                ..
+            },
+            _,
+        ) => true,
+        (
+            RegisterKey {
+                ty: RegisterType::MiscType,
+                number: 1,
+            },
+            ShaderKind::Pixel,
+        ) => true,
         _ => false,
     }
 }
 fn register_base(ctx: &Context<'_>, reg: RegisterKey) -> String {
-    match reg.ty {
-        RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate => {
+    match (reg.ty, ctx.shader.kind) {
+        (RegisterType::Temp | RegisterType::TempFloat16 | RegisterType::Predicate, _) => {
             temp_name(reg, ctx.shader.kind)
         }
-        RegisterType::Texture if ctx.shader.kind == ShaderKind::Vertex => {
-            temp_name(reg, ctx.shader.kind)
-        }
-        RegisterType::Texture | RegisterType::Input | RegisterType::MiscType => {
+        (RegisterType::Texture, ShaderKind::Vertex) => temp_name(reg, ctx.shader.kind),
+        (RegisterType::Texture | RegisterType::Input | RegisterType::MiscType, _) => {
             format!("input.{}", input_field_name(reg))
         }
-        RegisterType::Const => const_row_expr(ctx, reg.number),
-        RegisterType::ConstInt => int_const_expr(ctx, reg.number),
-        RegisterType::ConstBool => bool_const_expr(ctx, reg.number),
-        RegisterType::Sampler => format!("samp_s{}", reg.number),
-        RegisterType::ColorOut
-        | RegisterType::DepthOut
-        | RegisterType::RastOut
-        | RegisterType::AttrOut
-        | RegisterType::Output => format!("output.{}", output_field_name(reg)),
-        RegisterType::Loop => "_loop".to_string(),
-        RegisterType::Label => format!("label{}", reg.number),
+        (RegisterType::Const, _) => const_row_expr(ctx, reg.number),
+        (RegisterType::ConstInt, _) => int_const_expr(ctx, reg.number),
+        (RegisterType::ConstBool, _) => bool_const_expr(ctx, reg.number),
+        (RegisterType::Sampler, _) => format!("samp_s{}", reg.number),
+        (
+            RegisterType::ColorOut
+            | RegisterType::DepthOut
+            | RegisterType::RastOut
+            | RegisterType::AttrOut
+            | RegisterType::Output,
+            _,
+        ) => format!("output.{}", output_field_name(reg)),
+        (RegisterType::Loop, _) => "_loop".to_string(),
+        (RegisterType::Label, _) => format!("label{}", reg.number),
         _ => format!("u{}", reg.number),
     }
 }
@@ -1013,8 +1026,11 @@ fn is_position_semantic(s: &str) -> bool {
 }
 
 fn wgsl_input_field_type(ctx: &Context<'_>, reg: RegisterKey) -> &'static str {
-    match reg.ty {
-        RegisterType::MiscType if reg.number == 1 => "bool",
+    match reg {
+        RegisterKey {
+            ty: RegisterType::MiscType,
+            number: 1,
+        } => "bool",
         _ => {
             if let Some(decl) = ctx.decls.get(&reg)
                 && (decl.semantic.starts_with("TEXCOORD") || decl.semantic.starts_with("COLOR"))
@@ -1027,9 +1043,15 @@ fn wgsl_input_field_type(ctx: &Context<'_>, reg: RegisterKey) -> &'static str {
 }
 
 fn wgsl_output_field_type(reg: RegisterKey) -> &'static str {
-    match reg.ty {
-        RegisterType::DepthOut => "f32",
-        RegisterType::RastOut if reg.number == 1 || reg.number == 2 => "f32",
+    match reg {
+        RegisterKey {
+            ty: RegisterType::DepthOut,
+            ..
+        } => "f32",
+        RegisterKey {
+            ty: RegisterType::RastOut,
+            number: 1 | 2,
+        } => "f32",
         _ => "vec4<f32>",
     }
 }
@@ -1078,10 +1100,10 @@ fn output_field_name(reg: RegisterKey) -> String {
 }
 
 fn temp_name(reg: RegisterKey, kind: ShaderKind) -> String {
-    match reg.ty {
-        RegisterType::Texture if kind == ShaderKind::Vertex => format!("a{}", reg.number),
-        RegisterType::Predicate => format!("p{}", reg.number),
-        RegisterType::TempFloat16 => format!("h{}", reg.number),
+    match (reg.ty, kind) {
+        (RegisterType::Texture, ShaderKind::Vertex) => format!("a{}", reg.number),
+        (RegisterType::Predicate, _) => format!("p{}", reg.number),
+        (RegisterType::TempFloat16, _) => format!("h{}", reg.number),
         _ => format!("r{}", reg.number),
     }
 }
