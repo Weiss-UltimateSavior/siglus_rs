@@ -49,6 +49,18 @@ pub enum Input {
     Pointer { x: i32, y: i32, button: i32 },
 }
 
+impl Input {
+    /// A keyboard advance/skip press or AVG32's primary mouse button
+    /// (`button == 0`, a left-click release). The reference decoder treats
+    /// these interchangeably — `SCENARIO::d00`'s ordinary click-wait checks
+    /// `mouse->GetButton()` right alongside the advance key, and `d10`'s
+    /// cancellable timed waits cancel early on either too.
+    pub(crate) fn is_advance_gesture(self) -> bool {
+        matches!(self, Input::Advance | Input::Skip)
+            || matches!(self, Input::Pointer { button: 0, .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioKind {
     Bgm {
@@ -81,6 +93,12 @@ pub enum VmAction {
         doubled: bool,
     },
     SetFontColor(i32),
+    /// `0x72:0x11` — repositions the message window. AVG32 titles with a
+    /// static layout (e.g. AIR) never use this; a runtime frontend still
+    /// needs to honour it for titles that do move the window mid-scenario.
+    SetMessagePosition([i32; 2]),
+    /// `0x73:6` — resizes the message window's per-character font metrics.
+    SetMessageFontSize([i32; 2]),
     Fade {
         pattern: Option<i32>,
         color: Option<[i32; 3]>,
@@ -648,7 +666,7 @@ impl Avg32Vm {
                     .wait_started
                     .map(|start| start.elapsed().as_micros())
                     .unwrap_or(0);
-                if matches!(input, Input::Advance | Input::Skip) {
+                if input.is_advance_gesture() {
                     if let Some(flag) = cancellable_flag {
                         self.flags.set_value(*flag, 1);
                     }
@@ -663,7 +681,7 @@ impl Avg32Vm {
                 let satisfied = match &waiting {
                     VmAction::WaitForPointer => matches!(input, Input::Pointer { .. }),
                     VmAction::Choice { .. } => matches!(input, Input::Choice(_)),
-                    _ => matches!(input, Input::Advance | Input::Skip),
+                    _ => input.is_advance_gesture(),
                 };
                 if !satisfied {
                     self.waiting = Some(waiting.clone());
@@ -802,14 +820,8 @@ impl Avg32Vm {
                     self.message_window_config()?;
                     None
                 }
-                0x72 => {
-                    self.message_window_position()?;
-                    None
-                }
-                0x73 => {
-                    self.message_window_values()?;
-                    None
-                }
+                0x72 => self.message_window_position()?,
+                0x73 => self.message_window_values()?,
                 0x74 => {
                     self.popup_menu()?;
                     None
@@ -1831,63 +1843,119 @@ impl Avg32Vm {
         Ok(())
     }
 
-    fn message_window_position(&mut self) -> Result<()> {
-        match self.byte()? {
+    fn message_window_position(&mut self) -> Result<Option<VmAction>> {
+        let action = match self.byte()? {
             1 => {
                 let x = self.raw_value_index()?;
                 let y = self.raw_value_index()?;
                 self.flags.set_value(x, self.message_position[0]);
                 self.flags.set_value(y, self.message_position[1]);
+                None
             }
             2..=5 => {
                 let x = self.raw_value_index()?;
                 let y = self.raw_value_index()?;
                 self.flags.set_value(x, 0);
                 self.flags.set_value(y, 0);
+                None
             }
-            0x11 => self.message_position = [self.value()?, self.value()?],
+            0x11 => {
+                self.message_position = [self.value()?, self.value()?];
+                Some(VmAction::SetMessagePosition(self.message_position))
+            }
             0x12..=0x15 => {
                 self.value()?;
                 self.value()?;
+                None
             }
             subcommand => {
                 bail!("avg32: unsupported message-window position subcommand {subcommand:#04x}")
             }
-        }
-        Ok(())
+        };
+        Ok(action)
     }
 
-    fn message_window_values(&mut self) -> Result<()> {
+    fn message_window_values(&mut self) -> Result<Option<VmAction>> {
         let subcommand = self.byte()?;
-        match subcommand {
-            1 => self.read_pair_into(self.message_size)?,
-            2 => self.message_size = [self.value()?, self.value()?],
-            5 => self.read_pair_into(self.message_font_size)?,
-            6 => self.message_font_size = [self.value()?, self.value()?],
-            0x10 => self.read_value_into(self.message_color)?,
-            0x11 => self.message_color = self.value()?,
-            0x12 => self.read_value_into(self.message_cancel)?,
-            0x13 => self.message_cancel = self.value()?,
-            0x16 => self.read_value_into(self.message_shadow)?,
-            0x17 => self.message_shadow = self.value()?,
-            0x18 => self.read_value_into(self.message_shadow_color)?,
-            0x19 => self.message_shadow_color = self.value()?,
-            0x1a => self.read_value_into(self.selection_cancel)?,
-            0x1b => self.selection_cancel = self.value()?,
-            0x1c => self.read_value_into(i32::from(self.skip_enabled))?,
-            0x1d => self.skip_enabled = self.value()? == 0,
+        let action = match subcommand {
+            1 => {
+                self.read_pair_into(self.message_size)?;
+                None
+            }
+            2 => {
+                self.message_size = [self.value()?, self.value()?];
+                None
+            }
+            5 => {
+                self.read_pair_into(self.message_font_size)?;
+                None
+            }
+            6 => {
+                self.message_font_size = [self.value()?, self.value()?];
+                Some(VmAction::SetMessageFontSize(self.message_font_size))
+            }
+            0x10 => {
+                self.read_value_into(self.message_color)?;
+                None
+            }
+            0x11 => {
+                self.message_color = self.value()?;
+                None
+            }
+            0x12 => {
+                self.read_value_into(self.message_cancel)?;
+                None
+            }
+            0x13 => {
+                self.message_cancel = self.value()?;
+                None
+            }
+            0x16 => {
+                self.read_value_into(self.message_shadow)?;
+                None
+            }
+            0x17 => {
+                self.message_shadow = self.value()?;
+                None
+            }
+            0x18 => {
+                self.read_value_into(self.message_shadow_color)?;
+                None
+            }
+            0x19 => {
+                self.message_shadow_color = self.value()?;
+                None
+            }
+            0x1a => {
+                self.read_value_into(self.selection_cancel)?;
+                None
+            }
+            0x1b => {
+                self.selection_cancel = self.value()?;
+                None
+            }
+            0x1c => {
+                self.read_value_into(i32::from(self.skip_enabled))?;
+                None
+            }
+            0x1d => {
+                self.skip_enabled = self.value()? == 0;
+                None
+            }
             // AVG32 17N+ extension settings. They share the same one-value
             // get/set wire format even where the original UI has no effect.
             0x1e | 0x20 | 0x22 | 0x24 => {
                 let destination = self.raw_value_index()?;
                 self.flags.set_value(destination, 0);
+                None
             }
             0x1f | 0x21 | 0x23 | 0x25 => {
                 self.value()?;
+                None
             }
             _ => bail!("avg32: unsupported message-window value subcommand {subcommand:#04x}"),
-        }
-        Ok(())
+        };
+        Ok(action)
     }
 
     fn read_pair_into(&mut self, values: [i32; 2]) -> Result<()> {

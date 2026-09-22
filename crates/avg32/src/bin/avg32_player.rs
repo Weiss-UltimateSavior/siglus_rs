@@ -514,8 +514,12 @@ fn draw_message(
     if !message.visible {
         return;
     }
-    let position = config.message_position();
-    let font_size = config.message_font_size();
+    let position = message
+        .position_override
+        .unwrap_or(config.message_position());
+    let font_size = message
+        .font_size_override
+        .unwrap_or(config.message_font_size());
     let scale = PxScale::from(font_size[1].max(1) as f32);
     let line_height = font_size[1].max(1) as f32;
     let color = config.color(message.color_index);
@@ -524,7 +528,7 @@ fn draw_message(
         draw_text(
             font,
             pixels,
-            line,
+            &line,
             [position[0], baseline as i32],
             color,
             font_size[1],
@@ -690,15 +694,20 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 state.cursor = (position.x, position.y);
-                let button = button.mouse_button().map_or(0, |button| button as i32);
-                if button != 0 {
+                // winit's `MouseButton::Left` is discriminant 0 — AVG32's
+                // primary interaction button, which both advances dialogue
+                // (mirroring `mouse->GetButton()` in the reference decoder)
+                // and picks a choice. Other buttons only update pointer
+                // state; AVG32 gives them no special meaning here.
+                let button = button.mouse_button().map_or(-1, |button| button as i32);
+                if button == 0 {
                     if let Some(choice) = state.choice_at_pointer() {
                         state.drive(Input::Choice(choice))
                     } else {
-                        state.drive(state.pointer_input(button))
+                        state.drive(state.pointer_input(0))
                     }
                 } else {
-                    state.drive(state.pointer_input(0))
+                    state.drive(state.pointer_input(button.max(0)))
                 }
             }
             WindowEvent::KeyboardInput { event, .. }

@@ -22,6 +22,7 @@ pub struct Avg32Config {
     default_fade_microseconds: u32,
     message_position: [i32; 2],
     message_font_size: [i32; 2],
+    message_speed_microseconds: u32,
 }
 
 impl Avg32Config {
@@ -101,6 +102,18 @@ impl Avg32Config {
                 .saturating_mul(1_000),
             message_position: pair(gameexe, "WINDOW_MSG_POS", [0, 0]),
             message_font_size: pair(gameexe, "MSG_MOJI_SIZE", [16, 24]),
+            message_speed_microseconds: {
+                // `n<0` clamps to 0 ("instant", the same as `n==0`); a
+                // nonzero speed carries a fixed +8 offset. Both quirks
+                // straight from the reference's `#MSG_SPEED` handling.
+                let n = gameexe
+                    .get_value("MSG_SPEED")
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+                    .unwrap_or(0)
+                    .max(0);
+                let n = if n == 0 { 0 } else { n + 8 };
+                (n as u32).saturating_mul(1_000)
+            },
         }
     }
 
@@ -126,6 +139,13 @@ impl Avg32Config {
 
     pub const fn message_font_size(&self) -> [i32; 2] {
         self.message_font_size
+    }
+
+    /// Per-character text reveal delay; `0` means "reveal instantly"
+    /// (`MSG_SPEED=0`, e.g. AIR — every AVG32 title with no configured
+    /// typing speed already displays text all at once).
+    pub const fn message_speed_microseconds(&self) -> u32 {
+        self.message_speed_microseconds
     }
 }
 

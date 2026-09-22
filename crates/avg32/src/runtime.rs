@@ -76,6 +76,9 @@ impl Avg32Runtime {
     }
 
     pub fn tick(&mut self) -> Result<()> {
+        self.message.tick(Duration::from_micros(u64::from(
+            self.game.config.message_speed_microseconds(),
+        )));
         self.animations.tick(&mut self.renderer)?;
         if let Some(fade) = &mut self.fade {
             fade.tick(&mut self.renderer);
@@ -194,6 +197,19 @@ impl Avg32Runtime {
             }));
         }
         if self.animations.single_active() {
+            return Ok(VmStop::Yield(VmAction::Wait {
+                microseconds: 1_000,
+                cancellable_flag: None,
+            }));
+        }
+        if self.message.is_revealing() {
+            // The VM is already sitting on the `WaitForInput` this text
+            // belongs to (see `text.rs` doc comment): a click/advance here
+            // completes the reveal instead of dismissing the line — a
+            // second one, once fully revealed, is what actually advances.
+            if input.is_advance_gesture() {
+                self.message.reveal_all();
+            }
             return Ok(VmStop::Yield(VmAction::Wait {
                 microseconds: 1_000,
                 cancellable_flag: None,
