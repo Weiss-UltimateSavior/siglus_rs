@@ -574,7 +574,10 @@ impl FontCache {
         match self.font.as_ref() {
             Some(font) => text_line_metrics_ab_glyph(font, text, font_px, max_w, max_h),
             // The basic fallback renderer breaks on '\n' only; approximate its pitch.
-            None => (text.lines().count().max(1), (font_px.max(1.0) * 1.3).max(1.0)),
+            None => (
+                text.lines().count().max(1),
+                (font_px.max(1.0) * 1.3).max(1.0),
+            ),
         }
     }
 

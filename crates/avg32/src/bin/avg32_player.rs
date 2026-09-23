@@ -1,24 +1,21 @@
-//! Minimal desktop presentation shell for the platform-neutral AVG32 runtime.
-//!
-//! The engine keeps graphics and VM state in `avg32`; this binary is merely a
-//! 640x480 RGBA uploader plus conventional mouse/keyboard input routing.
+//! Desktop shell for the AVG32 engine: uploads the engine's 640x480 frame
+//! and routes mouse, keyboard and IME text input to it.
 
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use ab_glyph::{Font, FontVec, Glyph, PxScale, point};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::monitor::Fullscreen;
 use winit::window::{Window, WindowId};
 
-use avg32::runtime::Avg32Runtime;
-use avg32::surface::{AVG32_HEIGHT, AVG32_WIDTH};
-use avg32::vm::{Input, VmAction, VmStop};
+use avg32::system::HostRequest;
+use avg32::{AVG32_HEIGHT, AVG32_WIDTH, Avg32Engine, EngineOptions, Key, Nls};
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var frame_texture: texture_2d<f32>;
@@ -57,6 +54,11 @@ struct Args {
     /// Integer window scale for the original 640x480 framebuffer.
     #[arg(long, default_value_t = 2)]
     scale: u32,
+
+    /// Text encoding of the scenario and configuration: sjis, gbk, big5 or
+    /// utf8. File names that are not found fall back to Shift-JIS.
+    #[arg(long, default_value_t = Nls::Sjis)]
+    nls: Nls,
 }
 
 /// Fits the fixed 640x480 AVG32 framebuffer into an arbitrarily resized
@@ -83,7 +85,7 @@ fn aspect_fit_viewport(
 }
 
 struct PlayerState {
-    runtime: Avg32Runtime,
+    engine: Avg32Engine,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -92,28 +94,25 @@ struct PlayerState {
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     cursor: (f64, f64),
-    text_font: Option<FontVec>,
-    buffer_text: Vec<BufferText>,
-    choice: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone)]
-struct BufferText {
-    buffer: u32,
-    position: [i32; 2],
-    color: [i32; 3],
-    text: String,
+    modifiers: ModifiersState,
+    title: String,
 }
 
 impl PlayerState {
-    async fn new(window: &'static dyn Window, root: PathBuf) -> Result<Self> {
-        let mut runtime = Avg32Runtime::open(&root)
+    async fn new(window: &'static dyn Window, root: PathBuf, nls: Nls) -> Result<Self> {
+        let options = EngineOptions {
+            nls,
+            ..EngineOptions::default()
+        };
+        let mut engine = Avg32Engine::open(&root, options)
             .with_context(|| format!("open AVG32 game at {}", root.display()))?;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos() as u64)
             .unwrap_or(0);
-        runtime.seed_rng(seed);
+        engine.seed_random(seed);
+        #[allow(deprecated)]
+        window.set_ime_allowed(true);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -261,7 +260,7 @@ impl PlayerState {
             multiview: None,
         });
         Ok(Self {
-            runtime,
+            engine,
             surface,
             device,
             queue,
@@ -270,81 +269,9 @@ impl PlayerState {
             bind_group,
             pipeline,
             cursor: (0.0, 0.0),
-            text_font: load_system_font(),
-            buffer_text: Vec::new(),
-            choice: None,
+            modifiers: ModifiersState::empty(),
+            title: String::new(),
         })
-    }
-
-    fn drive(&mut self, input: Input) -> Result<()> {
-        if matches!(input, Input::Choice(_)) {
-            self.choice = None;
-        }
-        let mut input = input;
-        for _ in 0..512 {
-            let outcome = self.runtime.advance(input, 65_536)?;
-            if let VmStop::Yield(action) = &outcome {
-                self.apply_frontend_action(action);
-            }
-            match outcome {
-                VmStop::Ended | VmStop::Yield(VmAction::End) => return Ok(()),
-                VmStop::Yield(
-                    VmAction::WaitForInput { .. }
-                    | VmAction::WaitForPointer
-                    | VmAction::Wait { .. }
-                    | VmAction::Choice { .. },
-                ) => return Ok(()),
-                VmStop::Yield(_) => input = Input::None,
-            }
-        }
-        bail!("AVG32 front-end exceeded 512 consecutive yield actions")
-    }
-
-    fn apply_frontend_action(&mut self, action: &VmAction) {
-        match action {
-            VmAction::DrawBufferText {
-                buffer,
-                position,
-                color,
-                text,
-            } => self.buffer_text.push(BufferText {
-                buffer: *buffer,
-                position: *position,
-                color: *color,
-                text: text.clone(),
-            }),
-            VmAction::Choice { items, .. } => self.choice = Some(items.clone()),
-            VmAction::ClearGraphicBuffers => self.buffer_text.retain(|item| item.buffer == 0),
-            VmAction::CompositeGraphic { .. } => self
-                .buffer_text
-                .retain(|item| item.buffer != 0 && item.buffer != 1),
-            VmAction::LoadGraphic { target, .. }
-            | VmAction::BufferFill { buffer: target, .. }
-            | VmAction::BufferOutline { buffer: target, .. }
-            | VmAction::BufferInvert { buffer: target, .. }
-            | VmAction::BufferColorMask { buffer: target, .. }
-            | VmAction::BufferFade { buffer: target, .. }
-            | VmAction::BufferMonochrome { buffer: target, .. }
-            | VmAction::BufferStretchCopy {
-                destination: target,
-                ..
-            }
-            | VmAction::BufferScroll {
-                destination: target,
-                ..
-            } => self.buffer_text.retain(|item| item.buffer != *target),
-            VmAction::BufferCopy { destination, .. } => {
-                self.buffer_text.retain(|item| item.buffer != *destination)
-            }
-            VmAction::BufferSwap {
-                source,
-                destination,
-                ..
-            } => self
-                .buffer_text
-                .retain(|item| item.buffer != *source && item.buffer != *destination),
-            _ => {}
-        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -367,58 +294,38 @@ impl PlayerState {
         )
     }
 
-    fn pointer_input(&self, button: i32) -> Input {
+    fn game_position(&self) -> (i32, i32) {
         let (vx, vy, vw, vh) = self.viewport();
         let x = ((self.cursor.0 - f64::from(vx)) * f64::from(AVG32_WIDTH) / f64::from(vw.max(1)))
             .floor() as i32;
         let y = ((self.cursor.1 - f64::from(vy)) * f64::from(AVG32_HEIGHT) / f64::from(vh.max(1)))
             .floor() as i32;
-        Input::Pointer { x, y, button }
+        (x, y)
     }
 
-    fn choice_at_pointer(&self) -> Option<usize> {
-        let items = self.choice.as_ref()?;
-        let position = self.runtime.config().message_position();
-        let line_height = self.runtime.config().message_font_size()[1].max(1);
-        let Input::Pointer { x, y, .. } = self.pointer_input(0) else {
-            unreachable!("pointer_input always produces pointer input")
-        };
-        if x < position[0] || y < position[1] {
-            return None;
+    fn render(&mut self, window: &dyn Window) -> Result<bool> {
+        self.engine.tick();
+        for warning in self.engine.take_warnings() {
+            eprintln!("avg32: {warning}");
         }
-        let index = ((y - position[1]) / line_height) as usize;
-        (index < items.len()).then_some(index)
-    }
-
-    fn render(&mut self) -> Result<()> {
-        self.runtime.tick()?;
-        self.drive(Input::None)?;
-        let mut pixels = self.runtime.renderer().display().pixels().to_vec();
-        if let Some(font) = &self.text_font {
-            draw_message(
-                font,
-                &mut pixels,
-                self.runtime.message(),
-                self.runtime.config(),
-            );
-            for item in self.buffer_text.iter().filter(|item| item.buffer == 0) {
-                draw_text(
-                    font,
-                    &mut pixels,
-                    &item.text,
-                    item.position,
-                    [
-                        item.color[0] as u8,
-                        item.color[1] as u8,
-                        item.color[2] as u8,
-                    ],
-                    self.runtime.config().message_font_size()[1].max(1),
-                );
-            }
-            if let Some(items) = &self.choice {
-                draw_choices(font, &mut pixels, items, self.runtime.config());
+        for request in self.engine.take_requests() {
+            match request {
+                HostRequest::ToggleFullscreen(_) => {
+                    let fullscreen = window.fullscreen().is_some();
+                    window.set_fullscreen((!fullscreen).then_some(Fullscreen::Borderless(None)));
+                }
+                HostRequest::Quit => return Ok(false),
             }
         }
+        if !self.engine.running() {
+            return Ok(false);
+        }
+        if self.engine.window_title() != self.title {
+            self.title = self.engine.window_title().to_owned();
+            window.set_title(&self.title);
+        }
+        window.set_cursor_visible(self.engine.cursor_visible());
+        let pixels = self.engine.frame_rgba();
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.frame_texture,
@@ -442,9 +349,9 @@ impl PlayerState {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.surface.configure(&self.device, &self.configuration);
-                return Ok(());
+                return Ok(true);
             }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(wgpu::SurfaceError::Timeout) => return Ok(true),
             Err(wgpu::SurfaceError::OutOfMemory) => bail!("GPU surface out of memory"),
         };
         let view = frame
@@ -479,120 +386,24 @@ impl PlayerState {
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        Ok(())
+        Ok(true)
     }
 }
 
-fn load_system_font() -> Option<FontVec> {
-    #[cfg(target_os = "macos")]
-    const CANDIDATES: &[&str] = &[
-        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    ];
-    #[cfg(target_os = "windows")]
-    const CANDIDATES: &[&str] = &[
-        r"C:\Windows\Fonts\msgothic.ttc",
-        r"C:\Windows\Fonts\meiryo.ttc",
-    ];
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    ];
-    CANDIDATES.iter().find_map(|path| {
-        let bytes = std::fs::read(path).ok()?;
-        (0..8).find_map(|index| FontVec::try_from_vec_and_index(bytes.clone(), index).ok())
+fn map_key(code: KeyCode) -> Option<Key> {
+    Some(match code {
+        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::ArrowUp => Key::Up,
+        KeyCode::ArrowDown => Key::Down,
+        KeyCode::ArrowLeft => Key::Left,
+        KeyCode::ArrowRight => Key::Right,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Space => Key::Space,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Backspace => Key::Backspace,
+        _ => return None,
     })
-}
-
-fn draw_message(
-    font: &FontVec,
-    pixels: &mut [u8],
-    message: &avg32::text::MessageWindow,
-    config: &avg32::config::Avg32Config,
-) {
-    if !message.visible {
-        return;
-    }
-    let position = config.message_position();
-    let font_size = config.message_font_size();
-    let scale = PxScale::from(font_size[1].max(1) as f32);
-    let line_height = font_size[1].max(1) as f32;
-    let color = config.color(message.color_index);
-    let mut baseline = position[1] as f32 + font.ascent_unscaled() * scale.y;
-    for line in message.lines() {
-        draw_text(
-            font,
-            pixels,
-            line,
-            [position[0], baseline as i32],
-            color,
-            font_size[1],
-        );
-        baseline += line_height;
-    }
-}
-
-fn draw_text(
-    font: &FontVec,
-    pixels: &mut [u8],
-    text: &str,
-    position: [i32; 2],
-    color: [u8; 3],
-    size: i32,
-) {
-    let scale = PxScale::from(size.max(1) as f32);
-    let mut x = position[0] as f32;
-    for character in text.chars() {
-        let glyph = font
-            .glyph_id(character)
-            .with_scale_and_position(scale, point(x, position[1] as f32));
-        x += font.h_advance_unscaled(glyph.id) * scale.x;
-        let Some(outline) = font.outline_glyph(glyph) else {
-            continue;
-        };
-        let bounds = outline.px_bounds();
-        outline.draw(|glyph_x, glyph_y, coverage| {
-            let x = glyph_x as i32 + bounds.min.x as i32;
-            let y = glyph_y as i32 + bounds.min.y as i32;
-            if x < 0 || y < 0 || x >= AVG32_WIDTH as i32 || y >= AVG32_HEIGHT as i32 {
-                return;
-            }
-            let at = (y as usize * AVG32_WIDTH as usize + x as usize) * 4;
-            let alpha = coverage * 255.0;
-            for component in 0..3 {
-                pixels[at + component] = ((pixels[at + component] as f32 * (255.0 - alpha)
-                    + color[component] as f32 * alpha)
-                    / 255.0) as u8;
-            }
-            pixels[at + 3] = 255;
-        });
-    }
-}
-
-fn draw_choices(
-    font: &FontVec,
-    pixels: &mut [u8],
-    items: &[String],
-    config: &avg32::config::Avg32Config,
-) {
-    let position = config.message_position();
-    let size = config.message_font_size()[1].max(1);
-    let color = config.color(0);
-    let baseline = font.ascent_unscaled() * size as f32;
-    for (index, item) in items.iter().enumerate() {
-        draw_text(
-            font,
-            pixels,
-            item,
-            [
-                position[0],
-                position[1] + baseline as i32 + size * index as i32,
-            ],
-            color,
-            size,
-        );
-    }
 }
 
 struct App {
@@ -609,18 +420,8 @@ impl ApplicationHandler for App {
         let scale = self.args.scale.max(1);
         let window = match event_loop.create_window(
             winit::window::WindowAttributes::default()
-                .with_title("AVG32 player")
-                // The window is freely resizable by dragging its edges, like
-                // siglus_scene_vm's desktop shell; the 640x480 framebuffer is
-                // letterboxed into whatever size the player drags it to
-                // instead of being stretched (see `aspect_fit_viewport`).
+                .with_title("AVG32")
                 .with_resizable(true)
-                // Physical (not logical) pixels: the requested size is the
-                // game's own 640x480 times the integer `--scale` factor,
-                // full stop. Using `LogicalSize` here would let the OS's
-                // HiDPI scale factor multiply the window again on top of
-                // that (e.g. a 2x scale on a 2x Retina display silently
-                // becoming a 4x window), which is never what `--scale` means.
                 .with_surface_size(PhysicalSize::new(AVG32_WIDTH * scale, AVG32_HEIGHT * scale))
                 .with_min_surface_size(PhysicalSize::new(AVG32_WIDTH / 4, AVG32_HEIGHT / 4)),
         ) {
@@ -632,13 +433,12 @@ impl ApplicationHandler for App {
             }
         };
         let window: &'static dyn Window = Box::leak(window);
-        match pollster::block_on(PlayerState::new(window, self.args.game_root.clone())) {
-            Ok(mut state) => {
-                if let Err(error) = state.drive(Input::None) {
-                    eprintln!("start AVG32 runtime: {error:#}");
-                    event_loop.exit();
-                    return;
-                }
+        match pollster::block_on(PlayerState::new(
+            window,
+            self.args.game_root.clone(),
+            self.args.nls,
+        )) {
+            Ok(state) => {
                 self.window = Some(window);
                 self.state = Some(state);
                 window.request_redraw();
@@ -665,23 +465,25 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        let result = match event {
+        match event {
             WindowEvent::CloseRequested => {
+                state.engine.shutdown();
                 event_loop.exit();
-                Ok(())
             }
-            WindowEvent::SurfaceResized(size) => {
-                state.resize(size.width, size.height);
-                Ok(())
-            }
+            WindowEvent::SurfaceResized(size) => state.resize(size.width, size.height),
             WindowEvent::ScaleFactorChanged { .. } => {
                 let size = window.surface_size();
                 state.resize(size.width, size.height);
-                Ok(())
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.modifiers = modifiers.state();
+                let skip = state.modifiers.shift_key() || state.modifiers.control_key();
+                state.engine.set_skip(skip);
             }
             WindowEvent::PointerMoved { position, .. } => {
                 state.cursor = (position.x, position.y);
-                Ok(())
+                let (x, y) = state.game_position();
+                state.engine.mouse_move(x, y);
             }
             WindowEvent::PointerButton {
                 state: ElementState::Released,
@@ -690,60 +492,54 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 state.cursor = (position.x, position.y);
-                let button = button.mouse_button().map_or(0, |button| button as i32);
-                if button != 0 {
-                    if let Some(choice) = state.choice_at_pointer() {
-                        state.drive(Input::Choice(choice))
-                    } else {
-                        state.drive(state.pointer_input(button))
-                    }
-                } else {
-                    state.drive(state.pointer_input(0))
+                let (x, y) = state.game_position();
+                state.engine.mouse_move(x, y);
+                match button.mouse_button() {
+                    Some(MouseButton::Left) => state.engine.mouse_up(false),
+                    Some(MouseButton::Right) => state.engine.mouse_up(true),
+                    _ => {}
                 }
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key:
-                            PhysicalKey::Code(KeyCode::Enter | KeyCode::Space | KeyCode::ArrowDown),
-                        ..
-                    },
-                ..
-            } => state.drive(Input::Advance),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Digit1),
-                        ..
-                    },
-                ..
-            } => state.drive(Input::Choice(0)),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Digit2),
-                        ..
-                    },
-                ..
-            } => state.drive(Input::Choice(1)),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Digit3),
-                        ..
-                    },
-                ..
-            } => state.drive(Input::Choice(2)),
-            WindowEvent::RedrawRequested => state.render(),
-            _ => Ok(()),
-        };
-        if let Err(error) = result {
-            eprintln!("AVG32 runtime: {error:#}");
-            event_loop.exit();
+            WindowEvent::Ime(Ime::Commit(text)) => state.engine.text_input(&text),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    winit::event::MouseScrollDelta::PixelDelta(position) => position.y,
+                    _ => 0.0,
+                };
+                if dy.abs() > 0.0 {
+                    state.engine.wheel(dy > 0.0);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if code == KeyCode::F11 || (code == KeyCode::Enter && state.modifiers.alt_key())
+                    {
+                        let fullscreen = window.fullscreen().is_some();
+                        window
+                            .set_fullscreen((!fullscreen).then_some(Fullscreen::Borderless(None)));
+                    } else if let Some(key) = map_key(code) {
+                        state.engine.key_down(key);
+                    }
+                }
+                if let Some(text) = event.text.as_ref()
+                    && text.chars().all(|c| !c.is_control())
+                {
+                    state.engine.text_input(text);
+                }
+            }
+            WindowEvent::RedrawRequested => match state.render(window) {
+                Ok(true) => {}
+                Ok(false) => {
+                    state.engine.shutdown();
+                    event_loop.exit();
+                }
+                Err(error) => {
+                    eprintln!("AVG32: {error:#}");
+                    event_loop.exit();
+                }
+            },
+            _ => {}
         }
         window.request_redraw();
     }

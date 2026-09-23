@@ -1,17 +1,19 @@
 //! AVG32 `#DIRC.*` resource routing.
 //!
-//! Unlike Siglus, AVG32 chooses a directory and optional PACL container for
-//! every filename extension in `Gameexe.ini`.  Keeping this table explicit is
-//! essential: a title can place scenarios, graphics, audio, and animations in
-//! different loose directories or archives without changing the VM.
+//! Every file type (`PDT`, `TXT`, `ANM`, `ARD`, `CUR`, `WAV`, and `***` for
+//! everything else) names a directory and whether files are loose (`N`) or
+//! packed into a PACL archive (`P:"ARCHIVE"`).  Archives are opened once and
+//! cached.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
-use siglus_assets::gameexe::GameexeConfig;
 
 use crate::archive::PaclArchive;
+use crate::ini::Ini;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceRoute {
@@ -23,143 +25,146 @@ pub struct ResourceRoute {
 pub struct Avg32Resources {
     root: PathBuf,
     routes: BTreeMap<String, ResourceRoute>,
+    archives: RefCell<BTreeMap<PathBuf, Rc<PaclArchive>>>,
 }
 
 impl Avg32Resources {
-    pub fn from_gameexe(root: impl AsRef<Path>, gameexe: &GameexeConfig) -> Self {
+    pub fn from_ini(root: impl AsRef<Path>, ini: &Ini) -> Self {
         let root = root.as_ref().to_path_buf();
-        let mut routes = BTreeMap::new();
-        for entry in &gameexe.entries {
-            let Some(extension) = entry.key.strip_prefix("DIRC.") else {
-                continue;
-            };
-            if extension.is_empty() {
-                continue;
-            }
-            if let Some(route) = parse_route(&root, &entry.value) {
-                routes.insert(extension.to_ascii_uppercase(), route);
-            }
+        let routes = ini
+            .directories
+            .iter()
+            .filter(|(_, directory)| !directory.directory.is_empty())
+            .map(|(kind, directory)| {
+                (
+                    kind.clone(),
+                    ResourceRoute {
+                        directory: resolve_dir(&root, &directory.directory),
+                        archive: (directory.mode == 'P' && !directory.archive.is_empty())
+                            .then(|| PathBuf::from(&directory.archive)),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            root,
+            routes,
+            archives: RefCell::new(BTreeMap::new()),
         }
-        Self { root, routes }
-    }
-
-    pub fn route(&self, extension: &str) -> Option<&ResourceRoute> {
-        self.routes
-            .get(&extension.trim_start_matches('.').to_ascii_uppercase())
-    }
-
-    /// Reads `name` from the route selected by `extension`. The caller owns
-    /// extension semantics; passing `PDT`, `TXT`, `ANM`, `ARD`, `CUR`, or
-    /// `WAV` mirrors AVG32's original file manager.
-    pub fn read(&self, extension: &str, name: &str) -> Result<Vec<u8>> {
-        let extension = extension.trim_start_matches('.').to_ascii_uppercase();
-        let route = self.route(&extension).ok_or_else(|| {
-            anyhow::anyhow!("avg32: Gameexe.ini has no DIRC route for .{extension}")
-        })?;
-        let name = with_extension(name, &extension);
-        if let Some(archive_name) = &route.archive {
-            let archive_path =
-                find_case_insensitive(&route.directory, archive_name).ok_or_else(|| {
-                    anyhow::anyhow!("avg32: archive {} was not found", archive_name.display())
-                })?;
-            return PaclArchive::from_path(&archive_path)?
-                .read(&name)
-                .with_context(|| {
-                    format!(
-                        "failed to open AVG32 resource {name} in {}",
-                        archive_path.display()
-                    )
-                });
-        }
-        let path = find_case_insensitive(&route.directory, Path::new(&name)).ok_or_else(|| {
-            anyhow::anyhow!(
-                "avg32: resource {name} was not found in {}",
-                route.directory.display()
-            )
-        })?;
-        std::fs::read(&path)
-            .with_context(|| format!("failed to read AVG32 resource {}", path.display()))
-    }
-
-    /// Routes with `=N` are loose files. The returned paths are useful to an
-    /// audio backend that streams rather than buffering a whole file.
-    pub fn loose_path(&self, extension: &str, name: &str) -> Result<PathBuf> {
-        let extension = extension.trim_start_matches('.').to_ascii_uppercase();
-        let route = self.route(&extension).ok_or_else(|| {
-            anyhow::anyhow!("avg32: Gameexe.ini has no DIRC route for .{extension}")
-        })?;
-        if route.archive.is_some() {
-            bail!("avg32: .{extension} is stored in a PACL archive, not a loose file");
-        }
-        let name = with_extension(name, &extension);
-        find_case_insensitive(&route.directory, Path::new(&name)).ok_or_else(|| {
-            anyhow::anyhow!(
-                "avg32: resource {name} was not found in {}",
-                route.directory.display()
-            )
-        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
-}
 
-fn parse_route(root: &Path, value: &str) -> Option<ResourceRoute> {
-    let (directory, storage) = value.split_once('=')?;
-    let directory = unquote(directory.trim());
-    if directory.is_empty() {
-        return None;
+    /// The route for a file type; unknown types use `***`.
+    pub fn route(&self, kind: &str) -> Option<&ResourceRoute> {
+        let kind = kind.trim_start_matches('.').to_ascii_uppercase();
+        self.routes.get(&kind).or_else(|| self.routes.get("***"))
     }
-    let storage = storage.trim();
-    let mode = storage.as_bytes().first().copied()?.to_ascii_uppercase();
-    let archive = storage
-        .get(1..)
-        .and_then(|tail| tail.trim().strip_prefix(':'))
-        .map(str::trim)
-        .map(unquote)
-        .filter(|name| !name.is_empty())
-        .map(PathBuf::from);
-    // P means a PACL container. N describes a loose-name route; its optional
-    // catalogue name is metadata, not an archive to read.
-    Some(ResourceRoute {
-        directory: root.join(directory),
-        archive: (mode == b'P').then_some(archive).flatten(),
-    })
+
+    fn archive(&self, path: &Path) -> Result<Rc<PaclArchive>> {
+        if let Some(archive) = self.archives.borrow().get(path) {
+            return Ok(archive.clone());
+        }
+        let archive = Rc::new(PaclArchive::from_path(path)?);
+        self.archives
+            .borrow_mut()
+            .insert(path.to_path_buf(), archive.clone());
+        Ok(archive)
+    }
+
+    /// Reads `name` routed by `kind` (which also supplies the default
+    /// extension).  Packed routes fall back to loose files of the same
+    /// directory so partially-extracted installs keep working.
+    pub fn read(&self, kind: &str, name: &str) -> Result<Vec<u8>> {
+        let kind = kind.trim_start_matches('.').to_ascii_uppercase();
+        let name = with_extension(name.trim(), &kind);
+        let route = self
+            .route(&kind)
+            .ok_or_else(|| anyhow::anyhow!("avg32: no route for .{kind} files"))?;
+        if let Some(archive_name) = &route.archive {
+            if let Some(archive_path) = find_case_insensitive(&route.directory, archive_name) {
+                let archive = self.archive(&archive_path)?;
+                if archive.entry(&name).is_some() {
+                    return archive.read(&name).with_context(|| {
+                        format!("failed to open {name} in {}", archive_path.display())
+                    });
+                }
+            }
+        }
+        let path = find_case_insensitive(&route.directory, Path::new(&name))
+            .or_else(|| find_case_insensitive(&self.root, Path::new(&name)))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "avg32: resource {name} was not found in {}",
+                    route.directory.display()
+                )
+            })?;
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
+    }
+
+    pub fn exists(&self, kind: &str, name: &str) -> bool {
+        self.read(kind, name).is_ok()
+    }
+
+    /// Path of a loose file (for streaming backends).
+    pub fn loose_path(&self, kind: &str, name: &str) -> Result<PathBuf> {
+        let kind = kind.trim_start_matches('.').to_ascii_uppercase();
+        let route = self
+            .route(&kind)
+            .ok_or_else(|| anyhow::anyhow!("avg32: no route for .{kind} files"))?;
+        if route.archive.is_some() {
+            bail!("avg32: .{kind} is stored in a PACL archive, not a loose file");
+        }
+        let name = with_extension(name, &kind);
+        find_case_insensitive(&route.directory, Path::new(&name))
+            .ok_or_else(|| anyhow::anyhow!("avg32: resource {name} was not found"))
+    }
 }
 
-fn unquote(value: &str) -> &str {
-    let value = value.trim();
-    value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(value)
+fn resolve_dir(root: &Path, directory: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for part in directory
+        .split(['/', '\\', ':'])
+        .filter(|part| !part.is_empty())
+    {
+        path = find_case_insensitive(&path, Path::new(part)).unwrap_or_else(|| path.join(part));
+    }
+    path
 }
 
-fn with_extension(name: &str, extension: &str) -> String {
-    if Path::new(name).extension().is_some() {
+pub fn with_extension(name: &str, extension: &str) -> String {
+    if extension == "***" || Path::new(name).extension().is_some() {
         name.to_owned()
     } else {
         format!("{name}.{extension}")
     }
 }
 
-fn find_case_insensitive(directory: &Path, wanted: &Path) -> Option<PathBuf> {
+pub fn find_case_insensitive(directory: &Path, wanted: &Path) -> Option<PathBuf> {
     let mut current = directory.to_path_buf();
     for component in wanted.components() {
         let component = component.as_os_str().to_str()?;
-        current = std::fs::read_dir(&current)
-            .ok()?
-            .flatten()
-            .find_map(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .filter(|name| name.eq_ignore_ascii_case(component))
-                    .map(|_| entry.path())
-            })?;
+        current = find_component(&current, component)?;
     }
     Some(current)
+}
+
+/// One directory entry matched case-insensitively. A name that is not
+/// found is retried with its Shift-JIS reading (see [`crate::nls`]).
+pub fn find_component(directory: &Path, wanted: &str) -> Option<PathBuf> {
+    let entries: Vec<_> = std::fs::read_dir(directory).ok()?.flatten().collect();
+    let find = |wanted: &str| {
+        entries.iter().find_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .filter(|name| name.eq_ignore_ascii_case(wanted))
+                .map(|_| entry.path())
+        })
+    };
+    find(wanted).or_else(|| find(&crate::nls::sjis_fallback(wanted)?))
 }
 
 #[cfg(test)]
@@ -167,21 +172,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_loose_and_pacl_routes() {
-        let root = Path::new("/game");
+    fn routes_follow_the_ini_and_fall_back_to_the_other_route() {
+        let ini = Ini::parse(
+            "#DIRC.PDT=\"PDT\" =N:\"ALLPDT.PDL\"\n#DIRC.TXT=\"DAT\" =P:\"SEEN.TXT\"\n#DIRC.***=\"DAT\" =N\n",
+            None,
+        );
+        let resources = Avg32Resources::from_ini("/game", &ini);
+        assert_eq!(resources.route("PDT").unwrap().archive, None);
         assert_eq!(
-            parse_route(root, "\"PDT\" =N:\"ALLPDT.PDL\"").unwrap(),
-            ResourceRoute {
-                directory: PathBuf::from("/game/PDT"),
-                archive: None,
-            }
+            resources.route("TXT").unwrap().archive,
+            Some(PathBuf::from("SEEN.TXT"))
         );
         assert_eq!(
-            parse_route(root, "\"DAT\" =P:\"SEEN.TXT\"").unwrap(),
-            ResourceRoute {
-                directory: PathBuf::from("/game/DAT"),
-                archive: Some(PathBuf::from("SEEN.TXT")),
-            }
+            resources.route("CGM").unwrap().directory,
+            PathBuf::from("/game/DAT")
         );
     }
 
@@ -189,5 +193,6 @@ mod tests {
     fn keeps_an_explicit_extension() {
         assert_eq!(with_extension("seen002", "TXT"), "seen002.TXT");
         assert_eq!(with_extension("seen002.txt", "TXT"), "seen002.txt");
+        assert_eq!(with_extension("MODE.CGM", "***"), "MODE.CGM");
     }
 }

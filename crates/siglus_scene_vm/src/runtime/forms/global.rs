@@ -2457,12 +2457,7 @@ mod koe_wait_return_tests {
         });
 
         assert!(
-            dispatch_global_form(
-                &mut ctx,
-                constants::elm_value::GLOBAL_NOP as u32,
-                &[],
-            )
-            .unwrap()
+            dispatch_global_form(&mut ctx, constants::elm_value::GLOBAL_NOP as u32, &[],).unwrap()
         );
         assert!(ctx.stack.is_empty());
         assert!(!ctx.wait_poll());

@@ -32,35 +32,56 @@ const MPEG_AUDIO_SEEK_INITIAL_BACKTRACK_BYTES: u64 = 512 * 1024;
 const MPEG_AUDIO_SEEK_MAX_PRIME_BYTES: u64 = 16 * 1024 * 1024;
 const MPEG_VIDEO_SEEK_BACKTRACK_BYTES: u64 = 8 * 1024 * 1024;
 const MPEG_VIDEO_SEEK_FORWARD_PROBE_BYTES: u64 = 1024 * 1024;
+#[cfg(not(target_os = "vita"))]
 const MPEG2_STREAM_CHANNEL_CAPACITY: usize = 4;
+#[cfg(target_os = "vita")]
+const MPEG2_STREAM_CHANNEL_CAPACITY: usize = 2;
 const MPEG2_STREAM_MAX_DRAIN_EVENTS: usize = 8;
+#[cfg(not(target_os = "vita"))]
 const MPEG2_STREAM_FRAME_KEEP: usize = 6;
+#[cfg(target_os = "vita")]
+const MPEG2_STREAM_FRAME_KEEP: usize = 2;
 const MPEG2_STREAM_DECODE_LEAD_FRAMES: usize = 3;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 const OMV_STREAM_CHANNEL_CAPACITY: usize = 12;
 #[cfg(target_os = "horizon")]
 const OMV_STREAM_CHANNEL_CAPACITY: usize = 4;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(target_os = "vita")]
+const OMV_STREAM_CHANNEL_CAPACITY: usize = 2;
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 const OMV_STREAM_MAX_DRAIN_EVENTS: usize = 16;
-#[cfg(target_os = "horizon")]
+#[cfg(any(target_os = "horizon", target_os = "vita"))]
 const OMV_STREAM_MAX_DRAIN_EVENTS: usize = 8;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 const OMV_STREAM_FRAME_KEEP: usize = 16;
 #[cfg(target_os = "horizon")]
 const OMV_STREAM_FRAME_KEEP: usize = 6;
+#[cfg(target_os = "vita")]
+const OMV_STREAM_FRAME_KEEP: usize = 2;
 const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 4;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 const OMV_LOOP_HEAD_CACHE_MAX_FRAMES: usize = 60;
-#[cfg(target_os = "horizon")]
+#[cfg(any(target_os = "horizon", target_os = "vita"))]
 const OMV_LOOP_HEAD_CACHE_MAX_FRAMES: usize = 4;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(target_os = "horizon")]
 const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(target_os = "vita")]
+const OMV_LOOP_HEAD_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(not(target_os = "vita"))]
 const WMV_STREAM_CHANNEL_CAPACITY: usize = 8;
+#[cfg(target_os = "vita")]
+const WMV_STREAM_CHANNEL_CAPACITY: usize = 2;
 const WMV_STREAM_MAX_DRAIN_EVENTS: usize = 16;
+#[cfg(not(target_os = "vita"))]
 const WMV_STREAM_FRAME_KEEP: usize = 12;
+#[cfg(target_os = "vita")]
+const WMV_STREAM_FRAME_KEEP: usize = 3;
+#[cfg(not(target_os = "vita"))]
 const WMV_STREAM_DECODE_LEAD_MS: usize = 750;
+#[cfg(target_os = "vita")]
+const WMV_STREAM_DECODE_LEAD_MS: usize = 150;
 
 #[derive(Debug, Clone)]
 pub struct MovieInfo {
@@ -461,6 +482,17 @@ impl MovieManager {
         self.wmv_streams.clear();
         self.wmv_audio_tasks.clear();
         self.omv_streams.clear();
+        #[cfg(target_os = "vita")]
+        {
+            // The desktop cache favors replay latency. On Vita, retaining
+            // decoded frames and whole-track PCM after playback can exhaust
+            // user memory as the scenario visits more movies.
+            self.cache.clear();
+            self.preview_cache.clear();
+            self.decode_tasks.clear();
+            self.mpeg2_audio_cache.clear();
+            self.wmv_audio_cache.clear();
+        }
     }
 
     pub fn prepare(&mut self, file_name: &str) -> Result<MovieInfo> {

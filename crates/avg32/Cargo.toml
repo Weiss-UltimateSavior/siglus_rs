@@ -8,15 +8,14 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 encoding_rs = "0.8"
-siglus_assets = { path = "../siglus_assets" }
+ab_glyph = "0.2"
 
 [features]
-desktop-player = ["dep:ab_glyph", "dep:bytemuck", "dep:clap", "dep:pollster", "dep:wgpu", "dep:winit"]
+desktop-player = ["dep:bytemuck", "dep:clap", "dep:pollster", "dep:wgpu", "dep:winit"]
 
 [target.'cfg(not(target_os = "horizon"))'.dependencies]
 kira.workspace = true
 oxideav-cinepak = { version = "0.0.3", default-features = false }
-ab_glyph = { version = "0.2", optional = true }
 bytemuck = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }

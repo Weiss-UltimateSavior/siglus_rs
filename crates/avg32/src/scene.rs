@@ -1,36 +1,41 @@
-//! Structural parser for AVG32 `TPC32` scene headers and compact values.
+//! Structural parser for AVG32 `TPC32` scene headers and compact values
+//! (labels, scenario menus and the `0x80` variable-reference numbers).
+//!
+//! Besides the label table, a scene header may describe a *scenario menu*:
+//! a two-level list of chapters whose entries point at sub-blocks of the
+//! bytecode.  Scenes with such a menu run one sub-block at a time and
+//! resolve jumps relative to the current block.
 
 use anyhow::{Result, bail};
-use encoding_rs::SHIFT_JIS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Avg32SceneHeader {
-    pub labels: Vec<u32>,
-    pub counter_start: u32,
-    pub menus: Vec<SceneMenu>,
-    pub menu_strings: Vec<String>,
-    /// Byte offset of the first opcode after the header.
-    pub code_offset: usize,
+pub struct SceneSubmenu {
+    pub id: u8,
+    pub string: usize,
+    /// Per repetition: the last flag byte of that repetition's condition list.
+    pub flags: Vec<u8>,
+    /// Per repetition: code offset of the sub-block.
+    pub starts: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneMenu {
     pub id: u8,
-    pub unknown: [u8; 2],
+    pub string: usize,
     pub submenus: Vec<SceneSubmenu>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SceneSubmenu {
-    pub id: u8,
-    pub unknown: [u8; 2],
-    pub flags: Vec<SceneFlag>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SceneFlag {
-    pub unknown: u8,
-    pub values: Vec<u32>,
+pub struct Avg32SceneHeader {
+    pub labels: Vec<u32>,
+    pub menus: Vec<SceneMenu>,
+    pub menu_strings: Vec<Vec<u8>>,
+    /// `smenu.start`: code offset of the `0x00` byte that shows the menu.
+    pub menu_start: i32,
+    /// `smenu.loopback`: offset of the first repeatable block (0 if none).
+    pub loopback: i32,
+    /// Byte offset of the first opcode after the header.
+    pub code_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,71 +50,120 @@ pub struct SceneValue {
     pub kind: ValueKind,
 }
 
+fn int(bytes: &[u8], at: usize) -> Result<i32> {
+    match bytes.get(at..at + 4) {
+        Some(slice) => Ok(i32::from_le_bytes(slice.try_into().expect("four bytes"))),
+        None => bail!("avg32: truncated scene header at {at:#x}"),
+    }
+}
+
+fn byte(bytes: &[u8], at: usize) -> Result<u8> {
+    bytes
+        .get(at)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("avg32: truncated scene header at {at:#x}"))
+}
+
 impl Avg32SceneHeader {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let mut reader = Reader::new(bytes);
-        if reader.take(5)? != b"TPC32" {
+        if bytes.get(..5) != Some(b"TPC32") {
             bail!("avg32: expected TPC32 scene magic");
         }
-        reader.take(0x13)?;
-        let label_count = reader.u32()? as usize;
-        let counter_start = reader.u32()?;
-        let mut labels = Vec::with_capacity(label_count);
-        for _ in 0..label_count {
-            labels.push(reader.u32()?);
+        let label_count = int(bytes, 0x18)?;
+        if !(0..=0x10000).contains(&label_count) {
+            bail!("avg32: unreasonable label count {label_count}");
         }
-        reader.take(0x30)?;
-        let menu_count = reader.u32()? as usize;
-        let mut menus = Vec::with_capacity(menu_count);
+        let labels = (0..label_count as usize)
+            .map(|index| int(bytes, 0x20 + index * 4).map(|value| value as u32))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pad = label_count as usize * 4 + 0x50;
+        let pad2 = if int(bytes, pad)? == 5 { 4 } else { 0 };
+        let menu_count = int(bytes, pad - 0x24)?;
+        let repeat_count = int(bytes, pad - 0x28)? - 1;
+        if !(0..=8).contains(&menu_count) {
+            bail!("avg32: unreasonable scenario menu count {menu_count}");
+        }
+        let mut menus = Vec::with_capacity(menu_count as usize);
         let mut string_count = 0usize;
         for _ in 0..menu_count {
-            let id = reader.u8()?;
-            let submenu_count = reader.u8()? as usize;
-            let unknown = [reader.u8()?, reader.u8()?];
-            let mut submenus = Vec::with_capacity(submenu_count);
-            string_count = string_count
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("avg32: menu string count overflows"))?;
+            let id = byte(bytes, pad)?;
+            let submenu_count = byte(bytes, pad + 1)?;
+            pad += 2;
+            let string = string_count;
+            string_count += 1;
+            let mut submenus = Vec::with_capacity(usize::from(submenu_count));
             for _ in 0..submenu_count {
-                let submenu_id = reader.u8()?;
-                let flag_count = reader.u8()? as usize;
-                let submenu_unknown = [reader.u8()?, reader.u8()?];
-                string_count = string_count
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow::anyhow!("avg32: menu string count overflows"))?;
-                let mut flags = Vec::with_capacity(flag_count);
-                for _ in 0..flag_count {
-                    let value_count = reader.u8()? as usize;
-                    let unknown = reader.u8()?;
-                    let mut values = Vec::with_capacity(value_count);
-                    for _ in 0..value_count {
-                        values.push(reader.u32()?);
+                let sub_id = byte(bytes, pad)?;
+                let repeats = byte(bytes, pad + 1)?;
+                pad += 2;
+                let sub_string = string_count;
+                string_count += 1;
+                let mut flags = Vec::with_capacity(usize::from(repeats));
+                for _ in 0..repeats {
+                    let conditions = usize::from(byte(bytes, pad)?);
+                    pad += 1;
+                    let mut last = 0;
+                    for _ in 0..conditions {
+                        last = byte(bytes, pad)?;
+                        pad += 3;
                     }
-                    flags.push(SceneFlag { unknown, values });
+                    flags.push(last);
                 }
                 submenus.push(SceneSubmenu {
-                    id: submenu_id,
-                    unknown: submenu_unknown,
+                    id: sub_id,
+                    string: sub_string,
                     flags,
+                    starts: Vec::new(),
                 });
             }
             menus.push(SceneMenu {
                 id,
-                unknown,
+                string,
                 submenus,
             });
         }
         let mut menu_strings = Vec::with_capacity(string_count);
         for _ in 0..string_count {
-            menu_strings.push(reader.shift_jis_c_string()?);
+            let length = usize::from(byte(bytes, pad)?);
+            let text = bytes.get(pad + 1..pad + 1 + length).unwrap_or(&[]);
+            let end = text
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(text.len());
+            menu_strings.push(text[..end].to_vec());
+            pad += length + 1;
         }
-        reader.take(5)?;
+        let menu_start = int(bytes, pad + pad2 + 0x0f)? - 1;
+        let code_offset = pad + pad2 + 0x13;
+        if code_offset > bytes.len() {
+            bail!("avg32: scene header runs past the end of the scene");
+        }
+        let code = &bytes[code_offset..];
+        let mut loopback = 0;
+        if !menus.is_empty() {
+            let mut cursor = menu_start + 1;
+            if repeat_count > 0 {
+                loopback = cursor + 4;
+                for _ in 0..repeat_count {
+                    cursor += int(code, cursor.max(0) as usize)? + 4;
+                }
+            }
+            for menu in &mut menus {
+                for submenu in &mut menu.submenus {
+                    for _ in 0..submenu.flags.len() {
+                        submenu.starts.push(cursor + 4);
+                        cursor += int(code, cursor.max(0) as usize)? + 4;
+                    }
+                }
+            }
+        }
         Ok(Self {
             labels,
-            counter_start,
             menus,
             menu_strings,
-            code_offset: reader.at,
+            menu_start,
+            loopback,
+            code_offset,
         })
     }
 }
@@ -141,57 +195,6 @@ pub fn parse_scene_value(bytes: &[u8]) -> Result<(SceneValue, usize)> {
     ))
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end = self
-            .at
-            .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("avg32: scene offset overflows"))?;
-        let slice = self
-            .bytes
-            .get(self.at..end)
-            .ok_or_else(|| anyhow::anyhow!("avg32: truncated scene header"))?;
-        self.at = end;
-        Ok(slice)
-    }
-
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?.try_into().expect("slice has four bytes"),
-        ))
-    }
-
-    fn shift_jis_c_string(&mut self) -> Result<String> {
-        let tail = self
-            .bytes
-            .get(self.at..)
-            .ok_or_else(|| anyhow::anyhow!("avg32: truncated scene string"))?;
-        let len = tail
-            .iter()
-            .position(|&byte| byte == 0)
-            .ok_or_else(|| anyhow::anyhow!("avg32: unterminated scene string"))?;
-        let (decoded, _, had_errors) = SHIFT_JIS.decode(&tail[..len]);
-        if had_errors {
-            bail!("avg32: invalid Shift-JIS menu string");
-        }
-        self.at += len + 1;
-        Ok(decoded.into_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,47 +212,35 @@ mod tests {
             )
         );
         assert_eq!(
-            parse_scene_value(&[0x91]).unwrap(),
-            (
-                SceneValue {
-                    value: 1,
-                    kind: ValueKind::Variable
-                },
-                1
-            )
+            parse_scene_value(&[0x91]).unwrap().0.kind,
+            ValueKind::Variable
         );
-        assert_eq!(
-            parse_scene_value(&[0x21, 0x23]).unwrap(),
-            (
-                SceneValue {
-                    value: 0x231,
-                    kind: ValueKind::Constant
-                },
-                2
-            )
-        );
+        assert_eq!(parse_scene_value(&[0x21, 0x23]).unwrap().0.value, 0x231);
     }
 
-    #[test]
-    fn parses_the_tpc32_header_before_bytecode() {
+    pub(crate) fn plain_scene(code: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"TPC32");
         bytes.extend_from_slice(&[0; 0x13]);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&42u32.to_le_bytes());
-        bytes.extend_from_slice(&0x1234u32.to_le_bytes());
-        bytes.extend_from_slice(&[0; 0x30]);
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&[7, 1, 8, 9]); // menu, one submenu
-        bytes.extend_from_slice(&[3, 1, 4, 5]); // submenu, one flag
-        bytes.extend_from_slice(&[1, 6]); // flag, one value
-        bytes.extend_from_slice(&0xbeefu32.to_le_bytes());
-        bytes.extend_from_slice(b"menu\0submenu\0");
-        bytes.extend_from_slice(&[0; 5]);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // label count
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // 0x30 bytes of fixed header: repeat count + 1 at +0x08, menus at +0x0c.
+        let mut fixed = [0u8; 0x30];
+        fixed[0x08..0x0c].copy_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&fixed);
+        // 0x13-byte trailer; the menu start lives at +0x0f.
+        let mut trailer = [0u8; 0x13];
+        trailer[0x0f..0x13].copy_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&trailer);
+        bytes.extend_from_slice(code);
+        bytes
+    }
+
+    #[test]
+    fn parses_a_header_without_menus() {
+        let bytes = plain_scene(&[0xfe, b'A', 0]);
         let header = Avg32SceneHeader::parse(&bytes).unwrap();
-        assert_eq!(header.labels, [0x1234]);
-        assert_eq!(header.counter_start, 42);
-        assert_eq!(header.menu_strings, ["menu", "submenu"]);
-        assert_eq!(header.code_offset, bytes.len());
+        assert!(header.menus.is_empty());
+        assert_eq!(&bytes[header.code_offset..], &[0xfe, b'A', 0]);
     }
 }

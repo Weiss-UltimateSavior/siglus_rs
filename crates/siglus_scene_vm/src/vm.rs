@@ -6843,9 +6843,8 @@ impl<'a> SceneVm<'a> {
         } else {
             crate::runtime::forms::codes::ELM_ARRAY
         };
-        let is_array = |value: i32| {
-            value == elm_array || value == crate::runtime::forms::codes::ELM_ARRAY
-        };
+        let is_array =
+            |value: i32| value == elm_array || value == crate::runtime::forms::codes::ELM_ARRAY;
         let stage_form = if self.ctx.ids.form_global_stage != 0 {
             self.ctx.ids.form_global_stage as i32
         } else {
@@ -6881,7 +6880,13 @@ impl<'a> SceneVm<'a> {
                     | crate::runtime::forms::codes::elm_value::WORLDLIST_DESTROY_WORLD
             )
         {
-            return Some(vec![stage_form, elm_array, stage_idx as i32, stage_world, elm[1]]);
+            return Some(vec![
+                stage_form,
+                elm_array,
+                stage_idx as i32,
+                stage_world,
+                elm[1],
+            ]);
         }
 
         None

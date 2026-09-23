@@ -83,7 +83,11 @@ impl TnmNet {
     pub fn get_bytes(&mut self, url: &str) -> Result<Vec<u8>> {
         self.clear_status(url);
 
-        #[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "horizon"))]
+        #[cfg(any(
+            all(target_arch = "wasm32", target_os = "unknown"),
+            target_os = "horizon",
+            target_os = "vita"
+        ))]
         {
             let msg = "network GET is unavailable on this platform";
             self.set_error(url, msg);
@@ -91,7 +95,11 @@ impl TnmNet {
             return Err(anyhow!(msg));
         }
 
-        #[cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "horizon")))]
+        #[cfg(not(any(
+            all(target_arch = "wasm32", target_os = "unknown"),
+            target_os = "horizon",
+            target_os = "vita"
+        )))]
         {
             let response = ureq::get(url)
                 .call()
@@ -108,7 +116,11 @@ impl TnmNet {
     pub fn post_bytes(&mut self, url: &str, content_type: &str, body: &[u8]) -> Result<Vec<u8>> {
         self.clear_status(url);
 
-        #[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "horizon"))]
+        #[cfg(any(
+            all(target_arch = "wasm32", target_os = "unknown"),
+            target_os = "horizon",
+            target_os = "vita"
+        ))]
         {
             let msg = "network POST is unavailable on this platform";
             self.set_error(url, msg);
@@ -117,7 +129,11 @@ impl TnmNet {
             return Err(anyhow!(msg));
         }
 
-        #[cfg(not(any(all(target_arch = "wasm32", target_os = "unknown"), target_os = "horizon")))]
+        #[cfg(not(any(
+            all(target_arch = "wasm32", target_os = "unknown"),
+            target_os = "horizon",
+            target_os = "vita"
+        )))]
         {
             let response = ureq::post(url)
                 .set("Content-Type", content_type)

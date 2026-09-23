@@ -1,9 +1,7 @@
-//! Nintendo Switch renderer backend.
+//! CPU scene renderer shared by the Switch and Vita native frontends.
 //!
-//! This module is selected only for Rust's built-in
-//! `aarch64-nintendo-switch-freestanding` target (`target_os = "horizon"`).
-//! The desktop WGPU renderer remains untouched in `render/mod.rs`; the shared
-//! VM submits the same `RenderFrame` to this backend through `switch_host`.
+//! The desktop WGPU renderer stays in `render/mod.rs`; native frontends present
+//! this module's bounded RGBA output through their own display APIs.
 
 use anyhow::Result;
 
@@ -18,8 +16,54 @@ use crate::mesh3d::{MeshAsset, MeshGpuPrimitiveBatch, MeshTriVertex, load_mesh_a
 use crate::render_math::{ProjectedPoint, project_model_point, sprite_quad_points_rect};
 use crate::runtime::FrameCaptureBackend;
 
+#[cfg(target_os = "horizon")]
 unsafe extern "C" {
     fn siglus_switch_present_rgba(pixels: *const u8, width: u32, height: u32, wait_vsync: bool);
+}
+
+#[cfg(target_os = "vita")]
+unsafe extern "C" {
+    fn siglus_vita_present_rgba(pixels: *const u8, width: u32, height: u32, wait_vsync: bool);
+    fn siglus_vita_gpu_begin(width: u32, height: u32) -> bool;
+    fn siglus_vita_gpu_draw(
+        key: u32,
+        pixels: *const u8,
+        image_width: u32,
+        image_height: u32,
+        vertices: *const VitaGpuVertex,
+        clip: *const i32,
+        alpha: f32,
+    ) -> bool;
+    fn siglus_vita_gpu_end(wait_vsync: bool);
+}
+
+#[cfg(target_os = "vita")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VitaGpuVertex {
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32,
+}
+
+#[cfg(target_os = "horizon")]
+fn report_renderer_marker(message: &'static [u8]) {
+    crate::switch_host::report_switch_marker(message);
+}
+
+#[cfg(target_os = "vita")]
+fn report_renderer_marker(_message: &'static [u8]) {}
+
+unsafe fn present_rgba(pixels: *const u8, width: u32, height: u32, wait_vsync: bool) {
+    #[cfg(target_os = "horizon")]
+    unsafe {
+        siglus_switch_present_rgba(pixels, width, height, wait_vsync)
+    };
+    #[cfg(target_os = "vita")]
+    unsafe {
+        siglus_vita_present_rgba(pixels, width, height, wait_vsync)
+    };
 }
 
 /// Native deko3d renderer state.  The handle is owned by the Horizon host and
@@ -39,34 +83,21 @@ impl Renderer {
         let width = width.max(1);
         let height = height.max(1);
         let pixel_count = width as usize * height as usize;
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer rgba allocation begin\n\0",
-        );
+        report_renderer_marker(b"siglus_switch: renderer rgba allocation begin\n\0");
+        #[cfg(target_os = "vita")]
+        let framebuffer = Vec::new();
+        #[cfg(not(target_os = "vita"))]
         let framebuffer = vec![0; pixel_count * 4];
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer rgba allocation complete\n\0",
-        );
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer depth allocation begin\n\0",
-        );
-        let mesh_depth = vec![f32::INFINITY; pixel_count];
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer depth allocation complete\n\0",
-        );
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer mesh-assets map begin\n\0",
-        );
+        report_renderer_marker(b"siglus_switch: renderer rgba allocation complete\n\0");
+        // Most scenes never draw a mesh. A full-resolution f32 depth buffer
+        // costs another 2 MiB at Vita's 960x544 size; allocate it on demand.
+        let mesh_depth = Vec::new();
+        report_renderer_marker(b"siglus_switch: renderer mesh-assets map begin\n\0");
         let mesh_assets = HashMap::new();
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer mesh-assets map complete\n\0",
-        );
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer mesh-textures map begin\n\0",
-        );
+        report_renderer_marker(b"siglus_switch: renderer mesh-assets map complete\n\0");
+        report_renderer_marker(b"siglus_switch: renderer mesh-textures map begin\n\0");
         let mesh_textures = HashMap::new();
-        crate::switch_host::report_switch_marker(
-            b"siglus_switch: renderer mesh-textures map complete\n\0",
-        );
+        report_renderer_marker(b"siglus_switch: renderer mesh-textures map complete\n\0");
         let renderer = Self {
             width,
             height,
@@ -76,12 +107,16 @@ impl Renderer {
             mesh_assets,
             mesh_textures,
         };
-        crate::switch_host::report_switch_marker(b"siglus_switch: renderer object constructed\n\0");
+        report_renderer_marker(b"siglus_switch: renderer object constructed\n\0");
         Ok(renderer)
     }
 
     pub fn adapter_name(&self) -> String {
-        "Nintendo Switch native renderer".to_owned()
+        if cfg!(target_os = "vita") {
+            "PS Vita software renderer".to_owned()
+        } else {
+            "Nintendo Switch native renderer".to_owned()
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -89,8 +124,10 @@ impl Renderer {
         self.height = height.max(1);
         self.framebuffer
             .resize(self.width as usize * self.height as usize * 4, 0);
-        self.mesh_depth
-            .resize(self.width as usize * self.height as usize, f32::INFINITY);
+        if !self.mesh_depth.is_empty() {
+            self.mesh_depth
+                .resize(self.width as usize * self.height as usize, f32::INFINITY);
+        }
     }
 
     pub fn resize_with_scale(&mut self, width: u32, height: u32, _scale_factor: f32) {
@@ -128,6 +165,16 @@ impl Renderer {
     /// consumes `RenderFrame` and `ImageManager` directly: scene/VM/resource
     /// code remains identical to desktop.
     pub fn render_frame(&mut self, images: &ImageManager, frame: &RenderFrame) -> Result<()> {
+        #[cfg(target_os = "vita")]
+        if self.try_render_gpu(images, frame) {
+            return Ok(());
+        }
+        self.render_frame_cpu(images, frame)
+    }
+
+    fn render_frame_cpu(&mut self, images: &ImageManager, frame: &RenderFrame) -> Result<()> {
+        self.framebuffer
+            .resize(self.width as usize * self.height as usize * 4, 0);
         self.framebuffer.fill(0);
         for item in frame.debug_flatten() {
             let sprite = &item.sprite;
@@ -152,7 +199,7 @@ impl Renderer {
             self.blit(images, sprite, &image);
         }
         unsafe {
-            siglus_switch_present_rgba(
+            present_rgba(
                 self.framebuffer.as_ptr(),
                 self.width,
                 self.height,
@@ -160,6 +207,178 @@ impl Renderer {
             )
         };
         Ok(())
+    }
+
+    #[cfg(target_os = "vita")]
+    fn try_render_gpu(&self, images: &ImageManager, frame: &RenderFrame) -> bool {
+        if frame.wipe.is_some() {
+            return false;
+        }
+        let sprites = frame.debug_flatten();
+        if sprites.iter().any(|item| {
+            let sprite = &item.sprite;
+            sprite.visible
+                && (sprite.mesh_kind != 0
+                    || sprite.emote_render.is_some()
+                    || sprite.mask_image_id.is_some()
+                    || sprite.tonecurve_image_id.is_some()
+                    || sprite.wipe_src_image_id.is_some()
+                    || !sprite_has_simple_rgba_effects(sprite, None, None, None))
+        }) {
+            return false;
+        }
+        if !unsafe { siglus_vita_gpu_begin(self.width, self.height) } {
+            return false;
+        }
+        for item in &sprites {
+            let sprite = &item.sprite;
+            if !sprite.visible {
+                continue;
+            }
+            let Some(handle) = sprite.image_id.as_ref() else {
+                continue;
+            };
+            let Some(image) = images.get(handle) else {
+                continue;
+            };
+            if !self.gpu_blit(sprite, handle.key().0, &image) {
+                return false;
+            }
+        }
+        unsafe { siglus_vita_gpu_end(self.wait_display_vsync) };
+        true
+    }
+
+    #[cfg(target_os = "vita")]
+    fn gpu_blit(&self, sprite: &Sprite, key: u32, image: &RgbaImage) -> bool {
+        if image.width == 0 || image.height == 0 || image.width > 2048 || image.height > 2048 {
+            return false;
+        }
+        if image.rgba.len() < image.width as usize * image.height as usize * 4 {
+            return false;
+        }
+        let (dst_x, dst_y, left, top, right, bottom, u0, v0, u1, v1) = match sprite.fit {
+            SpriteFit::FullScreen => {
+                let Some((left, top, right, bottom)) =
+                    clipped_rect(sprite.src_clip, image.width as f32, image.height as f32)
+                else {
+                    return true;
+                };
+                (
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    self.width as f32,
+                    self.height as f32,
+                    left / image.width as f32,
+                    top / image.height as f32,
+                    right / image.width as f32,
+                    bottom / image.height as f32,
+                )
+            }
+            SpriteFit::PixelRect => {
+                let (logical_w, logical_h) = match sprite.size_mode {
+                    SpriteSizeMode::Intrinsic => {
+                        (image.width.max(1) as f32, image.height.max(1) as f32)
+                    }
+                    SpriteSizeMode::Explicit { width, height } => {
+                        (width.max(1) as f32, height.max(1) as f32)
+                    }
+                };
+                let center_x = sprite.pivot_x
+                    + if sprite.object_anchor {
+                        sprite.texture_center_x
+                    } else {
+                        0.0
+                    };
+                let center_y = sprite.pivot_y
+                    + if sprite.object_anchor {
+                        sprite.texture_center_y
+                    } else {
+                        0.0
+                    };
+                let Some((left, top, right, bottom)) = clipped_rect_centered(
+                    sprite.src_clip,
+                    logical_w,
+                    logical_h,
+                    center_x,
+                    center_y,
+                ) else {
+                    return true;
+                };
+                (
+                    sprite.x as f32,
+                    sprite.y as f32,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    left / logical_w,
+                    top / logical_h,
+                    right / logical_w,
+                    bottom / logical_h,
+                )
+            }
+        };
+        let Some(points) = sprite_quad_points_rect(
+            sprite,
+            dst_x,
+            dst_y,
+            left,
+            top,
+            right,
+            bottom,
+            self.width as f32,
+            self.height as f32,
+        ) else {
+            return true;
+        };
+        let vertices = [
+            VitaGpuVertex {
+                x: points[0].x,
+                y: points[0].y,
+                u: u0,
+                v: v0,
+            },
+            VitaGpuVertex {
+                x: points[1].x,
+                y: points[1].y,
+                u: u1,
+                v: v0,
+            },
+            VitaGpuVertex {
+                x: points[2].x,
+                y: points[2].y,
+                u: u1,
+                v: v1,
+            },
+            VitaGpuVertex {
+                x: points[3].x,
+                y: points[3].y,
+                u: u0,
+                v: v1,
+            },
+        ];
+        let clip = sprite.dst_clip.unwrap_or(crate::layer::ClipRect {
+            left: 0,
+            top: 0,
+            right: self.width as i32,
+            bottom: self.height as i32,
+        });
+        let clip = [clip.left, clip.top, clip.right, clip.bottom];
+        let alpha = sprite.alpha as f32 * sprite.tr as f32 / 65_025.0;
+        unsafe {
+            siglus_vita_gpu_draw(
+                key,
+                image.rgba.as_ptr(),
+                image.width,
+                image.height,
+                vertices.as_ptr(),
+                clip.as_ptr(),
+                alpha,
+            )
+        }
     }
 
     /// Reuse the engine's parsed/animated mesh batches. This is a native
@@ -181,6 +400,8 @@ impl Renderer {
             self.mesh_assets.insert(name.to_owned(), Arc::clone(&asset));
             asset
         };
+        self.mesh_depth
+            .resize(self.width as usize * self.height as usize, f32::INFINITY);
         self.mesh_depth.fill(f32::INFINITY);
         let mut mesh_sprite = sprite.clone();
         // `project_model_point` is the shared scene projection helper. Mesh
@@ -492,18 +713,16 @@ impl Renderer {
         }
         let left = a.x.min(c.x).floor().max(clip.left as f32).max(0.0) as i32;
         let top = a.y.min(c.y).floor().max(clip.top as f32).max(0.0) as i32;
-        let right = a
-            .x
-            .max(c.x)
-            .ceil()
-            .min(clip.right as f32)
-            .min(self.width as f32) as i32;
-        let bottom = a
-            .y
-            .max(c.y)
-            .ceil()
-            .min(clip.bottom as f32)
-            .min(self.height as f32) as i32;
+        let right =
+            a.x.max(c.x)
+                .ceil()
+                .min(clip.right as f32)
+                .min(self.width as f32) as i32;
+        let bottom =
+            a.y.max(c.y)
+                .ceil()
+                .min(clip.bottom as f32)
+                .min(self.height as f32) as i32;
         if sprite_has_simple_rgba_effects(sprite, mask, tonecurve, wipe_source) {
             self.raster_axis_aligned_rgba8(
                 sprite, image, a, dx, dy, left, top, right, bottom, u0, v0, u1, v1,
@@ -556,23 +775,17 @@ impl Renderer {
         let source_x_max = image.width.saturating_sub(1) as f64;
         let source_y_max = image.height.saturating_sub(1) as f64;
         let source_x_at = |x: f64| {
-            (u0 as f64
-                + (u1 as f64 - u0 as f64) * (x - origin.x as f64) / dx as f64)
-                * source_x_max
+            (u0 as f64 + (u1 as f64 - u0 as f64) * (x - origin.x as f64) / dx as f64) * source_x_max
         };
         let source_y_at = |y: f64| {
-            (v0 as f64
-                + (v1 as f64 - v0 as f64) * (y - origin.y as f64) / dy as f64)
-                * source_y_max
+            (v0 as f64 + (v1 as f64 - v0 as f64) * (y - origin.y as f64) / dy as f64) * source_y_max
         };
         let start_x_fp = (source_x_at(left as f64 + 0.5) * FP_ONE as f64).round() as i64;
         let start_y_fp = (source_y_at(top as f64 + 0.5) * FP_ONE as f64).round() as i64;
-        let step_x_fp = (((u1 as f64 - u0 as f64) * source_x_max / dx as f64)
-            * FP_ONE as f64)
-            .round() as i64;
-        let step_y_fp = (((v1 as f64 - v0 as f64) * source_y_max / dy as f64)
-            * FP_ONE as f64)
-            .round() as i64;
+        let step_x_fp =
+            (((u1 as f64 - u0 as f64) * source_x_max / dx as f64) * FP_ONE as f64).round() as i64;
+        let step_y_fp =
+            (((v1 as f64 - v0 as f64) * source_y_max / dy as f64) * FP_ONE as f64).round() as i64;
         let global_alpha = sprite.alpha as u32 * sprite.tr as u32;
         let target_width = self.width as usize;
 
@@ -1095,14 +1308,42 @@ fn compose_emote(packet: &EmoteRenderPacket) -> RgbaImage {
             [sprite.uv_left, sprite.uv_bottom],
         ];
         emote_triangle(
-            &mut rgba, width, height, packet, sprite, texture.width, texture.height,
-            texture.rgba.as_slice(), corners[0], corners[1], corners[2],
-            uvs[0], uvs[1], uvs[2], colors[0], colors[1], colors[2],
+            &mut rgba,
+            width,
+            height,
+            packet,
+            sprite,
+            texture.width,
+            texture.height,
+            texture.rgba.as_slice(),
+            corners[0],
+            corners[1],
+            corners[2],
+            uvs[0],
+            uvs[1],
+            uvs[2],
+            colors[0],
+            colors[1],
+            colors[2],
         );
         emote_triangle(
-            &mut rgba, width, height, packet, sprite, texture.width, texture.height,
-            texture.rgba.as_slice(), corners[0], corners[2], corners[3],
-            uvs[0], uvs[2], uvs[3], colors[0], colors[2], colors[3],
+            &mut rgba,
+            width,
+            height,
+            packet,
+            sprite,
+            texture.width,
+            texture.height,
+            texture.rgba.as_slice(),
+            corners[0],
+            corners[2],
+            corners[3],
+            uvs[0],
+            uvs[2],
+            uvs[3],
+            colors[0],
+            colors[2],
+            colors[3],
         );
     }
     RgbaImage {
@@ -1209,14 +1450,8 @@ fn emote_triangle(
             }
             let u = wa * auv[0] + wb * buv[0] + wc * cuv[0];
             let v = wa * auv[1] + wb * buv[1] + wc * cuv[1];
-            let mut color = sample_rgba_pixels(
-                texture_width,
-                texture_height,
-                texture_rgba,
-                u,
-                v,
-                false,
-            );
+            let mut color =
+                sample_rgba_pixels(texture_width, texture_height, texture_rgba, u, v, false);
             for channel in 0..4 {
                 color[channel] *= wa * ac[channel] + wb * bc[channel] + wc * cc[channel];
             }
@@ -1286,7 +1521,7 @@ impl FrameCaptureBackend for Renderer {
         if self.width != width || self.height != height {
             self.resize(width, height);
         }
-        self.render_frame(images, frame)?;
+        self.render_frame_cpu(images, frame)?;
         Ok(RgbaImage {
             width,
             height,

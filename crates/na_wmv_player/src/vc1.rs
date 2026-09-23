@@ -830,7 +830,8 @@ impl PictureHeader {
         if seq.profile == Profile::Advanced {
             if seq.interlace {
                 return Err(DecoderError::Unsupported(
-                    "VC-1 Advanced interlaced pictures are not yet supported by the native decoder".into(),
+                    "VC-1 Advanced interlaced pictures are not yet supported by the native decoder"
+                        .into(),
                 ));
             }
             return Self::parse_advanced_progressive(data, seq, pts_ms, mb_w, mb_h);
@@ -1499,9 +1500,8 @@ mod tests {
         // WVC1 BITMAPINFO private data from anemoi_op.wmv. It contains an
         // Advanced sequence header (0x0f) followed by the entry point (0x0e).
         let extradata = [
-            0x27, 0x00, 0x00, 0x01, 0x0f, 0xdb, 0xc0, 0x3b,
-            0xf2, 0x1b, 0x8a, 0x3b, 0xf8, 0x86, 0xe8, 0x0c,
-            0x88, 0x00, 0x00, 0x01, 0x0e, 0x1a, 0x40, 0x40,
+            0x27, 0x00, 0x00, 0x01, 0x0f, 0xdb, 0xc0, 0x3b, 0xf2, 0x1b, 0x8a, 0x3b, 0xf8, 0x86,
+            0xe8, 0x0c, 0x88, 0x00, 0x00, 0x01, 0x0e, 0x1a, 0x40, 0x40,
         ];
         let seq = SequenceHeader::parse_wvc1(&extradata).unwrap();
         assert_eq!(seq.profile, Profile::Advanced);
@@ -1521,8 +1521,8 @@ mod tests {
         // Advanced picture header is 87 bits; the remaining bits begin the
         // first I-picture macroblock layer.
         let escaped = [
-            0xc0, 0x82, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
-            0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x01, 0x06,
+            0xc0, 0x82, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+            0x01, 0x06,
         ];
         let frame = vc1_unescape_buffer(&escaped);
         let pic = PictureHeader::parse(&frame, &seq, 0, 120, 68).unwrap();

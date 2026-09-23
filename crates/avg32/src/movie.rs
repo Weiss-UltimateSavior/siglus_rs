@@ -19,9 +19,9 @@ use anyhow::{Result, bail};
 #[cfg(not(target_os = "horizon"))]
 use oxideav_cinepak::{CinepakDecoder, CinepakFrame, CinepakPixelFormat};
 
-use crate::render::Avg32Renderer;
 #[cfg(not(target_os = "horizon"))]
-use crate::surface::{AVG32_HEIGHT, AVG32_WIDTH, Surface};
+use crate::buffer::PdtBuffer;
+use crate::pdtmgr::{PdtManager, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamKind {
@@ -197,11 +197,10 @@ fn stream_index(id: &[u8]) -> Option<usize> {
     Some(usize::from(tens) * 10 + usize::from(ones))
 }
 
-/// Ticks an [`AviMovie`]'s video track into the display buffer on a timer,
-/// mirroring the other timed presentations in `runtime.rs`
-/// (`FlashPlayer`/`StretchTweenPlayer`/`EndingPlayer`). Has no fields (and
-/// [`Self::start`] always returns `Ok(None)`) on `horizon`, which lacks the
-/// `oxideav-cinepak` dependency; callers need no cfg-gating of their own.
+/// Plays an [`AviMovie`]'s video track into a rectangle of display buffer
+/// 0 (`0x0e:50..55` stretch the movie to the requested area). Has no
+/// fields (and [`Self::start`] always returns `None`) on `horizon`, which
+/// lacks the `oxideav-cinepak` dependency.
 pub struct MoviePlayer {
     #[cfg(not(target_os = "horizon"))]
     frames: Vec<Vec<u8>>,
@@ -216,9 +215,9 @@ pub struct MoviePlayer {
     #[cfg(not(target_os = "horizon"))]
     looped: bool,
     #[cfg(not(target_os = "horizon"))]
-    blocks_vm: bool,
-    #[cfg(not(target_os = "horizon"))]
     active: bool,
+    #[cfg(not(target_os = "horizon"))]
+    rect: Rect,
 }
 
 impl std::fmt::Debug for MoviePlayer {
@@ -233,14 +232,19 @@ impl MoviePlayer {
     pub fn start(
         movie: &AviMovie,
         looped: bool,
-        blocks_vm: bool,
-        renderer: &mut Avg32Renderer,
+        rect: Rect,
+        gfx: &mut PdtManager,
     ) -> Result<Option<Self>> {
         #[cfg(not(target_os = "horizon"))]
         {
             if movie.video_frames.is_empty() {
                 return Ok(None);
             }
+            let rect = if rect.x2 <= rect.x1 || rect.y2 <= rect.y1 {
+                Rect::full()
+            } else {
+                rect
+            };
             let mut player = Self {
                 frames: movie.video_frames.clone(),
                 decoder: CinepakDecoder::new(),
@@ -248,16 +252,16 @@ impl MoviePlayer {
                 interval: movie.frame_interval,
                 due: Instant::now(),
                 looped,
-                blocks_vm,
                 active: true,
+                rect,
             };
-            player.show_next(renderer)?;
+            player.show_next(gfx)?;
             player.due = Instant::now() + player.interval;
             Ok(Some(player))
         }
         #[cfg(target_os = "horizon")]
         {
-            let _ = (movie, looped, blocks_vm, renderer);
+            let _ = (movie, looped, rect, gfx);
             Ok(None)
         }
     }
@@ -273,38 +277,34 @@ impl MoviePlayer {
         }
     }
 
-    /// Whether the VM should stay parked on a `Wait` while this movie plays.
-    /// AVG32's non-blocking `PlayMovie` variants let the scenario keep
-    /// running scripted logic underneath the video.
-    pub fn blocks_vm(&self) -> bool {
+    pub fn stop(&mut self) {
         #[cfg(not(target_os = "horizon"))]
         {
-            self.blocks_vm && self.active
-        }
-        #[cfg(target_os = "horizon")]
-        {
-            false
+            self.active = false;
         }
     }
 
-    pub fn tick(&mut self, renderer: &mut Avg32Renderer) -> Result<()> {
+    pub fn tick(&mut self, gfx: &mut PdtManager) -> Result<()> {
         #[cfg(not(target_os = "horizon"))]
         {
             if !self.active || Instant::now() < self.due {
                 return Ok(());
             }
-            self.show_next(renderer)?;
-            self.due = Instant::now() + self.interval;
+            self.show_next(gfx)?;
+            self.due += self.interval;
+            if self.due < Instant::now() {
+                self.due = Instant::now() + self.interval;
+            }
         }
         #[cfg(target_os = "horizon")]
         {
-            let _ = renderer;
+            let _ = gfx;
         }
         Ok(())
     }
 
     #[cfg(not(target_os = "horizon"))]
-    fn show_next(&mut self, renderer: &mut Avg32Renderer) -> Result<()> {
+    fn show_next(&mut self, gfx: &mut PdtManager) -> Result<()> {
         if self.next_frame >= self.frames.len() {
             if self.looped {
                 self.next_frame = 0;
@@ -319,13 +319,17 @@ impl MoviePlayer {
             .decode_frame(&self.frames[self.next_frame], None)
             .map_err(|err| anyhow::anyhow!("avg32: failed to decode FMV frame: {err}"))
             .with_context(|| format!("FMV frame {}", self.next_frame))?;
-        let surface = Surface::from_rgba(frame.width, frame.height, expand_to_rgba(&frame))?;
-        renderer.stretch_surface_to(
-            &surface,
+        let rgba = expand_to_rgba(&frame);
+        let mut buffer = PdtBuffer::new(frame.width as usize, frame.height as usize);
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            buffer.set_pixel(index, [pixel[0], pixel[1], pixel[2]]);
+        }
+        gfx.stretch_from(
+            &buffer,
+            Rect::new(0, 0, frame.width as i32 - 1, frame.height as i32 - 1),
+            self.rect,
             0,
-            [0, 0, frame.width as i32 - 1, frame.height as i32 - 1],
-            [0, 0, AVG32_WIDTH as i32 - 1, AVG32_HEIGHT as i32 - 1],
-        )?;
+        );
         self.next_frame += 1;
         Ok(())
     }

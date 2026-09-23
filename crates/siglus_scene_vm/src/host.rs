@@ -40,7 +40,17 @@ macro_rules! switch_startup_marker {
         crate::switch_host::report_switch_marker($message)
     };
 }
-#[cfg(not(target_os = "horizon"))]
+#[cfg(target_os = "vita")]
+unsafe extern "C" {
+    fn siglus_vita_log_marker(message: *const u8);
+}
+#[cfg(target_os = "vita")]
+macro_rules! switch_startup_marker {
+    ($message:expr) => {
+        unsafe { siglus_vita_log_marker($message.as_ptr()) }
+    };
+}
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 macro_rules! switch_startup_marker {
     ($message:expr) => {};
 }
@@ -341,6 +351,11 @@ impl SiglusHost {
 
     pub fn logical_size(&self) -> (u32, u32) {
         (self.vm.ctx.screen_w.max(1), self.vm.ctx.screen_h.max(1))
+    }
+
+    /// On-demand accounting for movie frames and decoded PCM retained by the VM.
+    pub fn movie_memory_stats(&self) -> crate::movie::MovieMemoryStats {
+        self.vm.ctx.movie.debug_memory_stats()
     }
 
     pub fn debug_status_summary(&mut self) -> String {

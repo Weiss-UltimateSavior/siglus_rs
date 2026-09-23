@@ -6,8 +6,10 @@ use anyhow::{Result, bail};
 pub struct PdtImage {
     pub width: u32,
     pub height: u32,
-    /// Pixels in conventional RGBA8 order.
+    /// Pixels in conventional RGBA8 order.  Colour is premultiplied by the
+    /// mask, which is stored as alpha (255 when the file has no mask).
     pub rgba: Vec<u8>,
+    pub has_mask: bool,
 }
 
 pub fn decode_pdt(bytes: &[u8]) -> Result<PdtImage> {
@@ -53,6 +55,7 @@ pub fn decode_pdt(bytes: &[u8]) -> Result<PdtImage> {
         width,
         height,
         rgba,
+        has_mask: mask_at != 0,
     })
 }
 
