@@ -176,7 +176,14 @@ impl Resources {
 
     /// Finds a resource by script name.
     pub fn find(&self, kind: Kind, name: &str) -> Option<PathBuf> {
-        let name = name.trim().replace('\\', "/");
+        // Scripts may append `?nnn` to a name ("CGMS12?030"); only the
+        // part before it names a file.
+        let name = name
+            .split('?')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .replace('\\', "/");
         if name.is_empty() {
             return None;
         }
@@ -206,6 +213,14 @@ impl Resources {
 
     /// A file relative to the game root (case-insensitive).
     pub fn root_file(&self, name: &str) -> Option<PathBuf> {
-        self.listing_lookup(&self.root, &name.to_lowercase())
+        // Case-insensitive at every level of a relative path.
+        let mut path = self.root.clone();
+        for part in name.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+            if part == ".." {
+                return None;
+            }
+            path = self.listing_lookup(&path, &part.to_lowercase())?;
+        }
+        (path != self.root).then_some(path)
     }
 }

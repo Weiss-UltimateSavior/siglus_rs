@@ -208,7 +208,13 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 .map_or(0, |state| state.chars.len() as i32);
         }
         341 => {
-            machine.store = machine.sys.text.states.iter().map(|s| s.chars.len() as i32).sum();
+            machine.store = machine
+                .sys
+                .text
+                .states
+                .iter()
+                .map(|s| s.chars.len() as i32)
+                .sum();
         }
         1000 => {
             let file = machine.str_param(command, 0)?;

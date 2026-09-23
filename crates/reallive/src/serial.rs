@@ -127,7 +127,14 @@ impl<'a> Reader<'a> {
 
     pub fn len(&mut self) -> Result<usize> {
         let value = self.u32()? as usize;
-        if value > self.data.len().saturating_sub(self.pos).saturating_mul(8).max(1 << 20) {
+        if value
+            > self
+                .data
+                .len()
+                .saturating_sub(self.pos)
+                .saturating_mul(8)
+                .max(1 << 20)
+        {
             bail!("reallive: save data has an implausible length {value}");
         }
         Ok(value)

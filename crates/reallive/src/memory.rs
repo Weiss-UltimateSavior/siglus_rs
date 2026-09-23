@@ -226,7 +226,11 @@ impl Memory {
         })
     }
 
-    fn words_mut<'a>(&'a mut self, bank: u8, frame: &'a mut FrameMemory) -> Result<&'a mut [i32]> {
+    pub(crate) fn words_mut<'a>(
+        &'a mut self,
+        bank: u8,
+        frame: &'a mut FrameMemory,
+    ) -> Result<&'a mut [i32]> {
         Ok(match bank {
             0..=5 => &mut self.local.ints[usize::from(bank)],
             6 => &mut self.global.int_g,
@@ -240,11 +244,21 @@ impl Memory {
         reference.read(self.words(reference.bank, frame)?)
     }
 
-    pub fn set_int(&mut self, reference: IntRef, value: i32, frame: &mut FrameMemory) -> Result<()> {
+    pub fn set_int(
+        &mut self,
+        reference: IntRef,
+        value: i32,
+        frame: &mut FrameMemory,
+    ) -> Result<()> {
         reference.write(self.words_mut(reference.bank, frame)?, value)
     }
 
-    pub fn string<'a>(&'a self, bank_byte: u8, index: i32, frame: &'a FrameMemory) -> Result<&'a str> {
+    pub fn string<'a>(
+        &'a self,
+        bank_byte: u8,
+        index: i32,
+        frame: &'a FrameMemory,
+    ) -> Result<&'a str> {
         let slot = usize::try_from(index)
             .ok()
             .filter(|&index| index < BANK_SIZE)
@@ -280,6 +294,13 @@ impl Memory {
             other => bail!("reallive: invalid string bank 0x{other:02x}"),
         }
         Ok(())
+    }
+
+    /// A local integer's value at the last savepoint (global and call
+    /// frame variables have none).
+    pub fn savepoint_int(&self, reference: IntRef) -> Option<i32> {
+        let words = self.savepoint.ints.get(usize::from(reference.bank))?;
+        reference.read(words).ok()
     }
 
     pub fn take_savepoint(&mut self) {
@@ -362,7 +383,10 @@ mod tests {
         assert_eq!(memory.int(a1(8), &frame).unwrap(), 1);
         assert_eq!(memory.int(a1(16), &frame).unwrap(), 0);
         memory.set_int(a1(31), 1, &mut frame).unwrap();
-        assert_eq!(memory.int(a(0), &frame).unwrap(), 0xff00u32 as i32 | i32::MIN);
+        assert_eq!(
+            memory.int(a(0), &frame).unwrap(),
+            0xff00u32 as i32 | i32::MIN
+        );
         assert!(memory.int(a1(64000), &frame).is_err());
         assert!(memory.int(a1(63999), &frame).is_ok());
     }

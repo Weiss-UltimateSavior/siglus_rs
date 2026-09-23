@@ -194,9 +194,21 @@ impl Surface {
             return;
         }
         self.fill(Rect::new(rect.x, rect.y, rect.w, 1), colour, opacity);
-        self.fill(Rect::new(rect.x, rect.bottom() - 1, rect.w, 1), colour, opacity);
-        self.fill(Rect::new(rect.x, rect.y + 1, 1, rect.h - 2), colour, opacity);
-        self.fill(Rect::new(rect.right() - 1, rect.y + 1, 1, rect.h - 2), colour, opacity);
+        self.fill(
+            Rect::new(rect.x, rect.bottom() - 1, rect.w, 1),
+            colour,
+            opacity,
+        );
+        self.fill(
+            Rect::new(rect.x, rect.y + 1, 1, rect.h - 2),
+            colour,
+            opacity,
+        );
+        self.fill(
+            Rect::new(rect.right() - 1, rect.y + 1, 1, rect.h - 2),
+            colour,
+            opacity,
+        );
     }
 
     /// Applies `f` to every pixel of `rect`, blending the result by
@@ -222,7 +234,8 @@ impl Surface {
 
     pub fn mono(&mut self, rect: Rect, opacity: u8) {
         self.map_pixels(rect, opacity, |p| {
-            let grey = ((u32::from(p[0]) * 77 + u32::from(p[1]) * 151 + u32::from(p[2]) * 28) >> 8) as u8;
+            let grey =
+                ((u32::from(p[0]) * 77 + u32::from(p[1]) * 151 + u32::from(p[2]) * 28) >> 8) as u8;
             [grey; 3]
         });
     }
@@ -325,8 +338,10 @@ impl Surface {
         let op = u32::from(opacity);
         for ty in clip.y..clip.bottom() {
             for tx in clip.x..clip.right() {
-                let fx = f64::from(src_rect.x) + (f64::from(tx - dst_rect.x) + 0.5) * sx_scale - 0.5;
-                let fy = f64::from(src_rect.y) + (f64::from(ty - dst_rect.y) + 0.5) * sy_scale - 0.5;
+                let fx =
+                    f64::from(src_rect.x) + (f64::from(tx - dst_rect.x) + 0.5) * sx_scale - 0.5;
+                let fy =
+                    f64::from(src_rect.y) + (f64::from(ty - dst_rect.y) + 0.5) * sy_scale - 0.5;
                 let s = sample_bilinear(src, fx, fy, src_rect);
                 let mut alpha = op;
                 if blend.uses_mask() {
@@ -566,7 +581,10 @@ impl Transform {
     }
 
     pub fn forward(&self, x: f64, y: f64) -> (f64, f64) {
-        let (x, y) = ((x - self.origin.0) * self.scale.0, (y - self.origin.1) * self.scale.1);
+        let (x, y) = (
+            (x - self.origin.0) * self.scale.0,
+            (y - self.origin.1) * self.scale.1,
+        );
         (
             x * self.cos - y * self.sin + self.dest.0,
             x * self.sin + y * self.cos + self.dest.1,
@@ -576,8 +594,16 @@ impl Transform {
     pub fn inverse(&self, x: f64, y: f64) -> (f64, f64) {
         let (x, y) = (x - self.dest.0, y - self.dest.1);
         let (rx, ry) = (x * self.cos + y * self.sin, -x * self.sin + y * self.cos);
-        let sx = if self.scale.0 != 0.0 { rx / self.scale.0 } else { f64::INFINITY };
-        let sy = if self.scale.1 != 0.0 { ry / self.scale.1 } else { f64::INFINITY };
+        let sx = if self.scale.0 != 0.0 {
+            rx / self.scale.0
+        } else {
+            f64::INFINITY
+        };
+        let sy = if self.scale.1 != 0.0 {
+            ry / self.scale.1
+        } else {
+            f64::INFINITY
+        };
         (sx + self.origin.0, sy + self.origin.1)
     }
 
@@ -592,8 +618,14 @@ impl Transform {
         .map(|(x, y)| self.forward(x, y));
         let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let max_x = corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
-        let max_y = corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let max_x = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
         if !min_x.is_finite() || !max_x.is_finite() {
             return Rect::new(0, 0, 0, 0);
         }

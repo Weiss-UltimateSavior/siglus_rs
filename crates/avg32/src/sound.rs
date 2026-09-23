@@ -790,13 +790,16 @@ fn discover_cd_tracks(game_root: &Path) -> BTreeMap<usize, CdTrack> {
             );
         }
     }
-    directories
-        .into_iter()
-        .find_map(|directory| {
-            let tracks = parse_ccd(&directory).ok()?;
-            (!tracks.is_empty()).then_some(tracks)
-        })
-        .unwrap_or_default()
+    // A release may ship several discs (AIR: a data-only disc and the
+    // music disc); take audio tracks from every image found, earlier
+    // directories first.
+    let mut tracks = BTreeMap::new();
+    for directory in directories {
+        for (number, track) in parse_ccd(&directory).unwrap_or_default() {
+            tracks.entry(number).or_insert(track);
+        }
+    }
+    tracks
 }
 
 fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
@@ -816,16 +819,25 @@ fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
         .context("no CloneCD image")?;
     let text = std::fs::read_to_string(&ccd)?;
     let mut entries = BTreeMap::new();
+    let mut data_tracks = std::collections::BTreeSet::new();
     let mut point = None;
+    let mut control = 0;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("[Entry ") {
             point = None;
+            control = 0;
         } else if let Some(value) = line.strip_prefix("Point=0x") {
             point = usize::from_str_radix(value, 16).ok();
+        } else if let Some(value) = line.strip_prefix("Control=0x") {
+            control = u8::from_str_radix(value, 16).unwrap_or(0);
         } else if let Some(value) = line.strip_prefix("PLBA=") {
             if let (Some(point), Ok(lba)) = (point, value.parse::<usize>()) {
                 entries.insert(point, lba);
+                // Control bit 2 marks a data track.
+                if control & 0x04 != 0 && (1..=99).contains(&point) {
+                    data_tracks.insert(point);
+                }
             }
         }
     }
@@ -835,6 +847,9 @@ fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
         let Some(&start) = entries.get(&track) else {
             continue;
         };
+        if data_tracks.contains(&track) {
+            continue;
+        }
         let end = ((track + 1)..=99)
             .find_map(|next| entries.get(&next).copied())
             .unwrap_or(lead_out);
@@ -899,6 +914,51 @@ fn be_u32(bytes: &[u8], at: usize) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_disc(dir: &Path, entries: &[(u8, u8, usize)]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut ccd = String::from("[CloneCD]\nVersion=3\n");
+        for (i, (point, control, lba)) in entries.iter().enumerate() {
+            ccd += &format!("[Entry {i}]\nSession=1\nPoint=0x{point:02x}\nControl=0x{control:02x}\nPLBA={lba}\n");
+        }
+        std::fs::write(dir.join("IMAGE.CCD"), ccd).unwrap();
+        std::fs::write(dir.join("IMAGE.img"), []).unwrap();
+    }
+
+    /// AIR ships a data-only disc next to the music disc; the data disc
+    /// must not hide the music.
+    #[test]
+    fn cd_tracks_skip_data_discs() {
+        let root = std::env::temp_dir().join(format!("avg32-ccd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_disc(&root.join("blue"), &[(0xa2, 0x04, 1000), (0x01, 0x04, 0)]);
+        write_disc(
+            &root.join("orange"),
+            &[(0xa2, 0x00, 900), (0x01, 0x04, 0), (0x02, 0x00, 600), (0x03, 0x00, 700)],
+        );
+        std::fs::create_dir_all(root.join("game")).unwrap();
+        let tracks = discover_cd_tracks(&root.join("game"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(tracks.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert!(tracks[&2].image.ends_with("orange/IMAGE.img"));
+        assert_eq!((tracks[&2].first_sector, tracks[&2].sector_count), (600, 100));
+        assert_eq!(tracks[&3].sector_count, 200);
+    }
+
+    /// With `AVG32_GAME_ROOT` set to a CD-audio title (AIR), the music
+    /// tracks must be found and decode to sound.
+    #[test]
+    fn installed_game_cd_tracks_decode() {
+        let Some(root) = std::env::var_os("AVG32_GAME_ROOT") else {
+            return;
+        };
+        let tracks = discover_cd_tracks(Path::new(&root));
+        let track = tracks.get(&2).expect("CD track 2 (the first music track)");
+        eprintln!("{} tracks; track 2 from {}", tracks.len(), track.image.display());
+        let clip = decode_cd_track(track).unwrap();
+        let pcm = &clip.wav[44..];
+        assert!(pcm.iter().any(|&b| b != 0), "track {} is silent", track.image.display());
+    }
 
     #[test]
     fn linear_table_matches_reference() {

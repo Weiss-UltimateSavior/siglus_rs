@@ -19,8 +19,8 @@ fn fixture(name: &str) -> Option<PathBuf> {
 fn machine(name: &str, setup: impl FnOnce(&mut Machine)) -> Option<Machine> {
     let path = fixture(name)?;
     let archive = Rc::new(Archive::open(&path, "", Nls::Sjis).expect("open fixture"));
-    let mut machine = Machine::new(archive, Rc::new(Gameexe::default()), System::default())
-        .expect("machine");
+    let mut machine =
+        Machine::new(archive, Rc::new(Gameexe::default()), System::default()).expect("machine");
     machine.halt_on_error = true;
     setup(&mut machine);
     for _ in 0..10_000 {
@@ -93,7 +93,10 @@ fn str_module() {
     let m = run!("Module_Str_SEEN/strlen_0.TXT");
     assert_eq!(int(&m, "A", 0), 5);
     let m = run!("Module_Str_SEEN/strcmp_0.TXT");
-    assert_eq!((int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)), (-1, 0, -1));
+    assert_eq!(
+        (int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)),
+        (-1, 0, -1)
+    );
     let m = run!("Module_Str_SEEN/strsub_0.TXT");
     assert_eq!(str_s(&m, 1), "lid");
     let m = run!("Module_Str_SEEN/strsub_1.TXT");
@@ -118,7 +121,10 @@ fn str_module() {
     let m = run!("Module_Str_SEEN/strtrunc_1.TXT");
     assert_eq!(str_s(&m, 0), sjis(b"\x82\xED\x82\xBD\x82\xB5"));
     let m = run!("Module_Str_SEEN/hantozen_0.TXT");
-    assert_eq!(str_s(&m, 0), sjis(b"\x82\x50\x82\x51\x82\x52\x82\x53\x82\x54"));
+    assert_eq!(
+        str_s(&m, 0),
+        sjis(b"\x82\x50\x82\x51\x82\x52\x82\x53\x82\x54")
+    );
     let m = run!("Module_Str_SEEN/hantozen_1.TXT");
     assert_eq!(
         str_s(&m, 0),
@@ -131,11 +137,17 @@ fn str_module() {
     let m = run!("Module_Str_SEEN/uppercase_0.TXT");
     assert_eq!(str_s(&m, 0), "VALID");
     let m = run!("Module_Str_SEEN/uppercase_1.TXT");
-    assert_eq!((str_s(&m, 0), str_s(&m, 1)), ("Valid".into(), "VALID".into()));
+    assert_eq!(
+        (str_s(&m, 0), str_s(&m, 1)),
+        ("Valid".into(), "VALID".into())
+    );
     let m = run!("Module_Str_SEEN/lowercase_0.TXT");
     assert_eq!(str_s(&m, 0), "valid");
     let m = run!("Module_Str_SEEN/lowercase_1.TXT");
-    assert_eq!((str_s(&m, 0), str_s(&m, 1)), ("Valid".into(), "valid".into()));
+    assert_eq!(
+        (str_s(&m, 0), str_s(&m, 1)),
+        ("Valid".into(), "valid".into())
+    );
     let m = run!("Module_Str_SEEN/itoa_ws_0.TXT");
     assert_eq!(str_s(&m, 0), sjis(b"\x81\x7C\x82\x50"));
     assert_eq!(str_s(&m, 1), sjis(b"\x81\x7C\x81\x40\x81\x40\x82\x50"));
@@ -162,11 +174,20 @@ fn str_module() {
         vec![15, 15, -12, 5, 0]
     );
     let m = run!("Module_Str_SEEN/digits_0.TXT");
-    assert_eq!((int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)), (1, 2, 2));
+    assert_eq!(
+        (int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)),
+        (1, 2, 2)
+    );
     let m = run!("Module_Str_SEEN/strpos_0.TXT");
-    assert_eq!((int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)), (0, 8, -1));
+    assert_eq!(
+        (int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)),
+        (0, 8, -1)
+    );
     let m = run!("Module_Str_SEEN/strlpos_0.TXT");
-    assert_eq!((int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)), (0, 12, -1));
+    assert_eq!(
+        (int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)),
+        (0, 12, -1)
+    );
     let m = run!("Module_Str_SEEN/strused_0.TXT");
     assert_eq!((int(&m, "A", 0), int(&m, "A", 1)), (0, 1));
 }
@@ -174,14 +195,25 @@ fn str_module() {
 #[test]
 fn mem_module() {
     let m = run!("Module_Mem_SEEN/setarray_0.TXT");
-    assert_eq!((0..4).map(|i| int(&m, "A", i)).collect::<Vec<_>>(), vec![1, 2, 3, -1]);
+    assert_eq!(
+        (0..4).map(|i| int(&m, "A", i)).collect::<Vec<_>>(),
+        vec![1, 2, 3, -1]
+    );
     let m = run!("Module_Mem_SEEN/setrng_0.TXT");
-    assert_eq!((0..5).map(|i| int(&m, "A", i)).collect::<Vec<_>>(), vec![0, 0, 0, 0, -1]);
+    assert_eq!(
+        (0..5).map(|i| int(&m, "A", i)).collect::<Vec<_>>(),
+        vec![0, 0, 0, 0, -1]
+    );
     let m = run!("Module_Mem_SEEN/setrng_1.TXT");
-    assert_eq!((0..5).map(|i| int(&m, "A", i)).collect::<Vec<_>>(), vec![4, 4, 4, 4, -1]);
+    assert_eq!(
+        (0..5).map(|i| int(&m, "A", i)).collect::<Vec<_>>(),
+        vec![4, 4, 4, 4, -1]
+    );
     let m = run!("Module_Mem_SEEN/cpyrng_0.TXT");
     assert_eq!(
-        (0..3).map(|i| (int(&m, "A", i), int(&m, "B", i))).collect::<Vec<_>>(),
+        (0..3)
+            .map(|i| (int(&m, "A", i), int(&m, "B", i)))
+            .collect::<Vec<_>>(),
         vec![(1, 1), (2, 2), (3, 3)]
     );
     let m = run!("Module_Mem_SEEN/setarray_stepped_0.TXT");
@@ -200,7 +232,10 @@ fn mem_module() {
         vec![5, -1, 5, -1, 5, -1]
     );
     let m = run!("Module_Mem_SEEN/cpyvars_0.TXT");
-    assert_eq!((0..3).map(|i| int(&m, "A", i)).collect::<Vec<_>>(), vec![5, 1, 2]);
+    assert_eq!(
+        (0..3).map(|i| int(&m, "A", i)).collect::<Vec<_>>(),
+        vec![5, 1, 2]
+    );
     let m = run!("Module_Mem_SEEN/sum_0.TXT");
     assert_eq!(int(&m, "A", 10), 6);
 }
@@ -290,7 +325,10 @@ fn jmp_module() {
 #[test]
 fn sys_module() {
     let m = run!("Module_Sys_SEEN/SceneNum.TXT");
-    assert_eq!((int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)), (1, 248, 639));
+    assert_eq!(
+        (int(&m, "A", 0), int(&m, "A", 1), int(&m, "A", 2)),
+        (1, 248, 639)
+    );
     let m = run!("Module_Sys_SEEN/builtins.TXT");
     let v: Vec<i32> = (0..6).map(|i| int(&m, "A", i)).collect();
     assert_eq!(v[0], 0);

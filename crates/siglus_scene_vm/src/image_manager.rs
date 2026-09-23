@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
@@ -266,6 +266,13 @@ pub struct ImageManager {
     next_id: u32,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ImageMemoryStats {
+    pub albums: usize,
+    pub images: usize,
+    pub rgba_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 struct ImageEntry {
     img: Arc<RgbaImage>,
@@ -364,6 +371,31 @@ fn compose_g00_cut(dst: &mut RgbaImage, src: &RgbaImage, x: i32, y: i32, blend_t
 }
 
 impl ImageManager {
+    /// Count live decoded pixels, deduplicating albums and shared frame images.
+    /// This excludes allocator metadata and temporary decode buffers.
+    pub fn debug_live_image_memory_stats(&self) -> ImageMemoryStats {
+        let mut stats = ImageMemoryStats::default();
+        let mut seen_albums = HashSet::new();
+        let mut seen_images = HashSet::new();
+        for weak in self.images.values() {
+            let Some(album) = weak.album.upgrade() else {
+                continue;
+            };
+            if !seen_albums.insert(Arc::as_ptr(&album)) {
+                continue;
+            }
+            stats.albums += 1;
+            let frames = album.frames.read().expect("image album lock poisoned");
+            for frame in frames.iter() {
+                if seen_images.insert(Arc::as_ptr(&frame.img)) {
+                    stats.images += 1;
+                    stats.rgba_bytes = stats.rgba_bytes.saturating_add(frame.img.rgba.capacity());
+                }
+            }
+        }
+        stats
+    }
+
     pub fn new(project_dir: PathBuf) -> Self {
         Self {
             project_dir,

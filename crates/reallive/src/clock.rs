@@ -160,11 +160,17 @@ impl FrameCounter {
             }
             // Starts slowly and speeds up / the opposite; the rate changes
             // linearly from 0.9x to 1.1x (and back) of the mean speed.
-            FrameKind::Accel => 5.0 * (1.1 / (1.1 - 0.2 * t.min(1.0))).ln() / (5.0 * (1.1f64 / 0.9).ln()),
-            FrameKind::Decel => 5.0 * ((0.9 + 0.2 * t.min(1.0)) / 0.9).ln() / (5.0 * (1.1f64 / 0.9).ln()),
+            FrameKind::Accel => {
+                5.0 * (1.1 / (1.1 - 0.2 * t.min(1.0))).ln() / (5.0 * (1.1f64 / 0.9).ln())
+            }
+            FrameKind::Decel => {
+                5.0 * ((0.9 + 0.2 * t.min(1.0)) / 0.9).ln() / (5.0 * (1.1f64 / 0.9).ln())
+            }
         };
-        let finished = matches!(self.kind, FrameKind::Simple | FrameKind::Accel | FrameKind::Decel)
-            && t >= 1.0;
+        let finished = matches!(
+            self.kind,
+            FrameKind::Simple | FrameKind::Accel | FrameKind::Decel
+        ) && t >= 1.0;
         if finished {
             self.active = false;
             self.value = self.to;
@@ -220,7 +226,8 @@ impl FrameCounters {
     }
 
     pub fn active(&mut self, layer: usize, counter: i32, now: u64) -> bool {
-        self.get_mut(layer, counter).is_some_and(|c| c.is_active(now))
+        self.get_mut(layer, counter)
+            .is_some_and(|c| c.is_active(now))
     }
 
     pub fn any_active(&mut self, layer: usize, now: u64) -> bool {

@@ -5,6 +5,11 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(target_os = "vita")]
+unsafe extern "C" {
+    fn siglus_vita_log_marker(message: *const u8);
+}
+
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
@@ -198,7 +203,7 @@ impl ScenePckDecodeOptions {
 
 #[derive(Debug, Clone)]
 pub struct ScenePck {
-    pub buf: Arc<[u8]>,
+    pub buf: Arc<Vec<u8>>,
     pub header: PackScnHeader,
     pub scn_name_map: HashMap<String, usize>,
     pub inc_prop_name_map: HashMap<u32, String>,
@@ -472,7 +477,15 @@ fn read_scene_pck_bytes(path: &Path) -> Result<Vec<u8>> {
 
 impl ScenePck {
     pub fn load_and_rebuild(path: &Path, opt: &ScenePckDecodeOptions) -> Result<Self> {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            siglus_vita_log_marker(c"scene-pck: read begin".as_ptr().cast())
+        };
         let tmp = read_scene_pck_bytes(path)?;
+        #[cfg(target_os = "vita")]
+        unsafe {
+            siglus_vita_log_marker(c"scene-pck: read complete".as_ptr().cast())
+        };
         Self::load_and_rebuild_from_bytes(tmp, opt)
     }
 
@@ -493,6 +506,10 @@ impl ScenePck {
         // Rebuild m_scn_data exactly like the original implementation: keep everything before scn_data_list_ofs,
         // then append decrypted/decompressed scene chunks contiguously.
         let mut out = tmp[..scn_data_list_ofs].to_vec();
+        #[cfg(target_os = "vita")]
+        unsafe {
+            siglus_vita_log_marker(c"scene-pck: rebuild begin".as_ptr().cast())
+        };
 
         // Load original index list from the input.
         let idx_ofs = header.scn_data_index_list_ofs as usize;
@@ -509,6 +526,49 @@ impl ScenePck {
             idx_list.push(CIndex::read(&tmp, idx_ofs + i * 8)?);
         }
 
+        // The rebuilt scene pack is much larger than the compressed input.
+        // Read each chunk's LZSS output size before rebuilding so Vec needs
+        // one allocation instead of growing and copying tens of MiB at a time.
+        let estimated_scene_bytes = idx_list.iter().try_fold(0usize, |total, entry| {
+            if entry.size <= 0 {
+                return Some(total);
+            }
+            let size = if header.original_source_header_size <= 0 {
+                entry.size as usize
+            } else {
+                let start = scn_data_list_ofs.checked_add(entry.offset.max(0) as usize)?;
+                let encrypted = tmp.get(start..start.checked_add(8)?)?;
+                let mut lzss_header = [0u8; 8];
+                for (index, byte) in encrypted.iter().enumerate() {
+                    let exe_byte = if header.scn_data_exe_angou_mod != 0 {
+                        opt.exe_angou_element
+                            .as_deref()
+                            .filter(|key| !key.is_empty())
+                            .map_or(0, |key| key[index % key.len()])
+                    } else {
+                        0
+                    };
+                    let easy_byte = opt
+                        .easy_angou_code
+                        .as_deref()
+                        .filter(|key| !key.is_empty())
+                        .map_or(0, |key| key[index % key.len()]);
+                    lzss_header[index] = byte ^ exe_byte ^ easy_byte;
+                }
+                u32::from_le_bytes(lzss_header[4..8].try_into().ok()?) as usize
+            };
+            total.checked_add(size)
+        });
+        if let Some(estimated_scene_bytes) = estimated_scene_bytes {
+            let prefix = scn_data_list_ofs
+                .checked_add(idx_list.first().map_or(0, |x| x.offset.max(0) as usize));
+            if let Some(total_len) = prefix.and_then(|n| n.checked_add(estimated_scene_bytes)) {
+                if total_len > out.len() {
+                    out.try_reserve_exact(total_len - out.len())?;
+                }
+            }
+        }
+
         let mut offset = idx_list
             .first()
             .map(|x| x.offset.max(0) as usize)
@@ -518,6 +578,10 @@ impl ScenePck {
         }
 
         for scn_no in 0..scn_cnt {
+            #[cfg(target_os = "vita")]
+            if scn_no % 500 == 0 {
+                unsafe { siglus_vita_log_marker(c"scene-pck: rebuilding scenes".as_ptr().cast()) };
+            }
             let entry = idx_list[scn_no];
             let mut new_size = 0usize;
 
@@ -664,9 +728,17 @@ impl ScenePck {
         )?;
         let string_codec =
             resolve_scene_string_codec(&out, &header, opt.string_encryption_override)?;
+        #[cfg(target_os = "vita")]
+        unsafe {
+            siglus_vita_log_marker(c"scene-pck: rebuild complete".as_ptr().cast())
+        };
 
+        drop(tmp);
         Ok(Self {
-            buf: Arc::from(out.into_boxed_slice()),
+            // Arc<Vec<u8>> shares the rebuilt allocation directly. Converting
+            // to Arc<[u8]> copies the entire pack, which is tens of MiB for
+            // RewriteHF and can exceed the Vita startup memory budget.
+            buf: Arc::new(out),
             header,
             scn_name_map,
             inc_prop_name_map,
@@ -708,7 +780,7 @@ impl ScenePck {
     /// Return shared backing storage plus the scene-local byte range.
     /// SceneStream uses this to borrow directly from the rebuilt Scene.pck
     /// without copying or leaking each visited scene chunk.
-    pub fn scn_data_shared(&self, scn_no: usize) -> Result<(Arc<[u8]>, Range<usize>)> {
+    pub fn scn_data_shared(&self, scn_no: usize) -> Result<(Arc<Vec<u8>>, Range<usize>)> {
         let range = self.scn_data_range(scn_no)?;
         Ok((self.buf.clone(), range))
     }

@@ -20,10 +20,10 @@ fn main() -> Result<()> {
     let raw = archive.raw(scene)?;
     let header = Header::parse(&raw)?;
     let mut code = header.decompress(&raw)?;
-    if header.uses_xor2 {
-        if let Some(key) = archive.xor2_key() {
-            key.apply(&mut code);
-        }
+    if header.uses_xor2
+        && let Some(key) = archive.xor2_key()
+    {
+        key.apply(&mut code);
     }
     let end = (from + length).min(code.len());
     for (row, chunk) in code[from..end].chunks(16).enumerate() {

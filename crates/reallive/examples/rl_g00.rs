@@ -10,7 +10,12 @@ fn main() -> Result<()> {
     let input = args.next().context("usage: rl_g00 <file.g00> <out.png>")?;
     let output = args.next().context("usage: rl_g00 <file.g00> <out.png>")?;
     let image = reallive::image::decode(&std::fs::read(&input)?)?;
-    println!("{}x{} alpha={}", image.width(), image.height(), image.has_alpha);
+    println!(
+        "{}x{} alpha={}",
+        image.width(),
+        image.height(),
+        image.has_alpha
+    );
     for (index, region) in image.regions.iter().enumerate() {
         println!("  pattern {index}: {region:?}");
     }

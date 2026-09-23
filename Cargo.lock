@@ -3021,6 +3021,7 @@ dependencies = [
  "encoding_rs",
  "image",
  "kira",
+ "na_mpeg2_decoder",
  "pollster",
  "siglus_assets",
  "wgpu 0.20.1",

@@ -172,11 +172,19 @@ impl WindowConfig {
 
     /// The effective waku pattern given the global `SetWakuAll` value.
     pub fn waku_pattern(&self, waku_all: i32) -> i32 {
-        if self.waku_mod != 0 { self.waku_no } else { waku_all }
+        if self.waku_mod != 0 {
+            self.waku_no
+        } else {
+            waku_all
+        }
     }
 
     pub fn effective_attr(&self, global: WindowAttr) -> WindowAttr {
-        if self.attr_mod != 0 { self.attr } else { global }
+        if self.attr_mod != 0 {
+            self.attr
+        } else {
+            global
+        }
     }
 }
 
@@ -260,6 +268,10 @@ pub struct TextSystem {
     pub waiting_since: Option<u64>,
     /// Windows hidden by `msgHideAllTemp` / `ShowBackground`.
     pub hidden_temporarily: bool,
+    /// `SET_WINDOW_DISP_OFF` / `CCOM_MESSAGEWINDOW_OFF`: windows not drawn.
+    pub display_off: Vec<bool>,
+    /// `SET_MSGBK_ON` / `SET_MSGBK_OFF`: whether pages enter the backlog.
+    pub backlog_enabled: bool,
     /// Window positions at the last savepoint.
     savepoint_positions: Vec<WindowPos>,
 }
@@ -288,6 +300,8 @@ impl TextSystem {
             backlog_view: None,
             waiting_since: None,
             hidden_temporarily: false,
+            display_off: vec![false; WINDOW_COUNT],
+            backlog_enabled: true,
             savepoint_positions,
         }
     }
@@ -329,7 +343,7 @@ impl TextSystem {
     /// Moves the current page into the backlog.
     pub fn commit_page(&mut self) {
         let page = std::mem::take(&mut self.current_page);
-        if !page.lines.iter().all(|line| line.is_empty()) {
+        if self.backlog_enabled && !page.lines.iter().all(|line| line.is_empty()) {
             self.backlog.push(page);
             if self.backlog.len() > BACKLOG_PAGES {
                 self.backlog.remove(0);

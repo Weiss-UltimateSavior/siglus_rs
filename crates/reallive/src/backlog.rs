@@ -34,7 +34,8 @@ pub fn handle_input(sys: &mut System) {
             InputEvent::Press(Button::WheelUp) | InputEvent::KeyDown(Key::Up | Key::PageUp) => {
                 page = page.saturating_sub(1);
             }
-            InputEvent::Press(Button::WheelDown) | InputEvent::KeyDown(Key::Down | Key::PageDown) => {
+            InputEvent::Press(Button::WheelDown)
+            | InputEvent::KeyDown(Key::Down | Key::PageDown) => {
                 if page >= last {
                     sys.text.backlog_view = None;
                     return;

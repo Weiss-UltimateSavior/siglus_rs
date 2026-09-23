@@ -7,7 +7,9 @@ use anyhow::Result;
 
 use crate::gan::Gan;
 use crate::graphics::Graphics;
-use crate::object::{AfterAnimation, Animation, Mutator, Object, ObjectData, ObjectParams, Property};
+use crate::object::{
+    AfterAnimation, Animation, Mutator, Object, ObjectData, ObjectParams, Property,
+};
 use crate::resource::{Kind, Resources};
 use crate::serial::{Reader, Writer};
 use crate::surface::Rect;
@@ -35,10 +37,26 @@ fn read_rect(r: &mut Reader) -> Result<Option<Rect>> {
 
 fn write_params(w: &mut Writer, p: &ObjectParams) {
     w.bool(p.visible);
-    w.i32s(&[p.x, p.y, p.adjust_vert, p.origin.0, p.origin.1, p.rep_origin.0, p.rep_origin.1]);
+    w.i32s(&[
+        p.x,
+        p.y,
+        p.adjust_vert,
+        p.origin.0,
+        p.origin.1,
+        p.rep_origin.0,
+        p.rep_origin.1,
+    ]);
     w.i32s(&p.adjust_x);
     w.i32s(&p.adjust_y);
-    w.i32s(&[p.width, p.height, p.hq_width, p.hq_height, p.rotation, p.pattern, p.alpha]);
+    w.i32s(&[
+        p.width,
+        p.height,
+        p.hq_width,
+        p.hq_height,
+        p.rotation,
+        p.pattern,
+        p.alpha,
+    ]);
     w.i32s(&p.adjust_alpha);
     write_rect(w, p.clip);
     write_rect(w, p.own_clip);
@@ -198,6 +216,12 @@ fn property_code(property: Property) -> (i32, i32) {
         Property::HqWidth => (24, 0),
         Property::HqHeight => (25, 0),
         Property::Visible => (26, 0),
+        Property::ClipX => (27, 0),
+        Property::ClipY => (28, 0),
+        Property::ClipW => (29, 0),
+        Property::ClipH => (30, 0),
+        Property::ClipRight => (31, 0),
+        Property::ClipBottom => (32, 0),
     }
 }
 
@@ -231,6 +255,12 @@ fn property_from_code(code: i32, index: i32) -> Option<Property> {
         24 => Property::HqWidth,
         25 => Property::HqHeight,
         26 => Property::Visible,
+        27 => Property::ClipX,
+        28 => Property::ClipY,
+        29 => Property::ClipW,
+        30 => Property::ClipH,
+        31 => Property::ClipRight,
+        32 => Property::ClipBottom,
         _ => return None,
     })
 }

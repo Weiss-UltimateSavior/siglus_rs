@@ -1,68 +1,89 @@
 # Siglus PS Vita port
 
-The Vita port reuses Siglus scene/VM and resource code. `bootstrap/` is an
-isolated device probe. `player/` is an early engine entry point, using the
-shared software renderer and Kira mixer. Both need a VitaSDK build and device
-validation before gameplay can be claimed.
+The Vita player uses the shared Rust Siglus VM, resource decoders, text code,
+and Kira mixer. Its platform entry point uses VitaSDK bindings for input,
+audio, and memory readings. The renderer uses the published vitaGL SDK library
+to submit ordinary sprites as GPU textured quads. Complex effects currently
+use the shared CPU compositor and upload its output as a GPU texture. No SDK or
+third-party source is copied into this repository.
 
-## Bootstrap build
+## Build
 
-Install VitaSDK and `cargo-vita`, set `VITASDK`, and build from the bootstrap
-directory with a current nightly Rust toolchain:
-
-```sh
-cd platform/vita/bootstrap
-export VITASDK=/opt/vitasdk
-cargo +nightly vita build vpk -- --release
-```
-
-Install the resulting VPK on a Vita homebrew environment. A colored screen
-means the display buffer was accepted; press START to exit. The program writes
-`ux0:data/siglus_rs/vita-bootstrap.log`, including free user/CDRAM memory
-before and after display allocation. If
-`ux0:data/siglus_rs/bootstrap.txt` exists, the log records its readable byte
-count. Supply this file to check storage access.
-
-The probe reserves one 960×544 RGBA display buffer. Its 2,088,960 bytes are
-rounded to one 2,097,152-byte CDRAM block. It does not decode game assets.
-
-## Engine player
-
-With VitaSDK and `cargo-vita` installed:
+Install VitaSDK, `cargo-vita`, Rust nightly, and the VitaSDK `vitaGL` package.
+From this repository:
 
 ```sh
 cd platform/vita/player
-export VITASDK=/opt/vitasdk
+export VITASDK=/usr/local/vitasdk
 cargo +nightly vita build vpk -- --release
 ```
 
-Install the generated VPK and put your own game files under
-`ux0:data/siglus_rs/game/`, including `Scene.pck`. Errors and periodic free
-user/CDRAM memory readings go to `ux0:data/siglus_rs/vita-player.log`.
+The VPK is written to
+`platform/vita/player/target/armv7-sony-vita-newlibeabihf/release/siglus_vita_player.vpk`.
+Install it on a Vita homebrew environment and place your own game files under
+`ux0:data/siglus_rs/game/`, including `Scene.pck`, `Gameexe.dat`, and any
+required `key.toml`. Saves and logs use `ux0:data/siglus_rs/`. The player log
+is `ux0:data/siglus_rs/vita-player.log`.
+
+vitaGL requires a working `libshacccg.suprx` shader compiler at
+`ur0:data/libshacccg.suprx`. The player checks for it at startup and reports
+an error in the player log when it cannot load. Supply this runtime component
+from your own Vita/PSM installation. It is not bundled with the VPK. For
+Vita3K, also install its firmware font package before judging text rendering.
+
+The standalone `bootstrap/` probe can be built in the same way. It checks
+display and storage access without loading the engine or game assets.
+
+## Input and memory
+
 Cross confirms, Circle cancels, the D-pad navigates, and the front touch panel
-maps to the game viewport. The player uses the game's `SCREEN_SIZE` up to
-1280×720, then letterboxes it into 960×544.
+maps to the letterboxed game viewport. The player accepts game logical sizes
+up to 1280×720 and presents at 960×544.
 
-The fixed scanout block is 2 MiB. The CPU RGBA frame costs up to about 3.5
-MiB at 1280×720; the 3D depth buffer is allocated only when a mesh is drawn
-and may add another 3.5 MiB. Audio output holds 512 stereo frames and a
-128 KiB worker stack. Vita movie queue counts are lower than desktop counts,
-and decoded movie caches are released when playback stops. Active video/audio
-data, mesh textures, and other runtime caches do not yet have a reliable total
-memory limit. These figures exclude the VM and game resources; inspect the
-periodic device log and movie-byte counters before extending the budget.
+vitaGL starts with two scanout buffers, a 4 MiB circular pool, a 32 MiB RAM
+pool, and a 16 MiB CDRAM pool. The sprite texture cache evicts old entries at
+16 MiB. On the tested Vita3K setup, GPU initialization changed reported free
+user memory from 248,512,512 to 214,958,080 bytes and free CDRAM from
+117,440,512 to 100,663,296 bytes. These figures describe the emulator's
+reported free pools, not total application peak usage.
 
-The Vita entry points use published `vitasdk-sys` bindings and contain no
-copied SDK or third-party source. SDK calls stay in these platform entry
-points. The shared VM, script, image, and audio logic remain Rust code in
-`crates/`. Switch-specific local `ogg` and `lewton` patches are excluded from
-the Vita dependency path.
+The RewriteHF `Scene.pck` used for bring-up is about 11 MiB compressed and
+43 MiB rebuilt. The rebuilt pack now remains in one `Arc<Vec<u8>>` allocation
+shared by the initial scene and the VM cache. Startup no longer copies the
+whole pack into an `Arc<[u8]>` or reloads it during the first scene restart.
+The CPU RGBA frame is allocated only when a complex effect needs it; a
+1280×720 RGBA frame uses about 3.5 MiB. Audio output uses 512 stereo frames
+and a 128 KiB worker stack. The newlib heap cap is 160 MiB. Vita movie streams
+keep one presented MPEG/OMV frame and one queued frame. MPEG, OMV, and WMV convert
+directly to no more than 960×544 RGBA pixels; for the RewriteHF 1280×720
+opening this reduces each frame from 3.69 MiB to 2.07 MiB. OMV loop-head
+frame caching is disabled on Vita; indexed seeking handles loop restarts.
+Movie streams that a scene has not polled for two seconds release their decoder
+and frame queue.
+Not all image, audio, mesh, and text caches have a measured total cap yet.
+The periodic log counts the rebuilt pack, live decoded RGBA images, GPU
+textures, and movie frames/PCM separately so growth can be tracked during
+long play sessions.
 
-## Current status
+For emulator diagnosis only, creating
+`ux0:data/siglus_rs/disable-audio` skips Vita audio-port initialization.
+Normal Vita builds start audio by default. When output is disabled, the player
+still advances Kira's mixer with silent 16 ms buffers so movie audio remains
+a working clock. Remove this file to test audio.
 
-The bootstrap and player host stubs pass `cargo check`. The player and engine
-also pass a Rust target type check with nightly `-Zbuild-std` and `DOCS_RS=1`,
-which bypasses the `vitasdk-sys` build script's SDK path check. The machine
-used for this change has no VitaSDK or `cargo-vita`; no VPK has been linked,
-packaged, or run on hardware. Suspend/resume, device audio behavior, video
-budgets, and visual parity still need validation. See [ROADMAP.md](ROADMAP.md).
+## Validation status
+
+The player links and packages with VitaSDK and `cargo-vita`. On Vita3K with
+RewriteHF and `libshacccg.suprx` installed, it parses `Gameexe.dat`, rebuilds
+`Scene.pck`, initializes the VM, and displays the Key opening animation through
+the GPU at roughly 57–60 FPS. A diagnostic run completed the roughly 100-second
+`op00.mpg` opening and returned to the script, passing 8400 player frames.
+The movie timer and picture advance with the silent mixer clock. The reduced
+MPEG frame path held one 2.07 MiB RGBA frame at frame 3000. After the opening,
+the observed heap arena reached about 155 MiB, close to the 160 MiB cap;
+further scene and hardware testing is needed. Vita3K still reports a missing
+font package. Its SDL audio subsystem
+did not initialize and its `sceAudioOutOpenPort` implementation crashed, so
+the frame trace used `disable-audio`. No physical Vita run or complete
+RewriteHF playthrough has been verified. The port remains experimental; see
+[ROADMAP.md](ROADMAP.md).

@@ -8,9 +8,9 @@ use reallive::effects::{Transition, eased, render};
 use reallive::surface::Surface;
 
 const STYLES: &[i32] = &[
-    0, 4, 5, 10, 15, 16, 17, 18, 20, 21, 25, 27, 30, 31, 34, 35, 36, 38, 40, 45, 50, 61, 62,
-    63, 64, 65, 100, 101, 102, 110, 111, 112, 113, 114, 116, 118, 120, 130, 140, 150, 160, 161,
-    162, 165, 170, 180, 181, 185, 186, 190, 194, 200, 202, 220, 230, 260, 262, 265, 269, 900,
+    0, 4, 5, 10, 15, 16, 17, 18, 20, 21, 25, 27, 30, 31, 34, 35, 36, 38, 40, 45, 50, 61, 62, 63,
+    64, 65, 100, 101, 102, 110, 111, 112, 113, 114, 116, 118, 120, 130, 140, 150, 160, 161, 162,
+    165, 170, 180, 181, 185, 186, 190, 194, 200, 202, 220, 230, 260, 262, 265, 269, 900,
 ];
 
 fn picture(w: i32, h: i32, new: bool) -> Surface {
@@ -32,7 +32,9 @@ fn picture(w: i32, h: i32, new: bool) -> Surface {
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let out = args.next().context("usage: rl_transitions <out.png> [direction]")?;
+    let out = args
+        .next()
+        .context("usage: rl_transitions <out.png> [direction]")?;
     let direction: i32 = args.next().and_then(|d| d.parse().ok()).unwrap_or(0);
     let (w, h) = (96, 72);
     let before = picture(w, h, false);
@@ -55,10 +57,24 @@ fn main() -> Result<()> {
             let frame = render(&tr, eased(style, t), &before, &after);
             let cell = (index as i32 % 4) * 3 + k as i32;
             let (x, y) = (cell * (w + 4), (index as i32 / 4) * (h + 4));
-            sheet.blit(&frame, frame.rect(), x, y, 255, reallive::surface::Blend::Copy, None);
+            sheet.blit(
+                &frame,
+                frame.rect(),
+                x,
+                y,
+                255,
+                reallive::surface::Blend::Copy,
+                None,
+            );
         }
     }
-    image::save_buffer(&out, &sheet.rgba, sheet.width as u32, sheet.height as u32, image::ColorType::Rgba8)?;
+    image::save_buffer(
+        &out,
+        &sheet.rgba,
+        sheet.width as u32,
+        sheet.height as u32,
+        image::ColorType::Rgba8,
+    )?;
     println!("{} styles", STYLES.len());
     Ok(())
 }

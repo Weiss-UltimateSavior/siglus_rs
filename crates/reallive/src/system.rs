@@ -78,6 +78,18 @@ pub struct System {
     pub key_cursor: i32,
     /// Undocumented `Sys 430..457` flag triples.
     pub misc_flags: Vec<i32>,
+    /// `SET_WAIP_WINDOWCLOSE_*` (`#WAIP_WINDOWCLOSE`): screen transitions
+    /// close the text windows first.
+    pub wipe_closes_windows: bool,
+    /// `SET_GRPCOM_WINDOWCLOSE_*` (`#GRPCOM_WINDOWCLOSE`): graphics
+    /// commands that update the screen close the text windows first.
+    pub grp_closes_windows: bool,
+    /// `SET_READJUMPCANCEL_*`: selections end skip mode.
+    pub read_jump_cancel: bool,
+    /// `CGTABLE_ON` / `CGTABLE_OFF`: whether viewed CGs are recorded.
+    pub cg_table_enabled: bool,
+    /// `ENABLE_SYSTEMMENU_ANIME` / `DISENABLE_SYSTEMMENU_ANIME`.
+    pub system_menu_animation: bool,
     pub default_grp: String,
     pub default_bgr: String,
     /// Volume or channel settings changed; the mixer should re-read them.
@@ -89,19 +101,28 @@ pub struct System {
     pub fade_out_requested: bool,
     /// The running selection, for the renderer.
     pub selection: Option<crate::select::Selection>,
+    /// Running `PCMEVENT_*` sound events, by number.
+    pub pcm_events: std::collections::BTreeMap<i32, crate::pcm_event::PcmEvent>,
+    /// A polled button-object selection (`select_btnobjstart`).
+    pub polled_buttons: Option<crate::select::PolledButtons>,
     pub sound: crate::sound::Sound,
+    pub movie: Option<crate::movie::Movie>,
 }
 
 impl Default for System {
     fn default() -> Self {
-        Self::new(Rc::new(Gameexe::default()), PathBuf::new(), SystemOptions {
-            virtual_clock: true,
-            audio: false,
-            persist: false,
-            save_dir: None,
-            nls: Nls::Sjis,
-            fonts: false,
-        })
+        Self::new(
+            Rc::new(Gameexe::default()),
+            PathBuf::new(),
+            SystemOptions {
+                virtual_clock: true,
+                audio: false,
+                persist: false,
+                save_dir: None,
+                nls: Nls::Sjis,
+                fonts: false,
+            },
+        )
     }
 }
 
@@ -109,6 +130,8 @@ impl System {
     pub fn new(gameexe: Rc<Gameexe>, root: PathBuf, options: SystemOptions) -> Self {
         let settings = Settings::from_gameexe(&gameexe);
         let resources = Resources::new(&root, &gameexe, options.nls);
+        let wipe_closes_windows = gameexe.int("WAIP_WINDOWCLOSE").unwrap_or(0) != 0;
+        let grp_closes_windows = gameexe.int("GRPCOM_WINDOWCLOSE").unwrap_or(0) != 0;
         let cg_table = gameexe
             .str("CGTABLE_FILENAME")
             .and_then(|name| resources.read(Kind::Data, name))
@@ -135,6 +158,7 @@ impl System {
         let sound = crate::sound::Sound::new(&gameexe, options.audio);
         Self {
             sound,
+            movie: None,
             gfx: Graphics::new(&gameexe, fonts),
             syscom: Syscom::from_gameexe(&gameexe),
             text: TextSystem::new(&gameexe),
@@ -158,6 +182,11 @@ impl System {
             warp_cursor: None,
             key_cursor: 0,
             misc_flags: Vec::new(),
+            wipe_closes_windows,
+            grp_closes_windows,
+            read_jump_cancel: false,
+            cg_table_enabled: true,
+            system_menu_animation: true,
             default_grp: String::new(),
             default_bgr: String::new(),
             volumes_changed: true,
@@ -166,6 +195,8 @@ impl System {
             ui: Ui::default(),
             fade_out_requested: false,
             selection: None,
+            polled_buttons: None,
+            pcm_events: Default::default(),
         }
     }
 
@@ -242,6 +273,40 @@ impl System {
             return;
         }
         // A missing sound file is not worth interrupting the game for.
-        let _ = self.sound.se_play(&self.resources, &self.settings, now, index);
+        let _ = self
+            .sound
+            .se_play(&self.resources, &self.settings, now, index);
+    }
+
+    /// Advances the movie; its sound starts with the picture.
+    pub fn update_movie(&mut self) {
+        let now = self.now();
+        let Some(movie) = self.movie.as_mut() else {
+            return;
+        };
+        let was_started = movie.started();
+        let running = movie.update(now);
+        if !was_started && movie.started() {
+            if let Some(pcm) = movie.audio_ready.take() {
+                self.sound.movie_play(&self.settings, now, &pcm);
+            }
+        }
+        if !running {
+            let movie = self.movie.take().expect("present");
+            self.sound.movie_stop();
+            if movie.looped {
+                self.movie = Some(crate::movie::Movie::open(
+                    movie.path.clone(),
+                    movie.dest,
+                    true,
+                    now,
+                ));
+            }
+        }
+    }
+
+    pub fn stop_movie(&mut self) {
+        self.movie = None;
+        self.sound.movie_stop();
     }
 }

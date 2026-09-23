@@ -53,15 +53,66 @@ pub struct Input {
     pub key_mouse: bool,
     /// Last click position for `GetClick`-style queries.
     pub last_click: Option<(i32, i32, Button)>,
+    /// `GetCursorPos` button states (left, right): 0 nothing, 1 pressed,
+    /// 2 released since the last `FlushClick`.
+    pub button_state: [i32; 2],
+    /// RealLive key-table codes (see [`key_code`]) held now.
+    pub keys_held: std::collections::BTreeSet<i32>,
+    /// Key-table codes pressed since `CLEAR_KEYTABLE` cleared them.
+    pub keys_pressed: std::collections::BTreeSet<i32>,
+}
+
+/// The key-table code of an input (`GET_KEYTABLE_DATA` and friends).
+///
+/// The codes are RealLive's own, not Windows virtual keys. They are
+/// inferred from how scripts use them: 0–3 are the cursor keys (scripts
+/// pair 0/3 against 2/1 for "previous"/"next"), 4 and 5 decide and cancel,
+/// 49 the space bar, 65/66 the mouse wheel, 80–89 the digit keys 0–9,
+/// 100/101 the mouse buttons.
+pub fn key_code(event: &InputEvent) -> Option<i32> {
+    Some(match event {
+        InputEvent::KeyDown(key) | InputEvent::KeyUp(key) => match key {
+            Key::Up => 0,
+            Key::Down => 1,
+            Key::Right => 2,
+            Key::Left => 3,
+            Key::Enter => 4,
+            Key::Escape | Key::Backspace => 5,
+            Key::Space => 49,
+            Key::PageUp => 65,
+            Key::PageDown => 66,
+            Key::Char(c @ '0'..='9') => 80 + (*c as i32 - '0' as i32),
+            _ => return None,
+        },
+        InputEvent::Press(button) | InputEvent::Release(button) => match button {
+            Button::WheelUp => 65,
+            Button::WheelDown => 66,
+            Button::Left => 100,
+            Button::Right => 101,
+        },
+        InputEvent::Text(_) => return None,
+    })
 }
 
 impl Input {
     pub fn push(&mut self, event: InputEvent) {
         match &event {
-            InputEvent::Press(Button::Left) => self.left_held = true,
-            InputEvent::Release(Button::Left) => self.left_held = false,
-            InputEvent::Press(Button::Right) => self.right_held = true,
-            InputEvent::Release(Button::Right) => self.right_held = false,
+            InputEvent::Press(Button::Left) => {
+                self.left_held = true;
+                self.button_state = [1, 0];
+            }
+            InputEvent::Release(Button::Left) => {
+                self.left_held = false;
+                self.button_state[0] = 2;
+            }
+            InputEvent::Press(Button::Right) => {
+                self.right_held = true;
+                self.button_state = [0, 1];
+            }
+            InputEvent::Release(Button::Right) => {
+                self.right_held = false;
+                self.button_state[1] = 2;
+            }
             InputEvent::KeyDown(Key::Ctrl) => self.ctrl = true,
             InputEvent::KeyUp(Key::Ctrl) => self.ctrl = false,
             InputEvent::KeyDown(Key::Shift) => self.shift = true,
@@ -70,6 +121,21 @@ impl Input {
         }
         if let InputEvent::Press(button) = event {
             self.last_click = Some((self.mouse.0, self.mouse.1, button));
+        }
+        if let Some(code) = key_code(&event) {
+            match event {
+                InputEvent::KeyDown(_) | InputEvent::Press(_) => {
+                    self.keys_held.insert(code);
+                    self.keys_pressed.insert(code);
+                    // Wheel "presses" have no release.
+                    if matches!(code, 65 | 66) {
+                        self.keys_held.remove(&code);
+                    }
+                }
+                _ => {
+                    self.keys_held.remove(&code);
+                }
+            }
         }
         self.events.push(event);
     }
@@ -137,6 +203,7 @@ impl Input {
             )
         });
         self.last_click = None;
+        self.button_state = [0, 0];
     }
 
     /// End of frame: unconsumed events expire.

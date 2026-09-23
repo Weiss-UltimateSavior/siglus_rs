@@ -166,7 +166,12 @@ impl Archive {
             return Ok(scenario.clone());
         }
         let data = self.raw(number)?;
-        let scenario = Rc::new(Scenario::parse(number, &data, self.xor2.as_ref(), self.nls)?);
+        let scenario = Rc::new(Scenario::parse(
+            number,
+            &data,
+            self.xor2.as_ref(),
+            self.nls,
+        )?);
         self.cache.borrow_mut().insert(number, scenario.clone());
         Ok(scenario)
     }
@@ -193,4 +198,62 @@ pub fn build(scenarios: &[(i32, Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(data);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key recovered statistically decodes the installed game exactly
+    /// like its known key (so unknown games work without a table entry).
+    #[test]
+    fn derived_key_matches_known_key() {
+        let Some(root) = std::env::var_os("REALLIVE_TEST_GAME") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let Some(seen) = std::fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("seen.txt"))
+            })
+        else {
+            return;
+        };
+        let ini = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("gameexe.ini"))
+            })
+            .unwrap();
+        let gameexe = crate::Gameexe::open(&ini, Nls::Sjis).unwrap();
+        let regname = gameexe.str("REGNAME").unwrap_or("").to_owned();
+        let archive = Archive::open(&seen, &regname, Nls::Sjis).unwrap();
+        let Some(known) = compression::known_xor2_key(&regname) else {
+            return;
+        };
+        let codes: Vec<Vec<u8>> = archive
+            .entries
+            .keys()
+            .filter_map(|&number| {
+                let data = archive.raw(number).ok()?;
+                Header::parse(&data).ok()?.decompress(&data).ok()
+            })
+            .collect();
+        let derived = compression::derive_xor2_key(&codes).expect("a key");
+        for code in &codes {
+            let (mut a, mut b) = (code.clone(), code.clone());
+            known.apply(&mut a);
+            derived.apply(&mut b);
+            assert!(a == b, "derived key decodes differently");
+        }
+    }
 }

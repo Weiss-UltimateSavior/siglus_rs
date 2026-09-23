@@ -677,12 +677,12 @@ impl SiglusHost {
             pck.find_scene_no(&boot.start_scene).unwrap_or(0)
         };
 
-        let chunk = pck
-            .scn_data_slice(scene_no)
+        let (owner, range) = pck
+            .scn_data_shared(scene_no)
             .with_context(|| format!("scene_id out of range: {}", scene_no))?;
         switch_startup_marker!(b"siglus_switch: vm scene-stream begin\n\0");
-        let owner: std::sync::Arc<[u8]> = std::sync::Arc::from(chunk.to_vec().into_boxed_slice());
-        let mut stream = SceneStream::new_owned_with_string_codec(owner, pck.string_codec)?;
+        let mut stream =
+            SceneStream::new_shared_range_with_string_codec(owner, range, pck.string_codec)?;
         switch_startup_marker!(b"siglus_switch: vm scene-stream complete\n\0");
         let start_z = if config.scene_id.is_some() || config.scene_name.is_some() {
             0
@@ -701,6 +701,7 @@ impl SiglusHost {
         ctx.screen_h = initial_size.1;
         switch_startup_marker!(b"siglus_switch: vm create begin\n\0");
         let mut vm = SceneVm::with_config(VmConfig::from_env(), stream, ctx);
+        vm.install_initial_scene_pck(pck, active_append);
         switch_startup_marker!(b"siglus_switch: vm create complete\n\0");
         // C_tnm_eng::init_global() loads global/read/config save data before
         // start() calls tnm_init_local() and enters the boot scene.

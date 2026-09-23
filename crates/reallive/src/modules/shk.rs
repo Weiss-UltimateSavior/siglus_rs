@@ -48,12 +48,7 @@ fn pattern(machine: &Machine, spec: i32) -> ShakeKind {
             own
         }
     };
-    ShakeKind::Pattern(
-        values
-            .chunks_exact(3)
-            .map(|c| (c[0], c[1], c[2]))
-            .collect(),
-    )
+    ShakeKind::Pattern(values.chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect())
 }
 
 /// `grp shake(spec)`: plays `#SHAKE.spec` once and waits for it.
@@ -108,6 +103,14 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         Ok(value)
     };
     let kind = match sub {
+        // QUAKE_CIRCLE(power1, time1, power2, time2, count, endCount,
+        // window, text, background, objects[, buf[, waipCopy]])
+        103 if layered => ShakeKind::Circle {
+            h_amount: next(machine)?,
+            h_speed: next(machine)?,
+            v_amount: next(machine)?,
+            v_speed: next(machine)?,
+        },
         102 => ShakeKind::TwoD {
             h_amount: next(machine)?,
             h_speed: next(machine)?,

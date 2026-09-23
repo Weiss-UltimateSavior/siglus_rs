@@ -57,7 +57,10 @@ impl Header {
             bail!("reallive: not a RealLive scenario ({} bytes)", data.len());
         }
         if i32_at(data, 0)? != HEADER_SIZE as i32 {
-            bail!("reallive: unsupported scenario header size {}", i32_at(data, 0)?);
+            bail!(
+                "reallive: unsupported scenario header size {}",
+                i32_at(data, 0)?
+            );
         }
         let compiler_version = i32_at(data, 4)?;
         let uses_xor2 = match compiler_version {
@@ -203,7 +206,10 @@ mod tests {
         code.extend(b"\x82\xa0");
         let data = build(&code, &[1_000_000], &[b"\x88\xa2"]);
         let scenario = Scenario::parse(1, &data, None, Nls::Sjis).unwrap();
-        assert_eq!(scenario.header.dramatis_personae, vec![b"\x88\xa2".to_vec()]);
+        assert_eq!(
+            scenario.header.dramatis_personae,
+            vec![b"\x88\xa2".to_vec()]
+        );
         assert_eq!(scenario.entrypoint(0), Some(0));
         assert!(matches!(scenario.script.elements[1], Element::Textout(_)));
     }

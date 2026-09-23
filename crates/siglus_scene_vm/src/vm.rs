@@ -1965,6 +1965,11 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
+    pub(crate) fn install_initial_scene_pck(&mut self, pack: ScenePck, append_dir: String) {
+        self.scene_pck_cache = Some(pack);
+        self.scene_pck_append_dir = Some(append_dir);
+    }
+
     fn ensure_scene_pck_cache(&mut self) -> Result<()> {
         let active_append = self.ctx.globals.append_dir.clone();
         let append_changed = self

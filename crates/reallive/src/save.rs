@@ -183,7 +183,9 @@ pub fn slot_memory(machine: &Machine, slot: i32) -> Option<LocalMemory> {
 
 pub fn save_slot(machine: &mut Machine, slot: i32) -> Result<()> {
     if !machine.sys.options.persist {
-        machine.saved_in_memory.insert(slot, serialize_slot(machine));
+        machine
+            .saved_in_memory
+            .insert(slot, serialize_slot(machine));
         machine.latest_save = slot;
         return Ok(());
     }
@@ -233,11 +235,13 @@ pub fn restore(machine: &mut Machine, bytes: &[u8]) -> Result<()> {
     machine.halted = false;
     machine.load_subsystems(&sections)?;
     machine.mark_savepoint();
+    machine.just_loaded = true;
     Ok(())
 }
 
 pub fn load_slot(machine: &mut Machine, slot: i32) -> Result<()> {
-    let bytes = slot_bytes(machine, slot).ok_or_else(|| anyhow!("reallive: slot {slot} is empty"))?;
+    let bytes =
+        slot_bytes(machine, slot).ok_or_else(|| anyhow!("reallive: slot {slot} is empty"))?;
     restore(machine, &bytes)
 }
 
@@ -367,7 +371,8 @@ pub fn sys_query(machine: &mut Machine, command: &Command) -> Result<()> {
             let Expr::Special { tag, pieces } = &param.value else {
                 continue;
             };
-            let (Some(src), Some(dst), Some(count)) = (pieces.first(), pieces.get(1), pieces.get(2))
+            let (Some(src), Some(dst), Some(count)) =
+                (pieces.first(), pieces.get(1), pieces.get(2))
             else {
                 continue;
             };

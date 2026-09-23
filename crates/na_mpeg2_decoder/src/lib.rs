@@ -9,7 +9,9 @@ pub mod audio;
 pub mod av;
 pub mod error;
 
-pub use convert::{frame_to_gray_rgba, frame_to_rgba_bt601_limited};
+pub use convert::{
+    frame_to_gray_rgba, frame_to_rgba_bt601_limited, frame_to_rgba_bt601_limited_scaled,
+};
 pub use demux::{Demuxer, Packet, StreamType};
 pub use pipeline::MpegVideoPipeline;
 pub use video::{Decoder, Frame, PixelFormat};

@@ -19,6 +19,8 @@ pub enum Request {
     SyscomMenu,
     /// A settings dialog for a system command (message speed, volume, ...).
     SettingsDialog(i32),
+    /// `shell`: a file of the game (its manual) for the host to open.
+    OpenFile(std::path::PathBuf),
 }
 
 /// A text box created with `CreateInput`.
@@ -107,7 +109,9 @@ fn navigate(machine: &mut Machine, overlay: &mut Overlay) -> Option<Option<usize
             InputEvent::KeyDown(Key::Down) | InputEvent::Press(Button::WheelDown) => {
                 overlay.selected = (overlay.selected + 1) % count;
             }
-            InputEvent::KeyDown(Key::PageUp) => overlay.selected = overlay.selected.saturating_sub(10),
+            InputEvent::KeyDown(Key::PageUp) => {
+                overlay.selected = overlay.selected.saturating_sub(10)
+            }
             InputEvent::KeyDown(Key::PageDown) => {
                 overlay.selected = (overlay.selected + 10).min(count - 1);
             }
@@ -117,7 +121,9 @@ fn navigate(machine: &mut Machine, overlay: &mut Overlay) -> Option<Option<usize
                         overlay
                             .hit_rects
                             .iter()
-                            .find(|(_, x, y, w, h)| mx >= *x && my >= *y && mx < x + w && my < y + h)
+                            .find(|(_, x, y, w, h)| {
+                                mx >= *x && my >= *y && mx < x + w && my < y + h
+                            })
                             .map(|entry| entry.0)
                     })
                     .flatten();
@@ -157,6 +163,11 @@ pub fn slot_count(machine: &Machine) -> i32 {
 }
 
 /// Save/load slot list.
+/// The quick-save slot: the one after the numbered slots.
+pub fn quick_slot(machine: &Machine) -> i32 {
+    slot_count(machine)
+}
+
 #[derive(Debug)]
 pub struct SlotMenu {
     kind: SlotMenuKind,
@@ -191,7 +202,11 @@ impl SlotMenu {
         Self {
             kind,
             overlay: Overlay {
-                title: if saving { "セーブ".into() } else { "ロード".into() },
+                title: if saving {
+                    "セーブ".into()
+                } else {
+                    "ロード".into()
+                },
                 rows,
                 selected: latest,
                 ..Overlay::default()
@@ -241,7 +256,12 @@ impl NameEntry {
     pub fn new(machine: &Machine, local: bool, fields: Vec<(i32, String)>) -> Self {
         let values = fields
             .iter()
-            .map(|(index, _)| machine.memory.name(local, (*index).max(0) as usize).to_owned())
+            .map(|(index, _)| {
+                machine
+                    .memory
+                    .name(local, (*index).max(0) as usize)
+                    .to_owned()
+            })
             .collect();
         Self {
             local,
@@ -295,9 +315,11 @@ impl LongOp for NameEntry {
         }
         if done {
             for ((index, _), value) in self.fields.iter().zip(&self.values) {
-                machine
-                    .memory
-                    .set_name(self.local, (*index).max(0) as usize, value.trim().to_owned());
+                machine.memory.set_name(
+                    self.local,
+                    (*index).max(0) as usize,
+                    value.trim().to_owned(),
+                );
             }
             machine.sys.ui.overlay = None;
             return Ok(true);
@@ -322,5 +344,138 @@ impl LongOp for NameEntry {
 
     fn name(&self) -> &'static str {
         "name entry"
+    }
+}
+
+/// The built-in system command menu (right click without `#CANCELCALL`).
+#[derive(Debug)]
+pub struct SyscomMenu {
+    commands: Vec<i32>,
+    overlay: Overlay,
+}
+
+impl SyscomMenu {
+    pub fn new(machine: &Machine) -> Self {
+        use crate::settings::syscom;
+        let order = [
+            syscom::SAVE,
+            syscom::LOAD,
+            syscom::RETURN_TO_PREVIOUS_SELECTION,
+            syscom::SET_SKIP_MODE,
+            syscom::AUTO_MODE,
+            syscom::SHOW_BACKGROUND,
+            syscom::MESSAGE_SPEED,
+            syscom::VOLUME_SETTINGS,
+            syscom::MENU_RETURN,
+            syscom::EXIT_GAME,
+        ];
+        let mut commands = Vec::new();
+        let mut rows = Vec::new();
+        for index in order {
+            // State 0 hides, 1 shows, 2 shows disabled.
+            let state = machine.sys.syscom.state(index);
+            if state == 0 {
+                continue;
+            }
+            let label = machine
+                .gameexe
+                .str(&format!("SYSCOM.{index:03}"))
+                .filter(|label| !label.is_empty())
+                .map_or_else(
+                    || crate::settings::syscom::default_label(index).to_owned(),
+                    str::to_owned,
+                );
+            let enabled = state == 1
+                && (index != syscom::RETURN_TO_PREVIOUS_SELECTION
+                    || machine.previous_selection.is_some());
+            commands.push(index);
+            rows.push(Row {
+                text: label,
+                enabled,
+            });
+        }
+        Self {
+            commands,
+            overlay: Overlay {
+                title: "システム".into(),
+                rows,
+                ..Overlay::default()
+            },
+        }
+    }
+}
+
+impl LongOp for SyscomMenu {
+    fn step(&mut self, machine: &mut Machine) -> Result<bool> {
+        if let Some(overlay) = &machine.sys.ui.overlay {
+            self.overlay.hit_rects.clone_from(&overlay.hit_rects);
+        }
+        let Some(choice) = navigate(machine, &mut self.overlay) else {
+            machine.sys.ui.overlay = Some(self.overlay.clone());
+            return Ok(false);
+        };
+        machine.sys.ui.overlay = None;
+        machine.sys.in_menu = false;
+        if let Some(row) = choice {
+            crate::modules::menu::invoke_syscom(machine, self.commands[row], None)?;
+        }
+        Ok(true)
+    }
+
+    fn name(&self) -> &'static str {
+        "system menu"
+    }
+}
+
+/// `MsgBox`: a message with OK (and Cancel) buttons; `store` receives 1
+/// for OK and 0 for Cancel.
+#[derive(Debug)]
+pub struct MessageBox {
+    overlay: Overlay,
+}
+
+impl MessageBox {
+    pub fn new(title: String, message: String, cancel: bool) -> Self {
+        let mut rows = vec![Row {
+            text: "OK".into(),
+            enabled: true,
+        }];
+        if cancel {
+            rows.push(Row {
+                text: "キャンセル".into(),
+                enabled: true,
+            });
+        }
+        let title = if title.is_empty() {
+            message
+        } else {
+            format!("{title}\n{message}")
+        };
+        Self {
+            overlay: Overlay {
+                title,
+                rows,
+                ..Overlay::default()
+            },
+        }
+    }
+}
+
+impl LongOp for MessageBox {
+    fn step(&mut self, machine: &mut Machine) -> Result<bool> {
+        if let Some(overlay) = &machine.sys.ui.overlay {
+            self.overlay.hit_rects.clone_from(&overlay.hit_rects);
+        }
+        let Some(choice) = navigate(machine, &mut self.overlay) else {
+            machine.sys.ui.overlay = Some(self.overlay.clone());
+            return Ok(false);
+        };
+        machine.sys.ui.overlay = None;
+        machine.store = i32::from(choice == Some(0));
+        Ok(true)
+    }
+
+    fn name(&self) -> &'static str {
+        "message box"
     }
 }

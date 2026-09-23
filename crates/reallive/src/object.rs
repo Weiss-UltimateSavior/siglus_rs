@@ -236,12 +236,12 @@ impl ObjectParams {
             rgb = apply_tint(rgb, [self.light; 3]);
         }
         if self.mono != 0 {
-            let grey =
-                ((u32::from(rgb[0]) * 77 + u32::from(rgb[1]) * 151 + u32::from(rgb[2]) * 28) >> 8)
-                    as u8;
+            let grey = ((u32::from(rgb[0]) * 77 + u32::from(rgb[1]) * 151 + u32::from(rgb[2]) * 28)
+                >> 8) as u8;
             let level = self.mono.clamp(0, 255) as u32;
             for channel in &mut rgb {
-                *channel = ((u32::from(*channel) * (255 - level) + u32::from(grey) * level) / 255) as u8;
+                *channel =
+                    ((u32::from(*channel) * (255 - level) + u32::from(grey) * level) / 255) as u8;
             }
         }
         if self.invert != 0 {
@@ -337,7 +337,23 @@ pub enum Property {
     HqWidth,
     HqHeight,
     Visible,
+    /// The clip rectangle (`objRectEria`, `objBoxEria`): left, top,
+    /// width, height, right, bottom.
+    ClipX,
+    ClipY,
+    ClipW,
+    ClipH,
+    ClipRight,
+    ClipBottom,
 }
+
+/// An unset clip, as a rectangle: large enough not to clip.
+const NO_CLIP: Rect = Rect {
+    x: 0,
+    y: 0,
+    w: 0x4000,
+    h: 0x4000,
+};
 
 impl Property {
     pub fn get(self, p: &ObjectParams) -> i32 {
@@ -369,6 +385,12 @@ impl Property {
             Property::HqWidth => p.hq_width,
             Property::HqHeight => p.hq_height,
             Property::Visible => i32::from(p.visible),
+            Property::ClipX => p.clip.unwrap_or(NO_CLIP).x,
+            Property::ClipY => p.clip.unwrap_or(NO_CLIP).y,
+            Property::ClipW => p.clip.unwrap_or(NO_CLIP).w,
+            Property::ClipH => p.clip.unwrap_or(NO_CLIP).h,
+            Property::ClipRight => p.clip.unwrap_or(NO_CLIP).right(),
+            Property::ClipBottom => p.clip.unwrap_or(NO_CLIP).bottom(),
         }
     }
 
@@ -401,6 +423,22 @@ impl Property {
             Property::HqWidth => p.hq_width = value,
             Property::HqHeight => p.hq_height = value,
             Property::Visible => p.visible = value != 0,
+            Property::ClipX
+            | Property::ClipY
+            | Property::ClipW
+            | Property::ClipH
+            | Property::ClipRight
+            | Property::ClipBottom => {
+                let r = p.clip.get_or_insert(NO_CLIP);
+                match self {
+                    Property::ClipX => r.x = value,
+                    Property::ClipY => r.y = value,
+                    Property::ClipW => r.w = value,
+                    Property::ClipH => r.h = value,
+                    Property::ClipRight => r.w = value - r.x,
+                    _ => r.h = value - r.y,
+                }
+            }
         }
     }
 }
@@ -415,9 +453,21 @@ pub struct Mutator {
     pub start: u64,
     pub duration: i32,
     pub delay: i32,
-    /// 0 linear, 1 accelerating, 2 decelerating.
+    /// 0 linear, 1 accelerating, 2 decelerating; 3 is a damped wave:
+    /// targets are `(property, amplitude, cycles)` and settle at 0.
+    /// `CURVE_WAVE_AROUND + n` is a damped wave of `n` cycles around a
+    /// base: targets are `(property, base, amplitude)`.
     pub curve: i32,
 }
+
+pub const CURVE_WAVE: i32 = 3;
+/// A mutator id that matches every running `objEve*` animation
+/// (`*EVE_ALLEVE_*`).
+pub const ALL_MUTATORS: i32 = -1;
+pub const CURVE_WAVE_AROUND: i32 = 1000;
+/// `CURVE_FLASH + n`: `n` damped pulses from the base towards base +
+/// amplitude and back.
+pub const CURVE_FLASH: i32 = 2000;
 
 impl Mutator {
     fn value_at(&self, from: i32, to: i32, now: u64) -> (i32, bool) {
@@ -429,6 +479,20 @@ impl Mutator {
             return (to, true);
         }
         let t = (now - begin) as f64 / f64::from(self.duration);
+        if self.curve >= CURVE_FLASH {
+            let cycles = f64::from(self.curve - CURVE_FLASH);
+            let pulse = (t * cycles * std::f64::consts::PI).sin().abs() * (1.0 - t);
+            return ((f64::from(from) + f64::from(to) * pulse).round() as i32, false);
+        }
+        if self.curve >= CURVE_WAVE_AROUND {
+            let cycles = f64::from(self.curve - CURVE_WAVE_AROUND);
+            let wave = (t * cycles * std::f64::consts::TAU).sin() * (1.0 - t);
+            return ((f64::from(from) + f64::from(to) * wave).round() as i32, false);
+        }
+        if self.curve == CURVE_WAVE {
+            let wave = (t * f64::from(to) * std::f64::consts::TAU).sin() * (1.0 - t);
+            return ((f64::from(from) * wave).round() as i32, false);
+        }
         let shaped = match self.curve {
             1 => t * t,
             2 => 1.0 - (1.0 - t) * (1.0 - t),
@@ -445,15 +509,33 @@ impl Mutator {
         let mut done = true;
         for &(property, from, to) in &self.targets {
             let (value, finished) = self.value_at(from, to, now);
-            property.set(params, value);
+            if finished && self.curve >= CURVE_WAVE_AROUND {
+                property.set(params, from);
+            } else if finished {
+                self.finish_one(params, property, to);
+            } else if property == Property::Visible {
+                // Shown while the effect runs, whatever it ends with.
+                property.set(params, 1);
+            } else {
+                property.set(params, value);
+            }
             done &= finished;
         }
         done
     }
 
+    fn finish_one(&self, params: &mut ObjectParams, property: Property, to: i32) {
+        let value = if self.curve == CURVE_WAVE { 0 } else { to };
+        property.set(params, value);
+    }
+
     pub fn finish(&self, params: &mut ObjectParams) {
-        for &(property, _, to) in &self.targets {
-            property.set(params, to);
+        for &(property, from, to) in &self.targets {
+            if self.curve >= CURVE_WAVE_AROUND {
+                property.set(params, from);
+            } else {
+                self.finish_one(params, property, to);
+            }
         }
     }
 }
@@ -470,7 +552,9 @@ pub struct Object {
 
 impl PartialEq for Object {
     fn eq(&self, other: &Self) -> bool {
-        self.params == other.params && self.animation == other.animation && self.mutators == other.mutators
+        self.params == other.params
+            && self.animation == other.animation
+            && self.mutators == other.mutators
     }
 }
 
@@ -552,8 +636,10 @@ impl Object {
                 } else {
                     let per = animation.parameter.max(1) as u64;
                     let elapsed = now.saturating_sub(animation.start);
-                    if matches!(animation.after, AfterAnimation::Stop | AfterAnimation::Clear)
-                        && elapsed >= per * frames as u64
+                    if matches!(
+                        animation.after,
+                        AfterAnimation::Stop | AfterAnimation::Clear
+                    ) && elapsed >= per * frames as u64
                     {
                         animation.finished = true;
                     }
@@ -571,6 +657,21 @@ impl Object {
         changed
     }
 
+    /// Length of one cycle of the running pattern animation, in ms.
+    pub fn animation_cycle(&self) -> Option<u64> {
+        let animation = self.animation.as_ref()?;
+        match self.data.as_ref()? {
+            ObjectData::Gan { gan, .. } => {
+                let set = gan.sets.get(animation.parameter.max(0) as usize)?;
+                Some(set.iter().map(|f| f.time.max(1) as u64).sum())
+            }
+            ObjectData::File { image, .. } => {
+                Some(image.regions.len().max(1) as u64 * animation.parameter.max(1) as u64)
+            }
+            _ => None,
+        }
+    }
+
     pub fn is_animating(&self) -> bool {
         self.animation.as_ref().is_some_and(|a| {
             !a.finished && matches!(a.after, AfterAnimation::Stop | AfterAnimation::Clear)
@@ -580,14 +681,14 @@ impl Object {
     pub fn has_mutator(&self, id: i32, repno: Option<i32>) -> bool {
         self.mutators
             .iter()
-            .any(|m| m.id == id && repno.is_none_or(|r| r == m.repno))
+            .any(|m| (id == ALL_MUTATORS || m.id == id) && repno.is_none_or(|r| r == m.repno))
     }
 
     /// Finishes matching mutators immediately.
     pub fn end_mutators(&mut self, id: i32, repno: Option<i32>) {
         let params = &mut self.params;
         self.mutators.retain(|m| {
-            let matches = m.id == id && repno.is_none_or(|r| r == m.repno);
+            let matches = (id == ALL_MUTATORS || m.id == id) && repno.is_none_or(|r| r == m.repno);
             if matches {
                 m.finish(params);
             }
@@ -596,7 +697,7 @@ impl Object {
     }
 
     /// The pattern and GAN offset shown at `now`.
-    fn current_frame(&self, now: u64) -> (i32, (i32, i32), i32) {
+    pub fn current_frame(&self, now: u64) -> (i32, (i32, i32), i32) {
         let pattern = self.params.pattern;
         let Some(animation) = &self.animation else {
             return (pattern, (0, 0), 255);
@@ -620,15 +721,17 @@ impl Object {
                     }
                     _ => elapsed.min(total),
                 };
+                // `GAN_CUTNO_REP` shifts the GAN's patterns (digit objects
+                // animated by one GAN).
                 for frame in set {
                     let time = frame.time.max(1) as u64;
                     if t < time {
-                        return (frame.pattern, (frame.x, frame.y), frame.alpha);
+                        return (frame.pattern + pattern, (frame.x, frame.y), frame.alpha);
                     }
                     t -= time;
                 }
                 let last = set.last().expect("non-empty");
-                (last.pattern, (last.x, last.y), last.alpha)
+                (last.pattern + pattern, (last.x, last.y), last.alpha)
             }
             Some(ObjectData::File { image, .. }) => {
                 let frames = image.regions.len().max(1) as u64;
@@ -685,7 +788,13 @@ impl Object {
 
     /// Unrotated screen bounds (button hit testing). `offset` is the
     /// parent's position for child objects.
-    pub fn bounds(&self, now: u64, fonts: &mut FontSet, colours: &[[u8; 3]], offset: (i32, i32)) -> Rect {
+    pub fn bounds(
+        &self,
+        now: u64,
+        fonts: &mut FontSet,
+        colours: &[[u8; 3]],
+        offset: (i32, i32),
+    ) -> Rect {
         let p = &self.params;
         let (w, h) = self.dimensions(now, fonts, colours);
         let pattern_origin = match self.data.as_ref() {
@@ -695,7 +804,11 @@ impl Object {
             }
             _ => (0, 0),
         };
-        let anchor = if p.origin != (0, 0) { p.origin } else { pattern_origin };
+        let anchor = if p.origin != (0, 0) {
+            p.origin
+        } else {
+            pattern_origin
+        };
         let (sx, sy) = p.scale();
         let pivot = (anchor.0 + p.rep_origin.0, anchor.1 + p.rep_origin.1);
         let (ax, ay) = p.adjust_sum();
@@ -889,7 +1002,15 @@ impl Object {
         if p.has_effects() {
             let params = p.clone();
             let shade = move |px: [u8; 4]| params.shade(px);
-            dst.draw_transformed(bitmap, src_rect, &transform, clip, alpha as u8, blend, Some(&shade));
+            dst.draw_transformed(
+                bitmap,
+                src_rect,
+                &transform,
+                clip,
+                alpha as u8,
+                blend,
+                Some(&shade),
+            );
         } else {
             dst.draw_transformed(bitmap, src_rect, &transform, clip, alpha as u8, blend, None);
         }
@@ -937,11 +1058,17 @@ impl Object {
             };
             let region = image.region(pattern);
             let src = Rect::from_corners(region.x1, region.y1, region.x2, region.y2);
-            let transform = Transform::translation(
-                f64::from(x0 + sway - src.x),
-                f64::from(y - src.y),
+            let transform =
+                Transform::translation(f64::from(x0 + sway - src.x), f64::from(y - src.y));
+            dst.draw_transformed(
+                bitmap,
+                src,
+                &transform,
+                clip,
+                alpha.clamp(0, 255) as u8,
+                Blend::Mask,
+                None,
             );
-            dst.draw_transformed(bitmap, src, &transform, clip, alpha.clamp(0, 255) as u8, Blend::Mask, None);
         }
     }
 }
@@ -984,7 +1111,11 @@ pub fn digit_patterns(d: &DigitParams) -> Vec<i32> {
 
 /// Parses the text-object control syntax (`#c`, `#d`, `#s`, `#x`, `#y`,
 /// `##`) and renders the text.
-pub fn render_text_object(params: &TextParams, fonts: &mut FontSet, colours: &[[u8; 3]]) -> Surface {
+pub fn render_text_object(
+    params: &TextParams,
+    fonts: &mut FontSet,
+    colours: &[[u8; 3]],
+) -> Surface {
     #[derive(Clone, Copy)]
     struct Placed {
         c: char,
@@ -1036,7 +1167,8 @@ pub fn render_text_object(params: &TextParams, fonts: &mut FontSet, colours: &[[
                 }
                 Some('c') => {
                     i += 2;
-                    colour = read_number(&mut i).map_or(params.colour.max(0) as usize, |v| v.max(0) as usize);
+                    colour = read_number(&mut i)
+                        .map_or(params.colour.max(0) as usize, |v| v.max(0) as usize);
                     continue;
                 }
                 Some('s') => {
@@ -1065,7 +1197,13 @@ pub fn render_text_object(params: &TextParams, fonts: &mut FontSet, colours: &[[
             y += line_height(size);
             on_line = 0;
         }
-        placed.push(Placed { c, x, y, size, colour });
+        placed.push(Placed {
+            c,
+            x,
+            y,
+            size,
+            colour,
+        });
         x += width + params.xspace;
         on_line += cells;
         i += 1;
@@ -1091,7 +1229,10 @@ pub fn render_text_object(params: &TextParams, fonts: &mut FontSet, colours: &[[
         };
         let baseline = item.y + fonts.ascent(item.size as u32).round() as i32;
         let passes: &[(i32, [u8; 3])] = if shadow {
-            &[(1, colour_of(params.shadow as usize)), (0, colour_of(item.colour))]
+            &[
+                (1, colour_of(params.shadow as usize)),
+                (0, colour_of(item.colour)),
+            ]
         } else {
             &[(0, colour_of(item.colour))]
         };
@@ -1115,11 +1256,9 @@ pub fn render_text_object(params: &TextParams, fonts: &mut FontSet, colours: &[[
                     for c in 0..3 {
                         let old = u32::from(surface.rgba[at + c]) * old_a * (255 - a) / 255;
                         let new = u32::from(rgb[c]) * a;
-                        surface.rgba[at + c] = if out_a == 0 {
-                            0
-                        } else {
-                            ((new + old) / out_a).min(255) as u8
-                        };
+                        surface.rgba[at + c] = (new + old)
+                            .checked_div(out_a)
+                            .map_or(0, |v| v.min(255) as u8);
                     }
                     surface.rgba[at + 3] = out_a.min(255) as u8;
                 }

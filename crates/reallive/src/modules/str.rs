@@ -62,7 +62,9 @@ pub fn atoi(text: &str) -> i32 {
     let value = digits
         .bytes()
         .take_while(u8::is_ascii_digit)
-        .fold(0i64, |acc, digit| (acc * 10 + i64::from(digit - b'0')).min(i64::from(u32::MAX)));
+        .fold(0i64, |acc, digit| {
+            (acc * 10 + i64::from(digit - b'0')).min(i64::from(u32::MAX))
+        });
     let value = if negative { -value } else { value };
     value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
@@ -134,16 +136,14 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             };
             let chars: Vec<char> = source.chars().collect();
             if op.opcode == 6 {
-                if length.is_some_and(|length| length > offset) {
-                    bail!("reallive: strrsub length is greater than its offset");
-                }
                 offset = chars.len() as i32 - offset;
             }
-            if offset < 0 || offset as usize > chars.len() {
-                bail!("reallive: strsub offset {offset} is outside the string");
-            }
-            let tail = &chars[offset as usize..];
-            let take = length.map_or(tail.len(), |length| (length.max(0) as usize).min(tail.len()));
+            // Out of range: whatever part of the string is left (scripts
+            // run past the end, e.g. LB's SEEN9515).
+            let tail = &chars[(offset.max(0) as usize).min(chars.len())..];
+            let take = length.map_or(tail.len(), |length| {
+                (length.max(0) as usize).min(tail.len())
+            });
             set(machine, dest, tail[..take].iter().collect())?;
         }
         // strcharlen(s)
@@ -186,7 +186,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             } else {
                 -1
             };
-            let fill = if matches!(op.opcode, 14 | 15) { ' ' } else { '0' };
+            let fill = if matches!(op.opcode, 14 | 15) {
+                ' '
+            } else {
+                '0'
+            };
             let mut text = itoa(value, length, fill);
             if matches!(op.opcode, 14 | 16) {
                 text = nls::han_to_zen(&text);

@@ -42,7 +42,9 @@ impl Pcm {
     }
 
     pub fn duration_ms(&self) -> u64 {
-        (self.frames() as u64 * 1000).checked_div(u64::from(self.rate)).unwrap_or(0)
+        (self.frames() as u64 * 1000)
+            .checked_div(u64::from(self.rate))
+            .unwrap_or(0)
     }
 
     /// Keeps frames `from..to`.
@@ -81,12 +83,16 @@ impl Pcm {
 // ---- decoders ---------------------------------------------------------------
 
 fn le_u16(bytes: &[u8], at: usize) -> Result<u16> {
-    let b = bytes.get(at..at + 2).context("reallive: truncated audio data")?;
+    let b = bytes
+        .get(at..at + 2)
+        .context("reallive: truncated audio data")?;
     Ok(u16::from_le_bytes([b[0], b[1]]))
 }
 
 fn le_u32(bytes: &[u8], at: usize) -> Result<u32> {
-    let b = bytes.get(at..at + 4).context("reallive: truncated audio data")?;
+    let b = bytes
+        .get(at..at + 4)
+        .context("reallive: truncated audio data")?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
@@ -112,7 +118,10 @@ pub fn decode_wav(bytes: &[u8]) -> Result<Pcm> {
             let data = &bytes[body..end];
             let samples = match bits {
                 8 => data.iter().map(|&b| (i16::from(b) - 128) << 8).collect(),
-                16 => data.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect(),
+                16 => data
+                    .chunks_exact(2)
+                    .map(|p| i16::from_le_bytes([p[0], p[1]]))
+                    .collect(),
                 other => bail!("reallive: {other}-bit WAVE files are not supported"),
             };
             return Ok(Pcm {
@@ -134,11 +143,14 @@ pub fn decode_nwa(bytes: Vec<u8>) -> Result<Pcm> {
     let data = reader.read_samples(frames)?;
     let samples = match header.bits_per_sample {
         8 => data.iter().map(|&b| (i16::from(b) - 128) << 8).collect(),
-        _ => data.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect(),
+        _ => data
+            .chunks_exact(2)
+            .map(|p| i16::from_le_bytes([p[0], p[1]]))
+            .collect(),
     };
     Ok(Pcm {
         rate: header.samples_per_sec,
-        channels: header.channels as u16,
+        channels: header.channels,
         samples,
         loop_start: None,
     })
@@ -186,7 +198,11 @@ fn koe_sample(byte: u8) -> i16 {
 
 /// DPCM step for a code (0, -1, +1, -2, +2, ...).
 fn koe_delta(code: u8) -> u8 {
-    if code & 1 == 0 { code >> 1 } else { 0xff - (code >> 1) }
+    if code & 1 == 0 {
+        code >> 1
+    } else {
+        0xff - (code >> 1)
+    }
 }
 
 /// Decodes one `KOEPAC` entry: a table of block sizes, then the blocks.
@@ -198,7 +214,9 @@ pub fn decode_koepac(bytes: &[u8], offset: usize, blocks: usize, rate: u32) -> R
     let mut at = offset + blocks * 2;
     let mut samples = Vec::with_capacity(blocks * 0x400);
     for size in sizes {
-        let block = bytes.get(at..at + size).context("reallive: truncated KOE block")?;
+        let block = bytes
+            .get(at..at + size)
+            .context("reallive: truncated KOE block")?;
         match size {
             0 => samples.extend(std::iter::repeat_n(0, 0x400)),
             0x400 => samples.extend(block.iter().map(|&b| koe_sample(b))),
@@ -258,7 +276,8 @@ struct VoiceArchive {
 
 impl VoiceArchive {
     fn open(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let extension = path
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -302,10 +321,9 @@ impl VoiceArchive {
     }
 
     fn decode(&self, sample: i32) -> Result<Pcm> {
-        let &(offset, length) = self
-            .entries
-            .get(&sample)
-            .with_context(|| format!("reallive: voice {sample} is not in {}", self.path.display()))?;
+        let &(offset, length) = self.entries.get(&sample).with_context(|| {
+            format!("reallive: voice {sample} is not in {}", self.path.display())
+        })?;
         let bytes = std::fs::read(&self.path)?;
         match self.kind {
             ArchiveKind::Koepac { rate } => decode_koepac(&bytes, offset, length, rate),
@@ -424,6 +442,7 @@ pub struct Sound {
     wav: [Option<Voice>; WAV_CHANNELS],
     koe: Option<Voice>,
     se: Vec<Voice>,
+    movie: Option<Voice>,
     /// Script volumes (`bgmSetVolume` etc.).
     bgm_volume: Ramp,
     wav_volume: [Ramp; WAV_CHANNELS],
@@ -436,7 +455,9 @@ pub struct Sound {
 
 impl std::fmt::Debug for Sound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sound").field("bgm", &self.bgm_name).finish_non_exhaustive()
+        f.debug_struct("Sound")
+            .field("bgm", &self.bgm_name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -461,7 +482,11 @@ impl Sound {
         let mut se_table = BTreeMap::new();
         for entry in gameexe.filter("SE.") {
             if let Some(number) = entry.key_number(1) {
-                let file = entry.strs().first().map(|s| (*s).to_owned()).unwrap_or_default();
+                let file = entry
+                    .strs()
+                    .first()
+                    .map(|s| (*s).to_owned())
+                    .unwrap_or_default();
                 let channel = entry.ints().first().copied().unwrap_or(-1);
                 se_table.insert(number, (file, channel));
             }
@@ -469,7 +494,10 @@ impl Sound {
         let mut koe_characters = HashMap::new();
         for entry in gameexe.filter("KOEONOFF.") {
             let parts = entry.key_parts();
-            let (Some(usekoe), Some(ids)) = (parts.get(1).and_then(|p| p.parse::<i32>().ok()), parts.get(2)) else {
+            let (Some(usekoe), Some(ids)) = (
+                parts.get(1).and_then(|p| p.parse::<i32>().ok()),
+                parts.get(2),
+            ) else {
                 continue;
             };
             for id in ids.trim_matches(|c| c == '(' || c == ')').split(',') {
@@ -495,6 +523,7 @@ impl Sound {
             wav: Default::default(),
             koe: None,
             se: Vec::new(),
+            movie: None,
             bgm_volume: Ramp::fixed(255),
             wav_volume: [Ramp::fixed(255); WAV_CHANNELS],
             koe_volume: Ramp::fixed(255),
@@ -595,7 +624,11 @@ impl Sound {
         if let Some(track) = self.tracks.get(&name.to_lowercase()).cloned() {
             let mut pcm = self.load(resources, Kind::Bgm, &track.file)?;
             let from = track.from.max(0) as usize;
-            let to = if track.to <= 0 { usize::MAX } else { track.to as usize };
+            let to = if track.to <= 0 {
+                usize::MAX
+            } else {
+                track.to as usize
+            };
             pcm.trim(from, to);
             pcm.loop_start = Some((track.looped_from.max(0) as usize).saturating_sub(from));
             return Ok(pcm);
@@ -605,7 +638,16 @@ impl Sound {
 
     /// `bgmPlay` / `bgmLoop`. With `fade_out`, the current track fades
     /// out first and the new one starts afterwards.
-    pub fn bgm_play(&mut self, resources: &Resources, settings: &Settings, now: u64, name: &str, looped: bool, fade_in: u64, fade_out: u64) -> Result<()> {
+    pub fn bgm_play(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        name: &str,
+        looped: bool,
+        fade_in: u64,
+        fade_out: u64,
+    ) -> Result<()> {
         if fade_out > 0 && self.bgm_playing(now) {
             Self::fade_out(&mut self.bgm, now, fade_out);
             self.queued_bgm = Some((name.to_owned(), looped, fade_in, now + fade_out));
@@ -667,7 +709,12 @@ impl Sound {
         }
     }
 
-    pub fn bgm_rewind(&mut self, resources: &Resources, settings: &Settings, now: u64) -> Result<()> {
+    pub fn bgm_rewind(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+    ) -> Result<()> {
         if self.bgm_name.is_empty() {
             return Ok(());
         }
@@ -688,7 +735,16 @@ impl Sound {
 
     /// `wavPlay` family. `channel` None picks a free channel.
     #[allow(clippy::too_many_arguments)]
-    pub fn wav_play(&mut self, resources: &Resources, settings: &Settings, now: u64, name: &str, channel: Option<usize>, looped: bool, fade_in: u64) -> Result<usize> {
+    pub fn wav_play(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        name: &str,
+        channel: Option<usize>,
+        looped: bool,
+        fade_in: u64,
+    ) -> Result<usize> {
         let index = match channel {
             Some(c) => c.min(WAV_CHANNELS - 1),
             None => (0..WAV_CHANNELS)
@@ -697,7 +753,12 @@ impl Sound {
         };
         Self::stop(self.wav[index].take(), 0);
         let pcm = self.load(resources, Kind::Wav, name)?;
-        let volume = self.volume_of(settings, channel::PCM, now, self.wav_volume[index].value(now));
+        let volume = self.volume_of(
+            settings,
+            channel::PCM,
+            now,
+            self.wav_volume[index].value(now),
+        );
         self.wav[index] = Some(self.start(&pcm, looped, volume, fade_in, now));
         Ok(index)
     }
@@ -715,7 +776,10 @@ impl Sound {
     }
 
     pub fn wav_playing(&self, channel: usize, now: u64) -> bool {
-        self.wav.get(channel).and_then(Option::as_ref).is_some_and(|v| v.playing(now))
+        self.wav
+            .get(channel)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| v.playing(now))
     }
 
     pub fn set_wav_volume(&mut self, channel: usize, now: u64, volume: i32, fade: u64) {
@@ -731,11 +795,19 @@ impl Sound {
     // ---- interface sounds -------------------------------------------------
 
     pub fn has_se(&self, number: i32) -> bool {
-        self.se_table.get(&number).is_some_and(|(file, _)| !file.is_empty())
+        self.se_table
+            .get(&number)
+            .is_some_and(|(file, _)| !file.is_empty())
     }
 
     /// `sePlay(n)` and interface sounds: `#SE.nnn`.
-    pub fn se_play(&mut self, resources: &Resources, settings: &Settings, now: u64, number: i32) -> Result<()> {
+    pub fn se_play(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        number: i32,
+    ) -> Result<()> {
         let Some((file, _)) = self.se_table.get(&number).cloned() else {
             return Ok(());
         };
@@ -755,10 +827,9 @@ impl Sound {
     fn voice_pcm(&mut self, resources: &Resources, id: i32) -> Result<Pcm> {
         let file = id / 100_000;
         let sample = id % 100_000;
-        if !self.voices.contains_key(&file) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.voices.entry(file) {
             if let Some(path) = resources.find(Kind::Koe, &format!("z{file:04}")) {
-                let archive = VoiceArchive::open(&path)?;
-                self.voices.insert(file, archive);
+                slot.insert(VoiceArchive::open(&path)?);
             }
         }
         if let Some(archive) = self.voices.get(&file) {
@@ -781,7 +852,13 @@ impl Sound {
         }
     }
 
-    pub fn koe_play(&mut self, resources: &Resources, settings: &Settings, now: u64, id: i32) -> Result<()> {
+    pub fn koe_play(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        id: i32,
+    ) -> Result<()> {
         Self::stop(self.koe.take(), 0);
         // Mode 2 is "text only".
         if settings.koe_mode == 2 || !settings.enabled[channel::KOE] {
@@ -809,13 +886,28 @@ impl Sound {
         self.koe_volume.value(now)
     }
 
+    // ---- movies ----------------------------------------------------------------
+
+    /// A movie's sound track (at the music volume).
+    pub fn movie_play(&mut self, settings: &Settings, now: u64, pcm: &Pcm) {
+        Self::stop(self.movie.take(), 0);
+        let volume = self.volume_of(settings, channel::BGM, now, 255);
+        self.movie = Some(self.start(pcm, false, volume, 0, now));
+    }
+
+    pub fn movie_stop(&mut self) {
+        Self::stop(self.movie.take(), 0);
+    }
+
     // ---- housekeeping ---------------------------------------------------------
 
     fn volume_of(&self, settings: &Settings, index: usize, now: u64, script: i32) -> f64 {
         if !settings.enabled[index] {
             return 0.0;
         }
-        let mut volume = f64::from(settings.volume[index].clamp(0, 255)) / 255.0 * f64::from(script.clamp(0, 255)) / 255.0;
+        let mut volume = f64::from(settings.volume[index].clamp(0, 255)) / 255.0
+            * f64::from(script.clamp(0, 255))
+            / 255.0;
         // Music ducks under voices.
         if index == channel::BGM && settings.bgm_koe_fade && self.koe_playing(now) {
             volume *= f64::from(settings.bgm_koe_fade_vol.clamp(0, 255)) / 255.0;
@@ -853,9 +945,15 @@ impl Sound {
             if self.manager.is_none() {
                 return;
             }
-            let mut wanted = vec![self.volume_of(settings, channel::BGM, now, self.bgm_volume.value(now))];
+            let mut wanted =
+                vec![self.volume_of(settings, channel::BGM, now, self.bgm_volume.value(now))];
             for c in 0..WAV_CHANNELS {
-                wanted.push(self.volume_of(settings, channel::PCM, now, self.wav_volume[c].value(now)));
+                wanted.push(self.volume_of(
+                    settings,
+                    channel::PCM,
+                    now,
+                    self.wav_volume[c].value(now),
+                ));
             }
             wanted.push(self.volume_of(settings, channel::KOE, now, self.koe_volume.value(now)));
             if wanted == self.applied {
@@ -884,11 +982,13 @@ impl Sound {
         for voice in self.se.drain(..) {
             Self::stop(Some(voice), 0);
         }
+        self.movie_stop();
     }
 
     /// Music to resume after loading a save: (name, looped).
     pub fn current_bgm(&self, now: u64) -> Option<(String, bool)> {
-        (self.bgm_playing(now) && !self.bgm_name.is_empty()).then(|| (self.bgm_name.clone(), self.bgm_looped))
+        (self.bgm_playing(now) && !self.bgm_name.is_empty())
+            .then(|| (self.bgm_name.clone(), self.bgm_looped))
     }
 }
 

@@ -367,7 +367,10 @@ impl<'a> Parser<'a> {
     pub fn assignment(&mut self) -> Result<Expr> {
         let target = self.term()?;
         if self.peek() != b'\\' {
-            bail!("reallive: expected an assignment operator at 0x{:x}", self.pos);
+            bail!(
+                "reallive: expected an assignment operator at 0x{:x}",
+                self.pos
+            );
         }
         let operation = self.at(1);
         self.pos += 2;
@@ -659,11 +662,7 @@ mod tests {
         let bytes = binary(&binary(&int(1), op::ADD, &int(2)), op::MUL, &int(3));
         assert_eq!(parse(&bytes), Expr::Int(7));
         // intA[0] == 3 && 1
-        let bytes = binary(
-            &binary(&int_a(0), op::EQ, &int(3)),
-            b'<',
-            &int(1),
-        );
+        let bytes = binary(&binary(&int_a(0), op::EQ, &int(3)), b'<', &int(1));
         match parse(&bytes) {
             Expr::Binary(op::LAND, left, right) => {
                 assert!(matches!(*left, Expr::Binary(op::EQ, _, _)));

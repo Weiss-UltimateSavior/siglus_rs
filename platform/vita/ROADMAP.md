@@ -1,6 +1,6 @@
 # PS Vita Port Roadmap
 
-Status: bootstrap probe and initial Vita player source added. The Rust Vita target type checks; SDK linking, VPK packaging, hardware behavior, and full compatibility remain unvalidated.
+Status: the Vita player links and packages as a VPK. Vita3K runs RewriteHF's configuration, scene-pack, and VM initialization, renders the Key opening, and completes the approximately 100-second `op00.mpg` movie after installing `libshacccg.suprx`. A diagnostic run passed 8400 player frames. Movie buffers are capped to Vita display resolution and reduced queue sizes. Physical Vita behavior and full compatibility remain unvalidated.
 
 Related request: [Issue #23](https://github.com/xmoezzz/siglus_rs/issues/23).
 
@@ -13,7 +13,7 @@ The goal is to reuse the existing script execution, resource parsing, and game s
 | Scripts and runtime | [vm.rs](../../crates/siglus_scene_vm/src/vm.rs), [runtime](../../crates/siglus_scene_vm/src/runtime/mod.rs) | Reuse instruction semantics; isolate platform services and audit transitive dependencies |
 | Frame stepping and input | `step()`, key, and touch interfaces in [host.rs](../../crates/siglus_scene_vm/src/host.rs) | Preserve the driving model; remove the coupling between `SiglusHost` and the concrete `Renderer` |
 | Drawing data | `RenderFrame` in [layer.rs](../../crates/siglus_scene_vm/src/layer.rs) | Use shared data across backends; define ordering, blending, clipping, and capture semantics |
-| Rendering | [render/mod.rs](../../crates/siglus_scene_vm/src/render/mod.rs), [render/switch.rs](../../crates/siglus_scene_vm/src/render/switch.rs) | Initial Vita path uses the shared CPU renderer with one CDRAM scanout; validate blending, effects, frame time, and memory on hardware |
+| Rendering | [render/mod.rs](../../crates/siglus_scene_vm/src/render/mod.rs), [render/switch.rs](../../crates/siglus_scene_vm/src/render/switch.rs), [gpu.rs](player/src/gpu.rs) | VitaGL GPU quads handle simple sprites; complex effects use a CPU fallback uploaded to the GPU. Validate both paths with the shader compiler installed, then measure frame time and memory on hardware |
 | Audio | [audio/kira_hub.rs](../../crates/siglus_scene_vm/src/audio/kira_hub.rs), [audio/switch_backend.rs](../../crates/siglus_scene_vm/src/audio/switch_backend.rs) | Vita now pulls Kira PCM through a bounded output buffer; validate rate, underruns, and lifecycle on hardware |
 | Resources and video | [siglus_assets](../../crates/siglus_assets/Cargo.toml), [na_mpeg2_decoder](../../crates/na_mpeg2_decoder/Cargo.toml), [movie](../../crates/siglus_scene_vm/src/movie/mod.rs) | The MPEG decoder's desktop player dependencies are now optional; the engine movie module still uses Kira types directly and needs a bounded Vita path |
 
@@ -24,11 +24,11 @@ Rust provides the Tier 3 target `armv7-sony-vita-newlibeabihf`. It requires nigh
 ## Technical direction
 
 - **Platform entry point:** Add a Vita main loop that calls VitaSDK through Rust FFI for startup, timing, buttons, touch, file paths, and shutdown.
-- **Rendering:** The initial implementation shares the Switch CPU renderer and copies a letterboxed RGBA frame into one CDRAM block. Measure it on hardware before choosing whether to implement accelerated GXM drawing for demanding effects or video.
+- **Rendering:** VitaGL submits ordinary 2D sprites as GPU textured quads and presents through a two-buffer scanout. Complex effects still use the shared CPU compositor before GPU upload. Validate visual parity, allocation budgets, and shader compiler availability on hardware.
 - **Audio:** Reuse portable decoding and Kira playback semantics, with bounded PCM output through VitaSDK.
 - **Build:** Use VitaSDK, Rust nightly, and `cargo-vita` to generate VPKs. After validating the toolchain, pin versions or an image digest and upgrade them through separate changes. [Vita Rust build guide](https://vita-rust.github.io/book/build/index.html)
 
-The standalone M0 probe and an M1/M3 player skeleton are present but have not been built with VitaSDK or run on hardware. Remaining milestone work and acceptance checks are still open.
+The M0 probe and player have been built with VitaSDK; the player VPK has been launched in Vita3K with RewriteHF and a separately supplied shader compiler. The emulator still lacks the font package, and its audio-port call crashes, so this run does not satisfy gameplay or hardware acceptance. Remaining milestone work and checks are open.
 
 ## M0: Establish the toolchain and hardware validation process
 

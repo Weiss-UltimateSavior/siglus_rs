@@ -169,7 +169,13 @@ fn reveal_function(tr: &Transition, w: i32, h: i32, soft: f64) -> Option<Reveal>
     let dir = tr.direction;
     let cell_x = tr.xsize.max(1);
     let cell_y = if tr.ysize > 0 { tr.ysize } else { cell_x };
-    let strip = if tr.xsize > 0 { tr.xsize } else if tr.ysize > 0 { tr.ysize } else { 16 };
+    let strip = if tr.xsize > 0 {
+        tr.xsize
+    } else if tr.ysize > 0 {
+        tr.ysize
+    } else {
+        16
+    };
     // Centre point for centred shapes: 0 centre, 1-4 corners.
     let centre = match dir {
         1 => (0.0, 0.0),
@@ -220,7 +226,10 @@ fn reveal_function(tr: &Transition, w: i32, h: i32, soft: f64) -> Option<Reveal>
             };
             let reach = if dir == 0 { reach } else { reach * 2.0 };
             Box::new(move |x, y| {
-                let (dx, dy) = ((f64::from(x) + 0.5 - cx).abs(), (f64::from(y) + 0.5 - cy).abs());
+                let (dx, dy) = (
+                    (f64::from(x) + 0.5 - cx).abs(),
+                    (f64::from(y) + 0.5 - cy).abs(),
+                );
                 let d = match shape {
                     25 => dx.max(dy),
                     27 => dx + dy,
@@ -235,7 +244,6 @@ fn reveal_function(tr: &Transition, w: i32, h: i32, soft: f64) -> Option<Reveal>
         30 | 31 | 100 => {
             let vertical_strips = style == 31 || dir >= 2;
             let alternate = style == 31;
-            let strip = strip;
             Box::new(move |x, y| {
                 let (pos, len, index) = if vertical_strips {
                     (f64::from(y), hf, x / strip)
@@ -275,24 +283,25 @@ fn reveal_function(tr: &Transition, w: i32, h: i32, soft: f64) -> Option<Reveal>
                 };
                 let from_edge = pos.min(len - pos - 1.0);
                 let half = len / 2.0;
-                let p = if outwards { half - from_edge } else { from_edge };
+                let p = if outwards {
+                    half - from_edge
+                } else {
+                    from_edge
+                };
                 sweep(p, half, soft)
             })
         }
         // Venetian blinds.
-        120 => {
-            let strip = strip;
-            Box::new(move |x, y| {
-                let (pos, reversed) = match dir % 4 {
-                    0 => (y % strip, false),
-                    1 => (y % strip, true),
-                    2 => (x % strip, false),
-                    _ => (x % strip, true),
-                };
-                let p = if reversed { strip - pos - 1 } else { pos };
-                sweep(f64::from(p), f64::from(strip), soft.min(f64::from(strip)))
-            })
-        }
+        120 => Box::new(move |x, y| {
+            let (pos, reversed) = match dir % 4 {
+                0 => (y % strip, false),
+                1 => (y % strip, true),
+                2 => (x % strip, false),
+                _ => (x % strip, true),
+            };
+            let p = if reversed { strip - pos - 1 } else { pos };
+            sweep(f64::from(p), f64::from(strip), soft.min(f64::from(strip)))
+        }),
         // Diagonal wipe.
         130 => Box::new(move |x, y| {
             let (fx, fy) = (f64::from(x), f64::from(y));
@@ -342,7 +351,14 @@ fn reveal_function(tr: &Transition, w: i32, h: i32, soft: f64) -> Option<Reveal>
                     }
                     _ => 0.5,
                 };
-                (start + local * 0.25, if style == 61 || style == 62 { 0.25 } else { 0.05 })
+                (
+                    start + local * 0.25,
+                    if style == 61 || style == 62 {
+                        0.25
+                    } else {
+                        0.05
+                    },
+                )
             })
         }
         // Random block / row fades.
@@ -522,14 +538,30 @@ impl Axis {
     fn point(&self, u: f64, across: f64) -> (f64, f64) {
         let v = if self.reversed { self.len - u } else { u };
         let v = v.clamp(0.0, self.len - 1e-6);
-        if self.horizontal { (v, across) } else { (across, v) }
+        if self.horizontal {
+            (v, across)
+        } else {
+            (across, v)
+        }
     }
 }
 
-fn motion_sample(axis: Axis, kind: Motion, u: f64, across: f64, len: f64, p: f64, offset: f64) -> Sample {
+fn motion_sample(
+    axis: Axis,
+    kind: Motion,
+    u: f64,
+    across: f64,
+    len: f64,
+    p: f64,
+    offset: f64,
+) -> Sample {
     let (new, source) = motion(kind, u, len, p);
     let (x, y) = axis.point(source + offset, across);
-    if new { Sample::After(x, y) } else { Sample::Before(x, y) }
+    if new {
+        Sample::After(x, y)
+    } else {
+        Sample::Before(x, y)
+    }
 }
 
 fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
@@ -557,7 +589,15 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
         15..=18 | 20 | 21 => {
             let kind = motion_of(style);
             Box::new(move |x, y| {
-                motion_sample(axis, kind, axis.along(x, y), axis.across(x, y), len, t * len, 0.0)
+                motion_sample(
+                    axis,
+                    kind,
+                    axis.along(x, y),
+                    axis.across(x, y),
+                    len,
+                    t * len,
+                    0.0,
+                )
             })
         }
         // Two halves moving towards the centre (inwards) or away from it
@@ -585,7 +625,11 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
                     (false, true) => half + source,
                 };
                 let (x, y) = axis.point(back, across);
-                if new { Sample::After(x, y) } else { Sample::Before(x, y) }
+                if new {
+                    Sample::After(x, y)
+                } else {
+                    Sample::Before(x, y)
+                }
             })
         }
         // Strips: alternate directions, transparent slides, random delays.
@@ -609,7 +653,8 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
                     // The new picture slides in (38) or the old slides
                     // out (39) while the two blend.
                     let shift = (1.0 - local) * len * 0.25;
-                    let (sx, sy) = strip_axis.point(if style == 38 { u + shift } else { u }, across);
+                    let (sx, sy) =
+                        strip_axis.point(if style == 38 { u + shift } else { u }, across);
                     return Sample::Blend {
                         before: (x, y),
                         after: (sx, sy),
@@ -646,7 +691,11 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
                 4 => (wf, hf),
                 _ => (wf / 2.0, hf / 2.0),
             };
-            let (cx, cy) = if matches!(style, 165 | 166) { (0.0, 0.0) } else { (cx, cy) };
+            let (cx, cy) = if matches!(style, 165 | 166) {
+                (0.0, 0.0)
+            } else {
+                (cx, cy)
+            };
             Box::new(move |x, y| {
                 // (new picture grows in, degrees of rotation while zooming)
                 let (grow_new, rotate) = match style {
@@ -666,8 +715,13 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
                     _ => (false, 90.0),
                 };
                 if grow_new {
-                    let local = if style == 162 || style == 262 { (t - 0.5) * 2.0 } else { t };
-                    let (sx, sy) = rotate_scale(x, y, cx, cy, local.max(0.01), (1.0 - local) * rotate);
+                    let local = if style == 162 || style == 262 {
+                        (t - 0.5) * 2.0
+                    } else {
+                        t
+                    };
+                    let (sx, sy) =
+                        rotate_scale(x, y, cx, cy, local.max(0.01), (1.0 - local) * rotate);
                     if sample_in(sx, sy, wf, hf) {
                         Sample::Blend {
                             before: (x, y),
@@ -678,8 +732,13 @@ fn geometric_function(tr: &Transition, w: i32, h: i32, t: f64) -> Geometric {
                         Sample::Before(x, y)
                     }
                 } else {
-                    let local = if style == 162 || style == 262 { t * 2.0 } else { t };
-                    let (sx, sy) = rotate_scale(x, y, cx, cy, (1.0 - local).max(0.01), local * rotate);
+                    let local = if style == 162 || style == 262 {
+                        t * 2.0
+                    } else {
+                        t
+                    };
+                    let (sx, sy) =
+                        rotate_scale(x, y, cx, cy, (1.0 - local).max(0.01), local * rotate);
                     if sample_in(sx, sy, wf, hf) {
                         Sample::Blend {
                             before: (sx, sy),
@@ -793,12 +852,12 @@ mod tests {
     }
 
     const STYLES: &[i32] = &[
-        0, 1, 2, 4, 5, 10, 15, 16, 17, 18, 20, 21, 25, 27, 30, 31, 34, 35, 36, 37, 38, 39, 40,
-        45, 50, 54, 61, 62, 63, 64, 65, 100, 101, 102, 110, 111, 112, 113, 114, 115, 116, 117,
-        118, 119, 120, 130, 140, 150, 160, 161, 162, 163, 164, 165, 166, 170, 171, 180, 181,
-        185, 186, 187, 190, 191, 194, 195, 196, 197, 200, 201, 202, 203, 204, 220, 221, 222,
-        223, 224, 230, 231, 232, 233, 234, 240, 241, 242, 243, 244, 260, 261, 262, 263, 264,
-        265, 266, 267, 268, 269, 270, 280, 290, 900, 901, 902, 903,
+        0, 1, 2, 4, 5, 10, 15, 16, 17, 18, 20, 21, 25, 27, 30, 31, 34, 35, 36, 37, 38, 39, 40, 45,
+        50, 54, 61, 62, 63, 64, 65, 100, 101, 102, 110, 111, 112, 113, 114, 115, 116, 117, 118,
+        119, 120, 130, 140, 150, 160, 161, 162, 163, 164, 165, 166, 170, 171, 180, 181, 185, 186,
+        187, 190, 191, 194, 195, 196, 197, 200, 201, 202, 203, 204, 220, 221, 222, 223, 224, 230,
+        231, 232, 233, 234, 240, 241, 242, 243, 244, 260, 261, 262, 263, 264, 265, 266, 267, 268,
+        269, 270, 280, 290, 900, 901, 902, 903,
     ];
 
     #[test]
@@ -817,11 +876,7 @@ mod tests {
                 assert_eq!(end.rgba, after.rgba, "style {style} dir {direction} end");
                 let start = render(&tr, 0.0, &before, &after);
                 if !matches!(style, 1 | 40 | 185 | 187) {
-                    let old = start
-                        .rgba
-                        .chunks_exact(4)
-                        .filter(|p| p[0] == 0)
-                        .count();
+                    let old = start.rgba.chunks_exact(4).filter(|p| p[0] == 0).count();
                     assert!(
                         old * 10 >= (64 * 48) * 7,
                         "style {style} dir {direction} starts mostly old ({old})"

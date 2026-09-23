@@ -44,6 +44,33 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         }
         // objbtn_init: nothing to prepare.
         20 => {}
+        // select_btnobjinitall / select_btnobjend
+        21 | 23 => {
+            if let Some(mut polled) = machine.sys.polled_buttons.take() {
+                polled.finish(&mut machine.sys);
+            }
+        }
+        // select_btnobjstart(group[, ...])
+        22 => {
+            let group = machine.int_param_or(command, 0, 0)?;
+            if let Some(mut polled) = machine.sys.polled_buttons.take() {
+                polled.finish(&mut machine.sys);
+            }
+            let mut polled = crate::select::PolledButtons::new(group);
+            polled.update(&mut machine.sys);
+            machine.sys.polled_buttons = Some(polled);
+        }
+        // select_btnobjnow_hit / select_btnobjnow_decide
+        30 => {
+            machine.store = machine.sys.polled_buttons.as_ref().map_or(-1, |p| p.hovered());
+        }
+        32 => {
+            machine.store = machine
+                .sys
+                .polled_buttons
+                .as_mut()
+                .map_or(-1, crate::select::PolledButtons::take_decided);
+        }
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)

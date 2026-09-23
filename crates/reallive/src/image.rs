@@ -178,11 +178,18 @@ pub fn decode_g00(data: &[u8]) -> Result<Image> {
     match kind {
         0 | 1 => {
             let unpacked = i32_at(data, 9)?.max(0) as usize;
-            let src = data.get(13..).ok_or_else(|| anyhow!("reallive: truncated g00"))?;
+            let src = data
+                .get(13..)
+                .ok_or_else(|| anyhow!("reallive: truncated g00"))?;
             let mut image = Image::new(width, height);
             if kind == 0 {
                 let bgr = lz_extract(src, unpacked, 3, 1);
-                for (pixel, source) in image.surface.rgba.chunks_exact_mut(4).zip(bgr.chunks_exact(3)) {
+                for (pixel, source) in image
+                    .surface
+                    .rgba
+                    .chunks_exact_mut(4)
+                    .zip(bgr.chunks_exact(3))
+                {
                     pixel.copy_from_slice(&[source[2], source[1], source[0], 255]);
                 }
             } else {
@@ -198,7 +205,10 @@ pub fn decode_g00(data: &[u8]) -> Result<Image> {
                 let indices = bytes.get(2 + count * 4..).unwrap_or(&[]);
                 let mut has_alpha = false;
                 for (pixel, &index) in image.surface.rgba.chunks_exact_mut(4).zip(indices) {
-                    let colour = palette.get(usize::from(index)).copied().unwrap_or([0, 0, 0, 255]);
+                    let colour = palette
+                        .get(usize::from(index))
+                        .copied()
+                        .unwrap_or([0, 0, 0, 255]);
                     has_alpha |= colour[3] != 255;
                     pixel.copy_from_slice(&colour);
                 }
@@ -244,12 +254,7 @@ pub fn decode_g00(data: &[u8]) -> Result<Image> {
             }
             let head = 9 + count * 24;
             let unpacked = i32_at(data, head + 4)?.max(0) as usize;
-            let bytes = lz_extract(
-                data.get(head + 8..).unwrap_or(&[]),
-                unpacked,
-                1,
-                2,
-            );
+            let bytes = lz_extract(data.get(head + 8..).unwrap_or(&[]), unpacked, 1, 2);
             let mut image = Image::new(width, height);
             image.has_alpha = true;
             let stored = (i32_at(&bytes, 0).unwrap_or(0).max(0) as usize).min(count);
@@ -427,7 +432,12 @@ mod tests {
     fn type0_round_trips_colour() {
         let image = sample();
         let decoded = decode(&encode_g00(&image, false)).unwrap();
-        for (a, b) in decoded.surface.rgba.chunks_exact(4).zip(image.surface.rgba.chunks_exact(4)) {
+        for (a, b) in decoded
+            .surface
+            .rgba
+            .chunks_exact(4)
+            .zip(image.surface.rgba.chunks_exact(4))
+        {
             assert_eq!(&a[..3], &b[..3]);
             assert_eq!(a[3], 255);
         }

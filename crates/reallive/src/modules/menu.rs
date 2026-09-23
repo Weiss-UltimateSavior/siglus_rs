@@ -99,7 +99,10 @@ pub fn invoke_syscom(machine: &mut Machine, index: i32, value: Option<i32>) -> R
         }
         other => match value {
             Some(value) => crate::modules::sys::write_syscom(machine, other, value),
-            None => machine.sys.ui.request(crate::ui::Request::SettingsDialog(other)),
+            None => machine
+                .sys
+                .ui
+                .request(crate::ui::Request::SettingsDialog(other)),
         },
     }
     Ok(false)

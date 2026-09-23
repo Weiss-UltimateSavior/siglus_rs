@@ -9,7 +9,9 @@ use reallive::{Archive, Nls};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let path = args.next().context("usage: rl_disasm <SEEN.TXT> [scene] [--quiet]")?;
+    let path = args
+        .next()
+        .context("usage: rl_disasm <SEEN.TXT> [scene] [--quiet]")?;
     let rest: Vec<String> = args.collect();
     let quiet = rest.iter().any(|arg| arg == "--quiet");
     let only: Option<i32> = rest.iter().find_map(|arg| arg.parse().ok());
@@ -37,7 +39,10 @@ fn main() -> Result<()> {
                 if quiet {
                     continue;
                 }
-                println!("== SEEN{number:04} ({} elements)", scenario.script.elements.len());
+                println!(
+                    "== SEEN{number:04} ({} elements)",
+                    scenario.script.elements.len()
+                );
                 for (index, element) in scenario.script.elements.iter().enumerate() {
                     let offset = scenario.script.offsets[index];
                     match element {

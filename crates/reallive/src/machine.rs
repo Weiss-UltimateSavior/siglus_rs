@@ -117,6 +117,13 @@ pub struct Machine {
     pub latest_save: i32,
     /// State at the last selection (`ReturnPrevSelect`).
     pub previous_selection: Option<Vec<u8>>,
+    /// `SET_SELPOINTMOD_*` (`#INIT_SELPOINT_USE`): selections record the
+    /// point `ReturnPrevSelect` goes back to.
+    pub selpoint_auto: bool,
+    /// A game was just loaded (`CHECK_JUST_AFTER_LOAD`).
+    pub just_loaded: bool,
+    /// Emulated DLLs (`LoadDLL`, `#DLL.nnn`).
+    pub dlls: crate::dll::Dlls,
 }
 
 impl std::fmt::Debug for Machine {
@@ -140,6 +147,7 @@ impl Machine {
             .or_else(|| archive.first())
             .ok_or_else(|| anyhow!("reallive: the archive has no scenarios"))?;
         let scenario = archive.scenario(start)?;
+        let selpoint_auto = gameexe.int("INIT_SELPOINT_USE").unwrap_or(1) != 0;
         let mut machine = Self {
             archive,
             gameexe,
@@ -160,7 +168,15 @@ impl Machine {
             saved_in_memory: Default::default(),
             latest_save: -1,
             previous_selection: None,
+            selpoint_auto,
+            just_loaded: false,
+            dlls: crate::dll::Dlls::default(),
         };
+        for entry in machine.gameexe.clone().filter("DLL.") {
+            if let (Some(slot), Some(name)) = (entry.key_number(1), entry.str(0)) {
+                machine.dlls.load(slot, name);
+            }
+        }
         machine.init_local_memory();
         machine.init_global_memory();
         crate::save::load_global(&mut machine)?;
@@ -185,9 +201,7 @@ impl Machine {
         let gameexe = self.gameexe.clone();
         for entry in gameexe.entries() {
             let key = entry.key.as_str();
-            if let Some(letters) = key
-                .strip_prefix(if local { "LOCALNAME." } else { "NAME." })
-            {
+            if let Some(letters) = key.strip_prefix(if local { "LOCALNAME." } else { "NAME." }) {
                 if let (Some(index), Some(value)) = (Memory::name_index(letters), entry.str(0)) {
                     self.memory.set_name(local, index, value.to_owned());
                 }
@@ -196,7 +210,9 @@ impl Machine {
             let Some((bank, rest)) = key.split_once('[') else {
                 continue;
             };
-            let Some(index) = rest.strip_suffix(']').and_then(|index| index.trim().parse::<i32>().ok())
+            let Some(index) = rest
+                .strip_suffix(']')
+                .and_then(|index| index.trim().parse::<i32>().ok())
             else {
                 continue;
             };
@@ -206,7 +222,11 @@ impl Machine {
                         continue;
                     }
                     let target = StrTarget {
-                        bank: if bank == "S" { bank::STR_S } else { bank::STR_M },
+                        bank: if bank == "S" {
+                            bank::STR_S
+                        } else {
+                            bank::STR_M
+                        },
                         index,
                     };
                     let value = entry.str(0).unwrap_or("").to_owned();
@@ -245,7 +265,22 @@ impl Machine {
     }
 
     pub fn frame(&self) -> &Frame {
-        self.stack.last().expect("the call stack is never empty while running")
+        self.stack
+            .last()
+            .expect("the call stack is never empty while running")
+    }
+
+    /// `CallDLL(slot, args...)`.
+    pub fn call_dll(&mut self, slot: i32, args: [i32; 5]) -> Result<i32> {
+        let frame = self
+            .stack
+            .last_mut()
+            .ok_or_else(|| anyhow!("reallive: no call frame"))?;
+        let mut memory = crate::dll::Banks {
+            memory: &mut self.memory,
+            frame: &mut frame.vars,
+        };
+        self.dlls.call(slot, &mut self.sys, &mut memory, args)
     }
 
     pub fn frame_mut(&mut self) -> &mut Frame {
@@ -312,7 +347,8 @@ impl Machine {
         // The caller resumes after the gosub.
         self.frame_mut().ip += 1;
         let scenario = self.scenario().clone();
-        self.stack.push(Frame::new(scenario, index, FrameKind::Gosub));
+        self.stack
+            .push(Frame::new(scenario, index, FrameKind::Gosub));
     }
 
     pub fn return_from_gosub(&mut self) -> Result<()> {
@@ -348,7 +384,8 @@ impl Machine {
         if entrypoint == 0 && self.should_set_savepoint(SavepointKind::SeenTop) {
             self.mark_savepoint();
         }
-        self.stack.push(Frame::new(scenario, ip, FrameKind::Farcall));
+        self.stack
+            .push(Frame::new(scenario, ip, FrameKind::Farcall));
         Ok(())
     }
 
@@ -539,8 +576,10 @@ impl Machine {
     }
 
     pub fn unimplemented(&mut self, command: &Command) -> Result<Next> {
-        let name = crate::opcodes::name(command.op)
-            .map_or_else(|| command.op.to_string(), |name| format!("{name} {}", command.op));
+        let name = crate::opcodes::name(command.op).map_or_else(
+            || command.op.to_string(),
+            |name| format!("{name} {}", command.op),
+        );
         self.note_unimplemented(name);
         Ok(Next::Advance)
     }
@@ -728,7 +767,12 @@ impl Machine {
         self.eval_str(value)
     }
 
-    pub fn str_param_or(&mut self, command: &Command, index: usize, default: &str) -> Result<String> {
+    pub fn str_param_or(
+        &mut self,
+        command: &Command,
+        index: usize,
+        default: &str,
+    ) -> Result<String> {
         match command.params.get(index) {
             Some(param) => self.eval_str(&param.value),
             None => Ok(default.to_owned()),

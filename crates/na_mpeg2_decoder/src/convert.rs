@@ -35,6 +35,37 @@ pub fn frame_to_rgba_bt601_limited(frame: &Frame, out_rgba: &mut [u8]) {
     }
 }
 
+/// Convert directly to a smaller RGBA image without allocating a full-size
+/// intermediate frame. Intended for displays with less video memory.
+pub fn frame_to_rgba_bt601_limited_scaled(
+    frame: &Frame,
+    out_rgba: &mut [u8],
+    out_width: usize,
+    out_height: usize,
+) {
+    debug_assert!(out_width > 0 && out_height > 0);
+    debug_assert_eq!(out_rgba.len(), out_width * out_height * 4);
+    let (cx, cy) = frame.chroma_shifts();
+    for y in 0..out_height {
+        let source_y = y * frame.height / out_height;
+        let y_row = &frame.data_y[source_y * frame.linesize_y..];
+        let u_row = &frame.data_u[(source_y >> cy) * frame.linesize_u..];
+        let v_row = &frame.data_v[(source_y >> cy) * frame.linesize_v..];
+        for x in 0..out_width {
+            let source_x = x * frame.width / out_width;
+            let yv = y_row[source_x] as i32;
+            let u = u_row[source_x >> cx] as i32;
+            let v = v_row[source_x >> cx] as i32;
+            let (r, g, b) = yuv_to_rgb_bt601_limited(yv, u, v);
+            let o = (y * out_width + x) * 4;
+            out_rgba[o] = r;
+            out_rgba[o + 1] = g;
+            out_rgba[o + 2] = b;
+            out_rgba[o + 3] = 255;
+        }
+    }
+}
+
 /// Convert a decoded frame to grayscale RGBA by duplicating the luma plane.
 pub fn frame_to_gray_rgba(frame: &Frame, out_rgba: &mut [u8]) {
     debug_assert_eq!(out_rgba.len(), frame.width * frame.height * 4);

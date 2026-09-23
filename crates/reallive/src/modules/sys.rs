@@ -36,14 +36,103 @@ pub fn dispatch_event_loop(machine: &mut Machine, command: &Command) -> Result<N
             }
             machine.yield_frame = true;
         }
+        // MsgBox(title, message[, ALERT_OKCANCEL])
+        401 => {
+            let title = machine.str_param(command, 0)?;
+            let message = match command.params.get(1) {
+                Some(param) if param.value.is_string() => machine.str_param(command, 1)?,
+                Some(_) => machine.int_param(command, 1)?.to_string(),
+                None => String::new(),
+            };
+            let op = crate::ui::MessageBox::new(title, message, command.op.overload == 1);
+            machine.push_long_op(Box::new(op));
+        }
         // ShowBackground: hide the text windows until a click.
         1000 => crate::modules::msg::show_background(machine)?,
         1100 => machine.sys.syscom.skip_mode = true,
         1101 => machine.sys.syscom.skip_mode = false,
         1102 => machine.store = i32::from(machine.sys.syscom.skip_mode),
+        // CCOM_*: what stays visible while a script-drawn system menu is up.
+        // CCOM_MESSAGEWINDOW_ON / _OFF([window | first, last])
+        1200 | 1201 => {
+            let off = command.op.opcode == 1201;
+            let windows = window_range(machine, command)?;
+            for index in windows {
+                if let Some(flag) = machine.sys.text.display_off.get_mut(index) {
+                    *flag = off;
+                }
+            }
+        }
+        // CCOM_BTNSEL_ON / _OFF
+        1202 => machine.sys.gfx.ccom_hide_buttons = false,
+        1203 => machine.sys.gfx.ccom_hide_buttons = true,
+        // CCOM_OBJECT_ON / _OFF(buffer | first, last)
+        1204 | 1205 => {
+            let first = machine.int_param(command, 0)?;
+            let last = machine.int_param_or(command, 1, first)?;
+            for index in first..=last {
+                if command.op.opcode == 1205 {
+                    machine.sys.gfx.ccom_hidden_objects.insert(index);
+                } else {
+                    machine.sys.gfx.ccom_hidden_objects.remove(&index);
+                }
+            }
+        }
+        // CCOM_LOCAL_FLAG_EXCOPY(var): copies the variable's value at the
+        // last savepoint into it (what a load would restore).
+        2000 => {
+            for index in 0..command.params.len() {
+                let target = machine.int_target_param(command, index)?;
+                if let IntTarget::Mem(reference) = target {
+                    if let Some(value) = machine.memory.savepoint_int(reference) {
+                        machine.set_target(target, value)?;
+                    }
+                }
+            }
+        }
+        // CHECK_JUST_AFTER_LOAD
+        3001 => machine.store = i32::from(std::mem::take(&mut machine.just_loaded)),
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)
+}
+
+/// Writes `values` to `target` and the variables after it.
+fn write_consecutive(machine: &mut Machine, target: IntTarget, values: &[i32]) -> Result<()> {
+    match target {
+        IntTarget::Mem(reference) => {
+            for (offset, &value) in values.iter().enumerate() {
+                let next = crate::memory::IntRef {
+                    index: reference.index + offset as i32,
+                    ..reference
+                };
+                machine.set_target(IntTarget::Mem(next), value)?;
+            }
+        }
+        IntTarget::Store => {
+            if let Some(&value) = values.first() {
+                machine.store = value;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Text windows named by `(window)`, `(first, last)` or nothing (all).
+fn window_range(machine: &mut Machine, command: &Command) -> Result<std::ops::RangeInclusive<usize>> {
+    let count = machine.sys.text.states.len();
+    Ok(match command.params.len() {
+        0 => 0..=count - 1,
+        1 => {
+            let w = machine.int_param(command, 0)?.clamp(0, count as i32 - 1) as usize;
+            w..=w
+        }
+        _ => {
+            let a = machine.int_param(command, 0)?.clamp(0, count as i32 - 1) as usize;
+            let b = machine.int_param(command, 1)?.clamp(0, count as i32 - 1) as usize;
+            a..=b
+        }
+    })
 }
 
 /// The `DefaultIntValue`-style optional counter parameter.
@@ -80,6 +169,92 @@ fn interpolate(start: i32, current: i32, end: i32, amount: i32, mode: i32) -> i3
         _ => p,
     };
     (shaped * f64::from(amount)) as i32
+}
+
+/// `TIMETABLE2` / `TIMETABLELEN2`: the value at `nowTime + repTime` of a
+/// piecewise animation starting at `startNum` at `startTime`. With
+/// `lengths`, the segment times are durations rather than end times.
+fn timetable2(machine: &mut Machine, command: &Command, lengths: bool) -> Result<i32> {
+    let now = machine.int_param(command, 0)? + machine.int_param(command, 1)?;
+    let mut start = machine.int_param(command, 2)?;
+    let mut value = machine.int_param(command, 3)?;
+    let mut segments = Vec::new();
+    let mut total = start;
+    for param in command.params.iter().skip(4) {
+        let Expr::Special { tag, pieces } = &param.value else {
+            continue;
+        };
+        let mut v = pieces
+            .iter()
+            .map(|piece| machine.eval_int(piece))
+            .collect::<Result<Vec<_>>>()?;
+        let kind = *tag & 0xffff;
+        // _SET has no time; the others start with one.
+        if lengths && kind != 49 && !v.is_empty() {
+            total += v[0];
+            v[0] = total;
+        }
+        segments.push((kind, *tag >> 16, v));
+    }
+    if start > now {
+        return Ok(value);
+    }
+    let arg = |v: &[i32], i: usize| v.get(i).copied().unwrap_or(0);
+    for (kind, overload, v) in segments {
+        let (end, target) = (arg(&v, 0), arg(&v, 1));
+        let inside = now > start && now <= end;
+        match kind {
+            // _MOVE(endTime, endNum[, mod])
+            48 => {
+                let mode = if overload == 1 { arg(&v, 2) } else { 0 };
+                if inside {
+                    return Ok(value + interpolate(start, now, end, target - value, mode));
+                }
+                value = target;
+                start = end;
+            }
+            // _SET(endNum)
+            49 => value = arg(&v, 0),
+            // _WAIT(endTime)
+            50 => {
+                if inside {
+                    return Ok(value);
+                }
+                start = end;
+            }
+            // _TURN / _TURNUP / _LOOP / _JUMP(endTime, endNum, count)
+            51..=54 => {
+                let count = arg(&v, 2).max(1);
+                if inside {
+                    let cycle = ((end - start) / count).max(1);
+                    let p = f64::from((now - start) % cycle) / f64::from(cycle);
+                    let shape = match kind {
+                        // there and back
+                        51 => 1.0 - (p * 2.0 - 1.0).abs(),
+                        // up, then straight back
+                        52 | 53 => p,
+                        // a parabola, as rlvm does
+                        _ => 1.0 - (p * 2.0 - 1.0).powi(2),
+                    };
+                    return Ok(value + (f64::from(target - value) * shape) as i32);
+                }
+                if kind != 51 {
+                    value = target;
+                }
+                start = end;
+            }
+            // _WAITSET(endTime, endNum)
+            55 => {
+                if inside {
+                    return Ok(value);
+                }
+                value = target;
+                start = end;
+            }
+            _ => {}
+        }
+    }
+    Ok(value)
 }
 
 fn index_series(machine: &mut Machine, command: &Command) -> Result<i32> {
@@ -136,7 +311,12 @@ fn now_parts() -> [i32; 8] {
     ]
 }
 
-fn write_targets(machine: &mut Machine, command: &Command, from: usize, values: &[i32]) -> Result<()> {
+fn write_targets(
+    machine: &mut Machine,
+    command: &Command,
+    from: usize,
+    values: &[i32],
+) -> Result<()> {
     for (offset, value) in values.iter().enumerate() {
         if from + offset >= command.params.len() {
             break;
@@ -168,6 +348,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
     match op.opcode {
         // title(text)
         0 => machine.sys.title = machine.str_param(command, 0)?,
+        // GET_TITLE(str)
+        2 => {
+            let target = machine.str_target_param(command, 0)?;
+            machine.write_string(target, machine.sys.title.clone())?;
+        }
         // wait / waitC
         100 | 101 => {
             let time = machine.int_param(command, 0)?;
@@ -180,7 +365,10 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // ResetTimer / ResetExTimer
         110 | 120 => {
             let counter = counter_param(machine, command, 0)?;
-            machine.sys.timers.set(usize::from(op.opcode == 120), counter, now, 0);
+            machine
+                .sys
+                .timers
+                .set(usize::from(op.opcode == 120), counter, now, 0);
         }
         // time / timeC / timeEx / timeExC (and the undocumented *C2)
         111..=113 | 121..=123 => {
@@ -204,20 +392,61 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // Timer / ExTimer
         114 | 124 => {
             let counter = counter_param(machine, command, 0)?;
-            machine.store = machine.sys.timers.read(usize::from(op.opcode == 124), counter, now);
+            machine.store = machine
+                .sys
+                .timers
+                .read(usize::from(op.opcode == 124), counter, now);
         }
         // CmpTimer / CmpExTimer
         115 | 125 => {
             let time = machine.int_param(command, 0)?;
             let counter = counter_param(machine, command, 1)?;
-            let value = machine.sys.timers.read(usize::from(op.opcode == 125), counter, now);
+            let value = machine
+                .sys
+                .timers
+                .read(usize::from(op.opcode == 125), counter, now);
             machine.store = i32::from(value > time);
         }
         // SetTimer / SetExTimer
         116 | 126 => {
             let time = machine.int_param(command, 0)?;
             let counter = counter_param(machine, command, 1)?;
-            machine.sys.timers.set(usize::from(op.opcode == 126), counter, now, time);
+            machine
+                .sys
+                .timers
+                .set(usize::from(op.opcode == 126), counter, now, time);
+        }
+        // KEYWAIT: until a click or key.
+        106 => {
+            let wait = Wait::event(WaitEvent::None).cancellable();
+            machine.push_long_op(Box::new(wait));
+        }
+        // CLEAR_KEYTABLE([code...]): forget presses (of those keys).
+        150 => {
+            let codes = machine.int_params_from(command, 0)?;
+            let input = &mut machine.sys.input;
+            if codes.is_empty() {
+                input.keys_pressed.clear();
+            } else {
+                for code in codes {
+                    input.keys_pressed.remove(&code);
+                }
+            }
+        }
+        // GET_KEYTABLE_DATA / GET_KEYTABLE_REAL(buffer, code...): per key,
+        // pressed since cleared / held now, into consecutive variables.
+        151 | 152 => {
+            let target = machine.int_target_param(command, 0)?;
+            let codes = machine.int_params_from(command, 1)?;
+            let input = &machine.sys.input;
+            let values: Vec<i32> = codes
+                .iter()
+                .map(|code| {
+                    let set = if op.opcode == 151 { &input.keys_pressed } else { &input.keys_held };
+                    i32::from(set.contains(code))
+                })
+                .collect();
+            write_consecutive(machine, target, &values)?;
         }
         // FlushClick
         130 => machine.sys.input.flush_clicks(),
@@ -238,16 +467,42 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // GetCursorPos(x, y, button1, button2) / GetCursorPos(x, y)
         133 | 202 | 138 => {
             let (x, y) = machine.sys.input.mouse;
-            let input = &machine.sys.input;
-            // 0 released, 1 held, 2 clicked since the last query.
-            let state = |held: bool| if held { 1 } else { 0 };
-            let buttons = [state(input.left_held), state(input.right_held)];
+            // 1 pressed, 2 released (a click) until `FlushClick`.
+            let buttons = machine.sys.input.button_state;
             let mut values = vec![x, y];
             if op.opcode == 133 {
                 values.extend(buttons);
             }
             write_targets(machine, command, 0, &values)?;
         }
+        // SET_WAIP_WINDOWCLOSE_ON / _OFF, SET_GRPCOM_WINDOWCLOSE_ON / _OFF
+        210 => machine.sys.wipe_closes_windows = true,
+        211 => machine.sys.wipe_closes_windows = false,
+        215 => machine.sys.grp_closes_windows = true,
+        216 => machine.sys.grp_closes_windows = false,
+        // CLEAR_MSGBK / SET_MSGBK_ON / SET_MSGBK_OFF
+        300 => machine.sys.text.backlog.clear(),
+        301 => machine.sys.text.backlog_enabled = true,
+        302 => machine.sys.text.backlog_enabled = false,
+        // SET_READJUMPCANCEL_ON / _OFF
+        335 => machine.sys.read_jump_cancel = true,
+        336 => machine.sys.read_jump_cancel = false,
+        // SET_CTRLKEY_ENABLE / SET_CTRLKEY_DISENABLE
+        358 => machine.sys.ctrl_key_skip = true,
+        359 => machine.sys.ctrl_key_skip = false,
+        // SET_P_CURSORNO(id)
+        366 => machine.sys.key_cursor = machine.int_param(command, 0)?,
+        // SET_WINDOW_DISP_ON / _OFF([window])
+        480 | 481 => {
+            let off = op.opcode == 481;
+            for index in window_range(machine, command)? {
+                if let Some(flag) = machine.sys.text.display_off.get_mut(index) {
+                    *flag = off;
+                }
+            }
+        }
+        // TIMETABLE2 / TIMETABLELEN2
+        810 | 811 => machine.store = timetable2(machine, command, op.opcode == 811)?,
         // KeyMouseOn / KeyMouseOff
         200 => machine.sys.input.key_mouse = true,
         201 => machine.sys.input.key_mouse = false,
@@ -402,7 +657,12 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // GetWindowModAttr(window, r, g, b, a, f) / SetWindowModAttr
         422 => {
             let window = machine.int_param(command, 0)?;
-            let attr = machine.sys.text.window(window).map(|c| c.attr).unwrap_or_default();
+            let attr = machine
+                .sys
+                .text
+                .window(window)
+                .map(|c| c.attr)
+                .unwrap_or_default();
             write_targets(machine, command, 1, &window_attr_values(attr))?;
         }
         423 => {
@@ -441,11 +701,12 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 _ => {}
             }
         }
-        // EnableWindowAnm / DisableWindowAnm
+        // EnableWindowAnm / DisableWindowAnm([window])
         460 | 461 => {
-            let window = machine.int_param(command, 0)?;
-            if let Some(config) = machine.sys.text.window_mut(window) {
-                config.anm_enabled = op.opcode == 460;
+            for index in window_range(machine, command)? {
+                if let Some(config) = machine.sys.text.window_mut(index as i32) {
+                    config.anm_enabled = op.opcode == 460;
+                }
             }
         }
         // Get/Set Open/Close AnmMod/AnmTime
@@ -488,11 +749,18 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // ReadFrame / FrameActive / AnyFrameActive (and Ex)
         510 | 530 => {
             let counter = machine.int_param(command, 0)?;
-            machine.store = machine.sys.frames.read(frame_layer(op.opcode), counter, now);
+            machine.store = machine
+                .sys
+                .frames
+                .read(frame_layer(op.opcode), counter, now);
         }
         511 | 531 => {
             let counter = machine.int_param(command, 0)?;
-            machine.store = i32::from(machine.sys.frames.active(frame_layer(op.opcode), counter, now));
+            machine.store = i32::from(machine.sys.frames.active(
+                frame_layer(op.opcode),
+                counter,
+                now,
+            ));
         }
         512 | 532 => {
             machine.store = i32::from(machine.sys.frames.any_active(frame_layer(op.opcode), now));
@@ -655,6 +923,19 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         }
         // ContextMenu
         1210 => crate::modules::menu::open_context_menu(machine)?,
+        // CALL_SYSTEMMENU_MOVIESUPPORT / CALL_SYSTEMMENU_MMXSUPPORT: the
+        // original's hardware-support dialogs; nothing to configure here.
+        1218 | 1260 => {}
+        // OPEN_FULLSCREEN_SETTING_WINDOW
+        1219 => machine
+            .sys
+            .ui
+            .request(crate::ui::Request::SettingsDialog(syscom::DISPLAY_MODE)),
+        // SET_SELPOINTMOD_ON / _OFF, SELPOINT, SET_SELPOINT_CLEAR
+        1221 => machine.selpoint_auto = true,
+        1222 => machine.selpoint_auto = false,
+        1230 => crate::save::remember_selection(machine),
+        1231 => machine.previous_selection = None,
         // EnableSyscom([n]) / HideSyscom([n]) / DisableSyscom(n)
         1211 | 1212 => {
             let state = if op.opcode == 1211 { 1 } else { 0 };
@@ -725,6 +1006,12 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         1409..=1414 | 1421 => crate::save::sys_query(machine, command)?,
         // CG mode
         1500..=1504 => crate::cgtable::sys_query(machine, command)?,
+        // CGTABLE_ON / CGTABLE_OFF
+        1520 => machine.sys.cg_table_enabled = true,
+        1521 => machine.sys.cg_table_enabled = false,
+        // ENABLE_SYSTEMMENU_ANIME / DISENABLE_SYSTEMMENU_ANIME
+        2402 => machine.sys.system_menu_animation = true,
+        2502 => machine.sys.system_menu_animation = false,
         // Text input boxes
         1700..=1711 => crate::modules::menu::text_input(machine, command)?,
         // Miscellaneous flags: getters 2000..2009, setters 2050..2059
@@ -750,7 +1037,18 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 (Some(flag), false) => machine.store = i32::from(*flag),
                 (None, true) if which == 9 => settings.sound_quality = value,
                 (None, false) if which == 9 => machine.store = settings.sound_quality,
-                _ => return machine.unimplemented(command),
+                // Undocumented flags (5..=8): remembered as set.
+                (None, setter) => {
+                    let flags = &mut machine.sys.misc_flags;
+                    if flags.len() <= which as usize {
+                        flags.resize(which as usize + 1, 0);
+                    }
+                    if setter {
+                        flags[which as usize] = value;
+                    } else {
+                        machine.store = flags[which as usize];
+                    }
+                }
             }
         }
         // Setting setters (22xx), getters (23xx) and defaults (26xx).
@@ -761,6 +1059,21 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 return Ok(Next::Jumped);
             }
         }
+        // QUICKSAVE_NOWARNING / QUICKLOAD_SELKEEP_NOWARNING
+        3127 => {
+            let slot = crate::ui::quick_slot(machine);
+            crate::save::save_slot(machine, slot)?;
+        }
+        3131 => {
+            let slot = crate::ui::quick_slot(machine);
+            let selection = machine.previous_selection.clone();
+            crate::save::load_slot(machine, slot)?;
+            machine.previous_selection = selection;
+            return Ok(Next::Jumped);
+        }
+        // SAVEPOINT_CLEAR: forget the old savepoint; saving now keeps this
+        // position.
+        3503 => machine.mark_savepoint(),
         // Savepoint / EnableAutoSavepoints / DisableAutoSavepoints
         3500 => machine.mark_savepoint(),
         3501 => machine.mark_savepoints = true,
@@ -831,7 +1144,7 @@ fn settings_op(machine: &mut Machine, command: &Command) -> Result<Next> {
             2605 => 51,
             2606 => 52,
             2610..=2614 => 60 + (opcode - 2610),
-            2615 | 2616 | 2617 => 65 + (opcode - 2615),
+            2615..=2617 => 65 + (opcode - 2615),
             2620 => 21,
             2621 => 22,
             _ => return machine.unimplemented(command),
@@ -890,7 +1203,12 @@ fn settings_op(machine: &mut Machine, command: &Command) -> Result<Next> {
             74 => {
                 let character = machine.int_param(command, 0)?;
                 machine.store = i32::from(
-                    *machine.sys.settings.use_koe.get(&character).unwrap_or(&true),
+                    *machine
+                        .sys
+                        .settings
+                        .use_koe
+                        .get(&character)
+                        .unwrap_or(&true),
                 );
             }
             _ => match current {

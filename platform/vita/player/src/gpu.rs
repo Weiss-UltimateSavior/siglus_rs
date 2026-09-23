@@ -31,12 +31,12 @@ const GL_TEXTURE_WRAP_S: u32 = 0x2802;
 const GL_TEXTURE_WRAP_T: u32 = 0x2803;
 const GL_LINEAR: i32 = 0x2601;
 const GL_CLAMP_TO_EDGE: i32 = 0x812f;
-const GL_UNPACK_ALIGNMENT: u32 = 0x0cf5;
 const GL_VERTEX_ARRAY: u32 = 0x8074;
 const GL_TEXTURE_COORD_ARRAY: u32 = 0x8078;
 const GL_TRIANGLE_FAN: u32 = 0x0006;
 
 unsafe extern "C" {
+    fn shark_init(path: *const i8) -> i32;
     fn vglSetDisplayBufferCount(count: i32);
     fn vglSetCircularPoolSize(size: u32);
     fn vglInitWithCustomSizes(
@@ -62,7 +62,6 @@ unsafe extern "C" {
     fn glBlendFunc(source: u32, destination: u32);
     fn glScissor(x: i32, y: i32, width: i32, height: i32);
     fn glColor4f(red: f32, green: f32, blue: f32, alpha: f32);
-    fn glPixelStorei(name: u32, value: i32);
     fn glGenTextures(count: i32, textures: *mut u32);
     fn glDeleteTextures(count: i32, textures: *const u32);
     fn glBindTexture(target: u32, texture: u32);
@@ -129,6 +128,11 @@ pub struct GpuDisplay;
 
 impl GpuDisplay {
     pub fn new() -> Result<Self, String> {
+        if !std::path::Path::new("ur0:data/libshacccg.suprx").exists()
+            && !std::path::Path::new("ur0:data/external/libshacccg.suprx").exists()
+        {
+            return Err("vitaGL shader compiler missing; install libshacccg.suprx at ur0:data/libshacccg.suprx".to_owned());
+        }
         unsafe {
             // Two scanout surfaces cost about 4 MiB. The default circular pool
             // alone is 32 MiB, so replace it with a measured starting budget.
@@ -146,7 +150,19 @@ impl GpuDisplay {
                 0,
                 SCE_GXM_MULTISAMPLE_NONE,
             );
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            // vitaGL's fixed-function draw path compiles shaders on demand.
+            // Its splash/clear can appear even when SceShaccCg failed to load,
+            // followed by a hard crash at the first textured draw.
+            let shader_status = shark_init(std::ptr::null());
+            if shader_status < 0 {
+                return Err(format!(
+                    "vitaGL shader compiler unavailable ({shader_status:#x}); install libshacccg.suprx at ur0:data/libshacccg.suprx"
+                ));
+            }
+            let error = glGetError();
+            if error != 0 {
+                super::vita::log(&format!("gpu shader init: OpenGL error {error:#x}"));
+            }
         }
         let mut slot = STATE.lock().map_err(|_| "GPU state mutex poisoned")?;
         *slot = Some(State {
@@ -255,6 +271,10 @@ fn draw_quad(texture: u32, vertices: &[GpuVertex; 4], alpha: f32) {
 fn make_texture(width: u32, height: u32, pixels: *const u8) -> Option<u32> {
     let mut name = 0;
     unsafe {
+        let prior_error = glGetError();
+        if prior_error != 0 {
+            super::vita::log(&format!("gpu before texture: OpenGL error {prior_error:#x}"));
+        }
         glGenTextures(1, &mut name);
         if name == 0 {
             return None;
@@ -275,7 +295,9 @@ fn make_texture(width: u32, height: u32, pixels: *const u8) -> Option<u32> {
             GL_UNSIGNED_BYTE,
             pixels.cast(),
         );
-        if glGetError() != 0 {
+        let error = glGetError();
+        if error != 0 {
+            super::vita::log(&format!("gpu texture: OpenGL error {error:#x}"));
             glDeleteTextures(1, &name);
             return None;
         }
@@ -423,6 +445,7 @@ pub unsafe extern "C" fn siglus_vita_present_rgba(
             unsafe { glDeleteTextures(1, &state.fallback_name) };
         }
         let Some(name) = make_texture(width, height, pixels) else {
+            super::vita::log("gpu fallback: texture create failed");
             return;
         };
         state.fallback_name = name;

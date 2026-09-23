@@ -110,20 +110,30 @@ pub fn yuv420p_to_rgb(frame: &YuvFrame) -> Vec<u8> {
 /// Convert a WMV YUV420p frame to packed RGBA8, selecting the Windows/DXVA
 /// default transfer matrix for unspecified metadata.
 pub fn yuv420p_to_rgba(frame: &YuvFrame) -> Vec<u8> {
+    yuv420p_to_rgba_scaled(frame, frame.width, frame.height)
+}
+
+/// Convert to a bounded output size directly from YUV, without a full-size
+/// RGBA allocation. Sampling uses the nearest source pixel.
+pub fn yuv420p_to_rgba_scaled(frame: &YuvFrame, output_width: u32, output_height: u32) -> Vec<u8> {
     let width = frame.width as usize;
     let height = frame.height as usize;
+    let output_width = output_width as usize;
+    let output_height = output_height as usize;
     let chroma_width = width / 2;
     let matrix = VideoTransferMatrix::for_unspecified_source(frame.height);
-    let mut rgba = vec![0u8; width.saturating_mul(height).saturating_mul(4)];
+    let mut rgba = vec![0u8; output_width.saturating_mul(output_height).saturating_mul(4)];
 
-    for y in 0..height {
-        for x in 0..width {
+    for out_y in 0..output_height {
+        let y = out_y * height / output_height;
+        for out_x in 0..output_width {
+            let x = out_x * width / output_width;
             let luma = frame.y.get(y * width + x).copied().unwrap_or(16);
             let chroma_index = (y / 2).saturating_mul(chroma_width).saturating_add(x / 2);
             let cb = frame.cb.get(chroma_index).copied().unwrap_or(128);
             let cr = frame.cr.get(chroma_index).copied().unwrap_or(128);
             let [r, g, b] = yuv_limited_to_rgb(luma, cb, cr, matrix);
-            let out = (y * width + x) * 4;
+            let out = (out_y * output_width + out_x) * 4;
             rgba[out] = r;
             rgba[out + 1] = g;
             rgba[out + 2] = b;

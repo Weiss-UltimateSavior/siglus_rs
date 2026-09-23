@@ -561,6 +561,7 @@ pub struct SceneStream<'a> {
     // Owned streams keep the Scene.pck backing allocation alive while these
     // slices point into it. Borrowed streams (tests/tools) leave this None.
     owned_chunk: Option<Arc<[u8]>>,
+    owned_pack: Option<Arc<Vec<u8>>>,
     pub chunk: &'a [u8],
     pub header: ScnHeader,
     pub scn: &'a [u8],
@@ -651,6 +652,7 @@ impl<'a> SceneStream<'a> {
 
         Ok(Self {
             owned_chunk: None,
+            owned_pack: None,
             chunk,
             header,
             scn,
@@ -673,7 +675,10 @@ impl<'a> SceneStream<'a> {
         string_codec: SceneStringCodec,
     ) -> Result<SceneStream<'static>> {
         let len = owner.len();
-        Self::new_shared_range_with_string_codec(owner, 0..len, string_codec)
+        let chunk: &'static [u8] = unsafe { std::slice::from_raw_parts(owner.as_ptr(), len) };
+        let mut stream = SceneStream::new_with_string_codec(chunk, string_codec)?;
+        stream.owned_chunk = Some(owner);
+        Ok(stream)
     }
 
     /// Build a stream that borrows a range from ref-counted backing storage.
@@ -683,7 +688,7 @@ impl<'a> SceneStream<'a> {
     /// the same Arc, and the slice is never exposed after its owning stream is
     /// dropped. This avoids the previous Box::leak() scene lifetime workaround.
     pub fn new_shared_range_with_string_codec(
-        owner: Arc<[u8]>,
+        owner: Arc<Vec<u8>>,
         range: Range<usize>,
         string_codec: SceneStringCodec,
     ) -> Result<SceneStream<'static>> {
@@ -696,7 +701,7 @@ impl<'a> SceneStream<'a> {
         // returns. Arc keeps the allocation alive across moves and clones.
         let chunk: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr.add(range.start), len) };
         let mut stream = SceneStream::new_with_string_codec(chunk, string_codec)?;
-        stream.owned_chunk = Some(owner);
+        stream.owned_pack = Some(owner);
         Ok(stream)
     }
 

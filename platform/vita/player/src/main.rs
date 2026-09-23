@@ -6,6 +6,14 @@ fn main() {
 #[cfg(target_os = "vita")]
 mod gpu;
 
+// newlib's default heap is too small for RewriteHF's rebuilt 43 MiB scene
+// pack plus decoded images and a few 1280x720 video frames. Keep the heap
+// below Vita's user-memory budget so vitaGL and system services still fit.
+#[cfg(target_os = "vita")]
+#[used]
+#[unsafe(export_name = "_newlib_heap_size_user")]
+pub static NEWLIB_HEAP_SIZE_USER: u32 = 160 * 1024 * 1024;
+
 #[cfg(target_os = "vita")]
 mod vita {
     use std::ffi::{CStr, c_char};
@@ -34,10 +42,31 @@ mod vita {
     const WIDTH: usize = 960;
     const HEIGHT: usize = 544;
     const AUDIO_FRAMES: usize = 512;
+    // The Kira backend still needs to advance when Vita3K has no usable
+    // audio device. One video tick is 768 stereo samples at 48 kHz.
+    const SILENT_AUDIO_FRAMES: usize = 768;
     const MAX_LOGICAL_PIXELS: u64 = 1280 * 720;
     const ROOT: &str = "ux0:data/siglus_rs";
 
-    fn log(message: &str) {
+    #[repr(C)]
+    struct MallInfo {
+        arena: usize,
+        ordblks: usize,
+        smblks: usize,
+        hblks: usize,
+        hblkhd: usize,
+        usmblks: usize,
+        fsmblks: usize,
+        uordblks: usize,
+        fordblks: usize,
+        keepcost: usize,
+    }
+
+    unsafe extern "C" {
+        fn mallinfo() -> MallInfo;
+    }
+
+    pub(super) fn log(message: &str) {
         let _ = fs::create_dir_all(ROOT);
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
@@ -71,6 +100,25 @@ mod vita {
             "{stage}: rc={code:#x} free-user={} free-cdram={} free-phycont={}",
             info.size_user, info.size_cdram, info.size_phycont
         ));
+        let heap = unsafe { mallinfo() };
+        log(&format!(
+            "{stage}: heap-arena={} heap-used={} heap-free={}",
+            heap.arena, heap.uordblks, heap.fordblks
+        ));
+    }
+
+    fn log_engine_memory(host: &mut SiglusHost, stage: &str) {
+        let scene = host.vm_mut().debug_scene_memory_stats();
+        let images = host.vm_mut().ctx.images.debug_live_image_memory_stats();
+        log(&format!(
+            "{stage}: scene-pck={} scene-streams={} image-albums={} image-frames={} image-rgba={} gpu-textures={}",
+            scene.scene_pck_bytes,
+            scene.cached_scene_streams,
+            images.albums,
+            images.images,
+            images.rgba_bytes,
+            super::gpu::texture_bytes(),
+        ));
     }
 
     struct AudioOutput {
@@ -80,6 +128,7 @@ mod vita {
 
     impl AudioOutput {
         fn start() -> Option<Self> {
+            log("audio: open port begin");
             let port = unsafe {
                 sceAudioOutOpenPort(
                     SCE_AUDIO_OUT_PORT_TYPE_MAIN,
@@ -88,6 +137,7 @@ mod vita {
                     SCE_AUDIO_OUT_MODE_STEREO,
                 )
             };
+            log(&format!("audio: open port result {port:#x}"));
             if port < 0 {
                 log(&format!("audio port unavailable: {port:#x}"));
                 return None;
@@ -98,6 +148,7 @@ mod vita {
                 .name("siglus-vita-audio".to_owned())
                 .stack_size(128 * 1024)
                 .spawn(move || {
+                    log("audio: worker started");
                     let mut samples = [0i16; AUDIO_FRAMES * 2];
                     while worker_running.load(Ordering::Relaxed) {
                         unsafe { render_stereo_i16(samples.as_mut_ptr(), AUDIO_FRAMES) };
@@ -242,7 +293,19 @@ mod vita {
         );
         log(&format!("game logical size: {logical_w}x{logical_h}"));
         log_memory("after engine init");
-        let _audio = AudioOutput::start();
+        log_engine_memory(&mut host, "after engine init");
+        // Vita3K can crash in its host audio implementation before the API
+        // returns. Keep real-device audio enabled while allowing emulator
+        // rendering/VM diagnosis through an explicit local marker file.
+        let _audio = if PathBuf::from(ROOT).join("disable-audio").exists() {
+            log("audio disabled by ux0:data/siglus_rs/disable-audio");
+            None
+        } else {
+            log("audio start begin");
+            let audio = AudioOutput::start();
+            log("audio start complete");
+            audio
+        };
         let touch_code = unsafe {
             sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START)
         };
@@ -255,8 +318,16 @@ mod vita {
         let mut previous_buttons = 0;
         let mut touch_active = false;
         let mut last_touch_position = (0.0, 0.0);
+        // Local Vita3K smoke mode: the emulator's macOS window sometimes
+        // crashes while dispatching a mouse click. Drive the same host touch
+        // path once, after the opening has reached RewriteHF's title screen.
+        let title_tap_smoke = PathBuf::from(ROOT).join("title-tap-smoke").exists();
         let mut frame = 0u64;
+        let mut silent_samples = [0i16; SILENT_AUDIO_FRAMES * 2];
         loop {
+            if frame < 6 {
+                log(&format!("frame {frame}: input begin"));
+            }
             update_buttons(&mut host, &mut previous_buttons);
             if let Some(panel) = &panel {
                 update_touch(
@@ -266,19 +337,39 @@ mod vita {
                     panel,
                 );
             }
+            if title_tap_smoke && (6_700..=6_704).contains(&frame) {
+                let phase = if frame == 6_700 {
+                    0
+                } else if frame == 6_704 {
+                    2
+                } else {
+                    1
+                };
+                host.touch(phase, 445.0, 662.0);
+                if phase != 1 {
+                    log(&format!("frame {frame}: title smoke touch phase={phase}"));
+                }
+            }
+            if frame < 6 {
+                log(&format!("frame {frame}: step begin"));
+            }
+            if _audio.is_none() {
+                unsafe { render_stereo_i16(silent_samples.as_mut_ptr(), SILENT_AUDIO_FRAMES) };
+            }
             if host
                 .step(16)
                 .map_err(|error| format!("engine frame: {error:#}"))?
             {
                 break;
             }
+            if frame < 6 {
+                log(&format!("frame {frame}: step complete"));
+            }
             frame += 1;
             if frame % 600 == 0 {
                 log_memory(&format!("frame {frame}"));
-                log(&format!(
-                    "frame {frame}: GPU texture cache={} bytes",
-                    super::gpu::texture_bytes()
-                ));
+                log_engine_memory(&mut host, &format!("frame {frame}"));
+                log(&format!("frame {frame}: {}", host.debug_status_summary()));
                 let stats = host.movie_memory_stats();
                 log(&format!(
                     "frame {frame}: movie-streams={} movie-frames={} movie-rgba-bytes={} movie-pcm-bytes={} movie-assets={} movie-previews={}",
@@ -297,6 +388,9 @@ mod vita {
     }
 
     pub fn main() {
+        std::panic::set_hook(Box::new(|info| {
+            log(&format!("player panic: {info}"));
+        }));
         if let Err(error) = run() {
             log(&format!("player error: {error}"));
             eprintln!("{error}");

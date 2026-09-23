@@ -20,7 +20,15 @@ fn darken(frame: &mut Surface, rect: Rect, amount: u32) {
     }
 }
 
-fn text(sys: &mut System, frame: &mut Surface, s: &str, x: i32, y: i32, size: i32, colour: [u8; 3]) -> i32 {
+fn text(
+    sys: &mut System,
+    frame: &mut Surface,
+    s: &str,
+    x: i32,
+    y: i32,
+    size: i32,
+    colour: [u8; 3],
+) -> i32 {
     let ascent = sys.gfx.fonts.ascent(size as u32).round() as i32;
     let mut pen = x;
     for c in s.chars() {
@@ -36,7 +44,8 @@ fn text(sys: &mut System, frame: &mut Surface, s: &str, x: i32, y: i32, size: i3
                     let at = ((ty * frame.width + tx) * 4) as usize;
                     for ch in 0..3 {
                         let d = u32::from(frame.rgba[at + ch]);
-                        frame.rgba[at + ch] = ((d * (255 - a) + u32::from(colour[ch]) * a) / 255) as u8;
+                        frame.rgba[at + ch] =
+                            ((d * (255 - a) + u32::from(colour[ch]) * a) / 255) as u8;
                     }
                 }
             }
@@ -56,7 +65,15 @@ fn draw_backlog(sys: &mut System, frame: &mut Surface, page: usize) {
     let mut y = size * 2;
     let margin = w / 12;
     if !entry.name.is_empty() {
-        text(sys, frame, &format!("【{}】", entry.name), margin, y, size, HIGHLIGHT);
+        text(
+            sys,
+            frame,
+            &format!("【{}】", entry.name),
+            margin,
+            y,
+            size,
+            HIGHLIGHT,
+        );
         y += size * 3 / 2;
     }
     for line in &entry.lines {
@@ -64,7 +81,15 @@ fn draw_backlog(sys: &mut System, frame: &mut Surface, page: usize) {
         y += size * 3 / 2;
     }
     let footer = format!("{} / {}", page + 1, sys.text.backlog.len());
-    text(sys, frame, &footer, w - margin - size * 4, h - size * 2, size * 3 / 4, DIM);
+    text(
+        sys,
+        frame,
+        &footer,
+        w - margin - size * 4,
+        h - size * 2,
+        size * 3 / 4,
+        DIM,
+    );
 }
 
 /// Draws the active dialog (if any) and records its hit rectangles.
@@ -85,9 +110,19 @@ pub fn draw_overlay(sys: &mut System, frame: &mut Surface) {
     let by = ((h - box_h) / 2).max(0);
     darken(frame, Rect::new(bx, by, box_w, box_h), 190);
     let title = overlay.title.clone();
-    text(sys, frame, &title, bx + size, by + size / 2, size, HIGHLIGHT);
+    text(
+        sys,
+        frame,
+        &title,
+        bx + size,
+        by + size / 2,
+        size,
+        HIGHLIGHT,
+    );
     overlay.hit_rects.clear();
-    let first = overlay.scroll.min(overlay.rows.len().saturating_sub(visible));
+    let first = overlay
+        .scroll
+        .min(overlay.rows.len().saturating_sub(visible));
     for (slot, index) in (first..first + visible).enumerate() {
         let row = overlay.rows[index].clone();
         let y = by + row_h * (slot as i32 + 1) + size / 2;
@@ -112,7 +147,9 @@ pub fn draw_overlay(sys: &mut System, frame: &mut Surface) {
             }
         }
         text(sys, frame, &label, bx + size, y, size, colour);
-        overlay.hit_rects.push((index, rect.x, rect.y, rect.w, rect.h));
+        overlay
+            .hit_rects
+            .push((index, rect.x, rect.y, rect.w, rect.h));
     }
     sys.ui.overlay = Some(overlay);
 }

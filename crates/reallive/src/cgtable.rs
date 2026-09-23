@@ -21,7 +21,9 @@ impl CgTable {
     }
 
     pub fn total(&self) -> i32 {
-        self.data.as_ref().map_or(0, |data| data.entries.len() as i32)
+        self.data
+            .as_ref()
+            .map_or(0, |data| data.entries.len() as i32)
     }
 
     /// The flag index of `name` (case-insensitive, extension ignored).
@@ -62,6 +64,9 @@ fn flag_value(machine: &Machine, flag: i32) -> i32 {
 
 /// Marks `name` as viewed if it is a CG.
 pub fn mark_viewed(machine: &mut Machine, name: &str) {
+    if !machine.sys.cg_table_enabled {
+        return;
+    }
     if let Some(flag) = machine.sys.cg_table.flag(name) {
         let reference = IntRef {
             bank: BANK_Z,

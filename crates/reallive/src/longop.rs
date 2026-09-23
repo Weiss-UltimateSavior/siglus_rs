@@ -9,13 +9,19 @@ use crate::machine::{IntTarget, LongOp, Machine};
 pub enum WaitEvent {
     None,
     /// Until timer `counter` of `layer` exceeds `time`.
-    Timer { layer: usize, counter: i32, time: i32 },
+    Timer {
+        layer: usize,
+        counter: i32,
+        time: i32,
+    },
     /// Until the music has stopped.
     Bgm,
     /// Until a PCM channel is silent.
     Wav(usize),
     /// Until the voice has finished.
     Koe,
+    /// Until a `PCMEVENT` has finished.
+    PcmEvent(i32),
 }
 
 /// `wait`, `waitC`, `time`, `timeC`, `GetClick`, `WaitClick`.
@@ -98,6 +104,7 @@ impl LongOp for Wait {
             WaitEvent::Bgm => sound.bgm_status(now) == 0,
             WaitEvent::Wav(channel) => !sound.wav_playing(channel, now),
             WaitEvent::Koe => !sound.koe_playing(now),
+            WaitEvent::PcmEvent(number) => !machine.sys.pcm_events.contains_key(&number),
             _ => false,
         };
         if done && self.break_on_click {
@@ -235,7 +242,12 @@ pub struct FlashOp {
 }
 
 impl FlashOp {
-    pub fn new(machine: &Machine, rect: Option<crate::surface::Rect>, colour: [u8; 4], time: i32) -> Self {
+    pub fn new(
+        machine: &Machine,
+        rect: Option<crate::surface::Rect>,
+        colour: [u8; 4],
+        time: i32,
+    ) -> Self {
         Self {
             rect,
             colour,
@@ -326,7 +338,15 @@ impl LongOp for PanOp {
         if self.kind == 406 {
             let x = (f64::from(self.a.0) + f64::from(self.b.0 - self.a.0) * t).round() as i32;
             let y = (f64::from(self.a.1) + f64::from(self.b.1 - self.a.1) * t).round() as i32;
-            dc0.blit(&self.source, Rect::new(x, y, w.w, w.h), w.x, w.y, 255, Blend::Copy, None);
+            dc0.blit(
+                &self.source,
+                Rect::new(x, y, w.w, w.h),
+                w.x,
+                w.y,
+                255,
+                Blend::Copy,
+                None,
+            );
         } else {
             // Direction: 0 down, 1 up, 2 right, 3 left.
             let (horizontal, positive) = match self.direction {
@@ -359,14 +379,30 @@ impl LongOp for PanOp {
                 let old = self.underneath.clone();
                 let mut canvas = crate::surface::Surface::new(w.w, w.h);
                 canvas.blit(&old, old.rect(), ox - w.x, oy - w.y, 255, Blend::Copy, None);
-                canvas.blit(&self.source, block, bx - w.x, by - w.y, 255, Blend::Copy, None);
+                canvas.blit(
+                    &self.source,
+                    block,
+                    bx - w.x,
+                    by - w.y,
+                    255,
+                    Blend::Copy,
+                    None,
+                );
                 dc0.blit(&canvas, canvas.rect(), w.x, w.y, 255, Blend::Copy, None);
             } else {
                 // Slide: the new block moves in over the old contents.
                 let old = self.underneath.clone();
                 let mut canvas = crate::surface::Surface::new(w.w, w.h);
                 canvas.blit(&old, old.rect(), 0, 0, 255, Blend::Copy, None);
-                canvas.blit(&self.source, block, bx - w.x, by - w.y, 255, Blend::Copy, None);
+                canvas.blit(
+                    &self.source,
+                    block,
+                    bx - w.x,
+                    by - w.y,
+                    255,
+                    Blend::Copy,
+                    None,
+                );
                 dc0.blit(&canvas, canvas.rect(), w.x, w.y, 255, Blend::Copy, None);
             }
         }

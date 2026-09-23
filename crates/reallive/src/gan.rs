@@ -62,7 +62,10 @@ impl Gan {
         let name_len = c.i32()?.max(0) as usize;
         let name_bytes = data.get(c.pos..c.pos + name_len).unwrap_or(&[]);
         let image_name = crate::nls::Nls::Sjis.decode(
-            &name_bytes[..name_bytes.iter().position(|b| *b == 0).unwrap_or(name_bytes.len())],
+            &name_bytes[..name_bytes
+                .iter()
+                .position(|b| *b == 0)
+                .unwrap_or(name_bytes.len())],
         );
         c.pos += name_len;
         if c.i32()? != 20000 {

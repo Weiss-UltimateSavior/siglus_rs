@@ -7,16 +7,21 @@ use siglus_scene_vm::vm::{SceneVm, VmConfig};
 use std::path::PathBuf;
 
 fn make_vm(scene_name: &str, z: i32) -> Result<SceneVm<'static>> {
-    let project = PathBuf::from("/Users/xmoe/Documents/siglus_rs-main/testcase");
+    let project = std::env::var_os("TITLE_PROBE_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/xmoe/Documents/siglus_rs-main/testcase"));
     let pck_path = siglus_scene_vm::resource::find_scene_pck_path(&project)?;
     let opt = siglus_scene_vm::resource::load_scene_pck_decode_options(&project)?;
     let pack = ScenePck::load_and_rebuild(&pck_path, &opt)?;
     let scn_no = pack
         .find_scene_no(scene_name)
         .with_context(|| format!("scene not found: {scene_name}"))?;
-    let chunk = pack.scn_data_slice(scn_no)?;
-    let chunk_leaked: &'static [u8] = Box::leak(chunk.to_vec().into_boxed_slice());
-    let mut stream = SceneStream::new_with_string_codec(chunk_leaked, pack.string_codec)?;
+    let (owner, range) = pack.scn_data_shared(scn_no)?;
+    let mut stream = SceneStream::new_shared_range_with_string_codec(
+        owner,
+        range,
+        pack.string_codec,
+    )?;
     if let Ok(range) = std::env::var("TITLE_PROBE_DUMP_SCN") {
         let (start, end) = parse_hex_range(&range).unwrap_or((0, stream.scn.len().min(0x100)));
         for pc in (start..end.min(stream.scn.len())).step_by(16) {

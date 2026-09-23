@@ -25,11 +25,66 @@ use crate::text::{PlacedChar, Ruby, WindowConfig};
 pub fn is_kinsoku(c: char) -> bool {
     matches!(
         c,
-        '、' | '。' | '，' | '．' | '：' | '；' | '？' | '！' | '゛' | '゜' | 'ヽ' | 'ヾ' | 'ゝ'
-            | 'ゞ' | '々' | 'ー' | '）' | '］' | '｝' | '」' | '』' | '〕' | '〉' | '》' | '】'
-            | '’' | '”' | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ'
-            | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ'
-            | '・' | '…' | '‥' | '～' | '─' | ',' | '.' | '!' | '?' | ')' | ']' | '}'
+        '、' | '。'
+            | '，'
+            | '．'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | '゛'
+            | '゜'
+            | 'ヽ'
+            | 'ヾ'
+            | 'ゝ'
+            | 'ゞ'
+            | '々'
+            | 'ー'
+            | '）'
+            | '］'
+            | '｝'
+            | '」'
+            | '』'
+            | '〕'
+            | '〉'
+            | '》'
+            | '】'
+            | '’'
+            | '”'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | 'ヵ'
+            | 'ヶ'
+            | '・'
+            | '…'
+            | '‥'
+            | '～'
+            | '─'
+            | ','
+            | '.'
+            | '!'
+            | '?'
+            | ')'
+            | ']'
+            | '}'
     )
 }
 
@@ -186,6 +241,9 @@ pub fn clear_window(sys: &mut System, index: usize) {
     state.colour_override = None;
     state.size_override = None;
     state.last_was_name = false;
+    // A new page starts without a speaker.
+    state.namebox = None;
+    state.name.clear();
     if index == sys.text.active {
         sys.text.commit_page();
     }
@@ -239,13 +297,12 @@ pub fn place_char(sys: &mut System, index: usize, c: char, rest: &[char]) -> boo
             return false;
         }
     }
-    let size = sys.text.states[index].size_override.unwrap_or(config.moji_size);
+    let size = sys.text.states[index]
+        .size_override
+        .unwrap_or(config.moji_size);
     let (text_colour, shadow_colour) = {
         let state = &sys.text.states[index];
-        state
-            .colour_override
-            .or(state.colour)
-            .unwrap_or((0, -1))
+        state.colour_override.or(state.colour).unwrap_or((0, -1))
     };
     let colour = colour_index(sys, text_colour);
     let shadow = if !config.moji_shadow || sys.settings.font_shadow == 0 {
@@ -427,14 +484,18 @@ fn finish_pause(sys: &mut System, kind: PauseKind) {
         PauseKind::PageFull => {
             // Continue the same speech on a fresh page, keeping the name.
             let name = sys.text.states[index].name.clone();
+            let namebox = sys.text.states[index].namebox.clone();
             let indent = sys.text.states[index].indent;
             clear_window(sys, index);
             let state = &mut sys.text.states[index];
             state.name = name;
-            state.indent = indent.min(state.indent.max(indent));
-            state.x = state.indent;
+            state.namebox = namebox;
+            state.indent = indent;
+            state.x = indent;
         }
         PauseKind::Pause | PauseKind::PauseAll if r_command => {
+            // The next paragraph names its own speaker.
+            sys.text.states[index].namebox = None;
             line_break(sys, index);
             sys.text.states[index].indent = 0;
             sys.text.states[index].x = 0;
@@ -665,16 +726,20 @@ pub(crate) fn draw_glyph(
 }
 
 /// Draws the translucent backing: filter 0 subtracts, 1 blends.
-pub(crate) fn draw_backing(frame: &mut Surface, rect: Rect, mask: Option<&Surface>, attr: WindowAttr, alpha: u8) {
+pub(crate) fn draw_backing(
+    frame: &mut Surface,
+    rect: Rect,
+    mask: Option<&Surface>,
+    attr: WindowAttr,
+    alpha: u8,
+) {
     let rect = rect.intersect(&frame.rect());
     let colour = [attr.r, attr.g, attr.b].map(|c| c.clamp(0, 255) as u32);
     let strength = attr.alpha.clamp(0, 255) as u32 * u32::from(alpha) / 255;
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             let m = match mask {
-                Some(mask) => {
-                    u32::from(mask.pixel(x - rect.x, y - rect.y)[3]) * strength / 255
-                }
+                Some(mask) => u32::from(mask.pixel(x - rect.x, y - rect.y)[3]) * strength / 255,
                 None => strength,
             };
             if m == 0 {
@@ -694,14 +759,28 @@ pub(crate) fn draw_backing(frame: &mut Surface, rect: Rect, mask: Option<&Surfac
     }
 }
 
-pub(crate) fn draw_image(frame: &mut Surface, image: &Image, pattern: i32, x: i32, y: i32, alpha: u8) {
+pub(crate) fn draw_image(
+    frame: &mut Surface,
+    image: &Image,
+    pattern: i32,
+    x: i32,
+    y: i32,
+    alpha: u8,
+) {
     let region = image.region(pattern);
     let src = Rect::from_corners(region.x1, region.y1, region.x2, region.y2);
     frame.blit(&image.surface, src, x, y, alpha, Blend::Mask, None);
 }
 
 /// Draws a type 4 frame: corners, stretched edges, stretched backing.
-fn draw_type4(frame: &mut Surface, image: &Image, window: Rect, attr: WindowAttr, area: [i32; 4], alpha: u8) {
+fn draw_type4(
+    frame: &mut Surface,
+    image: &Image,
+    window: Rect,
+    attr: WindowAttr,
+    area: [i32; 4],
+    alpha: u8,
+) {
     let r = |i: i32| image.region(i);
     let (tl, tc, tr) = (r(0), r(1), r(2));
     let (ls, rs) = (r(3), r(6));
@@ -719,18 +798,70 @@ fn draw_type4(frame: &mut Surface, image: &Image, window: Rect, attr: WindowAttr
     };
     let (x, y, w, h) = (window.x, window.y, window.w, window.h);
     blit(frame, tl, Rect::new(x, y, tl.width(), tl.height()));
-    blit(frame, tr, Rect::new(x + w - tr.width(), y, tr.width(), tr.height()));
-    blit(frame, bl, Rect::new(x, y + h - bl.height(), bl.width(), bl.height()));
-    blit(frame, br, Rect::new(x + w - br.width(), y + h - br.height(), br.width(), br.height()));
-    blit(frame, tc, Rect::new(x + tl.width(), y, w - tl.width() - tr.width(), tc.height()));
-    blit(frame, bc, Rect::new(x + bl.width(), y + h - bc.height(), w - bl.width() - br.width(), bc.height()));
-    blit(frame, ls, Rect::new(x, y + tl.height(), ls.width(), h - tl.height() - bl.height()));
-    blit(frame, rs, Rect::new(x + w - rs.width(), y + tr.height(), rs.width(), h - tr.height() - br.height()));
+    blit(
+        frame,
+        tr,
+        Rect::new(x + w - tr.width(), y, tr.width(), tr.height()),
+    );
+    blit(
+        frame,
+        bl,
+        Rect::new(x, y + h - bl.height(), bl.width(), bl.height()),
+    );
+    blit(
+        frame,
+        br,
+        Rect::new(
+            x + w - br.width(),
+            y + h - br.height(),
+            br.width(),
+            br.height(),
+        ),
+    );
+    blit(
+        frame,
+        tc,
+        Rect::new(x + tl.width(), y, w - tl.width() - tr.width(), tc.height()),
+    );
+    blit(
+        frame,
+        bc,
+        Rect::new(
+            x + bl.width(),
+            y + h - bc.height(),
+            w - bl.width() - br.width(),
+            bc.height(),
+        ),
+    );
+    blit(
+        frame,
+        ls,
+        Rect::new(
+            x,
+            y + tl.height(),
+            ls.width(),
+            h - tl.height() - bl.height(),
+        ),
+    );
+    blit(
+        frame,
+        rs,
+        Rect::new(
+            x + w - rs.width(),
+            y + tr.height(),
+            rs.width(),
+            h - tr.height() - br.height(),
+        ),
+    );
 }
 
 /// Opening/closing animation: (alpha, dx, dy, scale). Returns `None` when
 /// a closing animation has ended.
-fn animation_state(sys: &mut System, index: usize, geometry: &Geometry) -> Option<(u8, i32, i32, f64)> {
+fn animation_state(
+    sys: &mut System,
+    index: usize,
+    geometry: &Geometry,
+) -> Option<(u8, i32, i32, f64)> {
     let now = sys.clock.now();
     let config = &sys.text.windows[index];
     let Some((start, opening)) = sys.text.states[index].animation else {
@@ -782,7 +913,12 @@ fn animation_state(sys: &mut System, index: usize, geometry: &Geometry) -> Optio
         1 => ((shown * 255.0) as u8, 0, 0, 1.0),
         2..=8 => {
             let (hx, hy) = hidden_offset(mode);
-            (255, (hx * (1.0 - shown)) as i32, (hy * (1.0 - shown)) as i32, 1.0)
+            (
+                255,
+                (hx * (1.0 - shown)) as i32,
+                (hy * (1.0 - shown)) as i32,
+                1.0,
+            )
         }
         9..=16 => (255, 0, 0, shown.max(0.01)),
         _ => (255, 0, 0, 1.0),
@@ -790,12 +926,17 @@ fn animation_state(sys: &mut System, index: usize, geometry: &Geometry) -> Optio
 }
 
 /// Draws every visible text window onto `frame`.
-pub fn draw_windows(sys: &mut System, frame: &mut Surface, window_offset: (i32, i32), text_offset: (i32, i32)) {
+pub fn draw_windows(
+    sys: &mut System,
+    frame: &mut Surface,
+    window_offset: (i32, i32),
+    text_offset: (i32, i32),
+) {
     if sys.text.hidden_temporarily || sys.gfx.interface_hidden {
         return;
     }
     for index in 0..sys.text.states.len() {
-        if !sys.text.states[index].visible {
+        if !sys.text.states[index].visible || sys.text.display_off[index] {
             continue;
         }
         let geometry = geometry(sys, index);
@@ -805,7 +946,15 @@ pub fn draw_windows(sys: &mut System, frame: &mut Surface, window_offset: (i32, 
         if scale < 1.0 {
             // Expanding windows: draw into a layer and scale it.
             let mut layer = frame.clone();
-            draw_window(sys, &mut layer, index, &geometry, window_offset, text_offset, 255);
+            draw_window(
+                sys,
+                &mut layer,
+                index,
+                &geometry,
+                window_offset,
+                text_offset,
+                255,
+            );
             let w = geometry.window;
             let dest = Rect::new(
                 w.x + (f64::from(w.w) * (1.0 - scale) / 2.0) as i32,
@@ -898,7 +1047,14 @@ fn draw_window(
     }
 }
 
-fn draw_ruby(sys: &mut System, frame: &mut Surface, config: &WindowConfig, ruby: &Ruby, origin: (i32, i32), alpha: u8) {
+fn draw_ruby(
+    sys: &mut System,
+    frame: &mut Surface,
+    config: &WindowConfig,
+    ruby: &Ruby,
+    origin: (i32, i32),
+    alpha: u8,
+) {
     let size = config.luby_size.max(1);
     let chars: Vec<char> = ruby.text.chars().collect();
     if chars.is_empty() {
@@ -914,12 +1070,29 @@ fn draw_ruby(sys: &mut System, frame: &mut Surface, config: &WindowConfig, ruby:
     let mut x = ruby.x1 + (span - total - gap * (chars.len() as i32 - 1)).max(0) / 2;
     let colour = colour_index(sys, 0);
     for c in chars {
-        draw_glyph(frame, sys, c, origin.0 + x, origin.1 + ruby.y - size, size, colour, Some([0, 0, 0]), alpha);
+        draw_glyph(
+            frame,
+            sys,
+            c,
+            origin.0 + x,
+            origin.1 + ruby.y - size,
+            size,
+            colour,
+            Some([0, 0, 0]),
+            alpha,
+        );
         x += cell_width(c) as i32 * size / 2 + gap;
     }
 }
 
-fn draw_name_box(sys: &mut System, frame: &mut Surface, config: &WindowConfig, window: Rect, name: &str, alpha: u8) {
+fn draw_name_box(
+    sys: &mut System,
+    frame: &mut Surface,
+    config: &WindowConfig,
+    window: Rect,
+    name: &str,
+    alpha: u8,
+) {
     let size = config.name_moji_size.max(1);
     let (pad_x, pad_y) = config.name_moji_pos;
     let text_width: i32 = name
@@ -942,8 +1115,16 @@ fn draw_name_box(sys: &mut System, frame: &mut Surface, config: &WindowConfig, w
     let y = window.y + config.name_pos.1 - bh;
     let attr = config.effective_attr(sys.settings.window_attr);
     match &box_images.back {
-        Some(back) => draw_backing(frame, Rect::new(x, y, bw, bh), Some(&back.surface), attr, alpha),
-        None if box_images.main.is_none() => draw_backing(frame, Rect::new(x, y, bw, bh), None, attr, alpha),
+        Some(back) => draw_backing(
+            frame,
+            Rect::new(x, y, bw, bh),
+            Some(&back.surface),
+            attr,
+            alpha,
+        ),
+        None if box_images.main.is_none() => {
+            draw_backing(frame, Rect::new(x, y, bw, bh), None, attr, alpha)
+        }
         None => {}
     }
     if let Some(main) = &box_images.main {
@@ -962,7 +1143,14 @@ fn draw_name_box(sys: &mut System, frame: &mut Surface, config: &WindowConfig, w
     }
 }
 
-fn draw_faces(sys: &mut System, frame: &mut Surface, index: usize, geometry: &Geometry, behind: bool, alpha: u8) {
+fn draw_faces(
+    sys: &mut System,
+    frame: &mut Surface,
+    index: usize,
+    geometry: &Geometry,
+    behind: bool,
+    alpha: u8,
+) {
     let config = sys.text.windows[index].clone();
     let faces = sys.text.states[index].faces.clone();
     for (slot, file) in faces.iter().enumerate() {
@@ -973,12 +1161,26 @@ fn draw_faces(sys: &mut System, frame: &mut Surface, index: usize, geometry: &Ge
             continue;
         }
         if let Some(image) = load_named(sys, file) {
-            draw_image(frame, &image, 0, geometry.text.x + fx, geometry.text.y + fy, alpha);
+            draw_image(
+                frame,
+                &image,
+                0,
+                geometry.text.x + fx,
+                geometry.text.y + fy,
+                alpha,
+            );
         }
     }
 }
 
-fn draw_key_cursor(sys: &mut System, frame: &mut Surface, config: &WindowConfig, geometry: &Geometry, origin: (i32, i32), since: u64) {
+fn draw_key_cursor(
+    sys: &mut System,
+    frame: &mut Surface,
+    config: &WindowConfig,
+    geometry: &Geometry,
+    origin: (i32, i32),
+    since: u64,
+) {
     let exe = sys.gameexe.clone();
     let cursor = sys.key_cursor;
     let key = |part: &str| format!("CURSOR.{cursor:03}.{part}");
@@ -1001,20 +1203,43 @@ fn draw_key_cursor(sys: &mut System, frame: &mut Surface, config: &WindowConfig,
     let (x, y) = match config.keycur.0 {
         1 => (origin.0 + state.x, origin.1 + state.y),
         2 => (origin.0 + config.keycur.1, origin.1 + config.keycur.2),
-        _ => (
-            geometry.text.right() - w,
-            geometry.text.bottom() - h,
-        ),
+        _ => (geometry.text.right() - w, geometry.text.bottom() - h),
     };
-    frame.blit(&image.surface, Rect::new(current * w, 0, w, h), x, y, 255, Blend::Mask, None);
+    frame.blit(
+        &image.surface,
+        Rect::new(current * w, 0, w, h),
+        x,
+        y,
+        255,
+        Blend::Mask,
+        None,
+    );
 }
 
 /// `grpTextout`: draws text into a DC.
-pub fn draw_string_to_dc(sys: &mut System, dc: i32, x: i32, y: i32, text: &str, size: i32, colour: [u8; 4]) -> Result<()> {
+pub fn draw_string_to_dc(
+    sys: &mut System,
+    dc: i32,
+    x: i32,
+    y: i32,
+    text: &str,
+    size: i32,
+    colour: [u8; 4],
+) -> Result<()> {
     let mut surface = (*sys.gfx.dc(dc)?).clone();
     let mut pen = x;
     for c in text.chars() {
-        draw_glyph(&mut surface, sys, c, pen, y, size.max(1), [colour[0], colour[1], colour[2]], None, 255);
+        draw_glyph(
+            &mut surface,
+            sys,
+            c,
+            pen,
+            y,
+            size.max(1),
+            [colour[0], colour[1], colour[2]],
+            None,
+            255,
+        );
         pen += cell_width(c) as i32 * size.max(1) / 2;
     }
     sys.gfx.set_dc(dc, surface)?;
@@ -1027,13 +1252,11 @@ mod tests {
 
     #[test]
     fn names_are_interpreted() {
-        let name = |local: bool, index: usize| {
-            match (local, index) {
-                (false, 0) => "朋也".to_owned(),
-                (false, 27) => "岡崎".to_owned(),
-                (true, 2) => "渚".to_owned(),
-                _ => String::new(),
-            }
+        let name = |local: bool, index: usize| match (local, index) {
+            (false, 0) => "朋也".to_owned(),
+            (false, 27) => "岡崎".to_owned(),
+            (true, 2) => "渚".to_owned(),
+            _ => String::new(),
         };
         assert_eq!(interpret_names("＊Ａ「％Ｃ」", name), "朋也「渚」");
         assert_eq!(interpret_names("＊ＡＢさん", name), "岡崎さん");

@@ -41,7 +41,10 @@ pub fn flow(machine: &mut Machine, command: &Command) -> Result<Next> {
         }
         CommandKind::GotoOn { value, targets } => {
             let value = machine.eval_int(value)?;
-            match usize::try_from(value).ok().and_then(|index| targets.get(index)) {
+            match usize::try_from(value)
+                .ok()
+                .and_then(|index| targets.get(index))
+            {
                 Some(&target) => Ok(transfer(machine, command, target)),
                 None => Ok(Next::Advance),
             }

@@ -128,7 +128,9 @@ fn read_display(machine: &mut Machine, args: &Args, at: usize, end: usize) -> Re
     let sel = args.int(machine, at)?;
     let values = sel_values(machine, sel, args.rec);
     let mut transition = Transition::from_sel(&values);
-    let mut src = Some(Rect::from_corners(values[0], values[1], values[2], values[3]));
+    let mut src = Some(Rect::from_corners(
+        values[0], values[1], values[2], values[3],
+    ));
     let mut dest = (values[4], values[5]);
     match rest {
         2 => transition.opacity = args.int(machine, at + 1)?,
@@ -183,6 +185,9 @@ fn open_onto_screen(
     mask: bool,
     promote: bool,
 ) -> Result<()> {
+    if machine.sys.grp_closes_windows {
+        close_text_windows(machine);
+    }
     let before = crate::screen::compose_scene(&mut machine.sys);
     let gfx = &mut machine.sys.gfx;
     if let Some(image) = image {
@@ -213,8 +218,24 @@ fn open_onto_screen(
     Ok(())
 }
 
-pub fn start_transition(machine: &mut Machine, transition: Transition, before: Surface, after: Surface) {
+/// Closes every open text window (`#GRPCOM_WINDOWCLOSE`,
+/// `#WAIP_WINDOWCLOSE`).
+fn close_text_windows(machine: &mut Machine) {
+    for index in 0..machine.sys.text.states.len() {
+        crate::textout::close_window(&mut machine.sys, index);
+    }
+}
+
+pub fn start_transition(
+    machine: &mut Machine,
+    transition: Transition,
+    before: Surface,
+    after: Surface,
+) {
     if transition.time > 0 && transition.style != 1 {
+        if machine.sys.wipe_closes_windows {
+            close_text_windows(machine);
+        }
         let op = TransitionOp::new(machine, transition, before, after);
         machine.push_long_op(Box::new(op));
     }
@@ -227,7 +248,10 @@ fn apply_compositors(machine: &mut Machine, args: &Args, at: usize) -> Result<()
             continue;
         };
         let values_from = |machine: &mut Machine, from: usize| -> Result<Vec<i32>> {
-            pieces[from..].iter().map(|piece| machine.eval_int(piece)).collect()
+            pieces[from..]
+                .iter()
+                .map(|piece| machine.eval_int(piece))
+                .collect()
         };
         let Some(name) = pieces.first() else {
             continue;
@@ -390,7 +414,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let name = args.str(machine, 0)?;
             let index = args.int(machine, 1)?;
             let surface = load(machine, &name)?;
-            machine.sys.gfx.masks.insert(index, std::rc::Rc::new(surface));
+            machine
+                .sys
+                .gfx
+                .masks
+                .insert(index, std::rc::Rc::new(surface));
         }
         // grpTextout(text, x, y, dc, size, r, g, b)
         30 => {
@@ -444,11 +472,15 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                         .ensure_dc_size(dc, dest.0 + src.w, dest.1 + src.h)?;
                 }
                 let blend = if mask { Blend::Mask } else { Blend::Copy };
-                machine
-                    .sys
-                    .gfx
-                    .dc_mut(dc)?
-                    .blit(&image, src, dest.0, dest.1, opacity(alpha), blend, None);
+                machine.sys.gfx.dc_mut(dc)?.blit(
+                    &image,
+                    src,
+                    dest.0,
+                    dest.1,
+                    opacity(alpha),
+                    blend,
+                    None,
+                );
             }
             push_stack(machine, "grpLoad");
         }
@@ -497,22 +529,55 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 let rect = dc1.rect();
                 dc1.fill(rect, [0, 0, 0, 255], 255);
                 let src = display.src.unwrap_or(base.rect());
-                dc1.blit(&base, src, display.dest.0, display.dest.1, 255, Blend::Copy, None);
+                dc1.blit(
+                    &base,
+                    src,
+                    display.dest.0,
+                    display.dest.1,
+                    255,
+                    Blend::Copy,
+                    None,
+                );
             }
             apply_compositors(machine, &args, plain)?;
             let gfx = &mut machine.sys.gfx;
             let dc1 = gfx.dc(1)?;
             let dc0 = gfx.dc_mut(0)?;
             let rect = dc0.rect();
-            dc0.blit(&dc1, rect, 0, 0, opacity(display.transition.opacity), Blend::Copy, None);
+            dc0.blit(
+                &dc1,
+                rect,
+                0,
+                0,
+                opacity(display.transition.opacity),
+                Blend::Copy,
+                None,
+            );
             gfx.promote_objects();
             let after = crate::screen::compose_scene(&mut machine.sys);
             start_transition(machine, display.transition, before, after);
             push_stack(machine, "grpMulti");
         }
         // Copies and filtered blits.
-        100..=102 | 120 | 121 | 140 | 141 | 501 | 502 | 600 | 601 | 620 | 621 | 640 | 641
-        | 700 | 701 | 720 | 721 | 740 | 741 => {
+        100..=102
+        | 120
+        | 121
+        | 140
+        | 141
+        | 501
+        | 502
+        | 600
+        | 601
+        | 620
+        | 621
+        | 640
+        | 641
+        | 700
+        | 701
+        | 720
+        | 721
+        | 740
+        | 741 => {
             let (blend, with_mask, inverted) =
                 copy_blend(opcode).ok_or_else(|| anyhow!("unreachable blend"))?;
             let (src, rect, dest, dst, mut at) = copy_operands(machine, &args)?;
@@ -577,7 +642,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             };
             let dc = args.int(machine, at)?;
             let colour = args.rgb(machine, at + 1)?;
-            let alpha = if n > at + 4 { args.int(machine, at + 4)? } else { 255 };
+            let alpha = if n > at + 4 {
+                args.int(machine, at + 4)?
+            } else {
+                255
+            };
             let surface = machine.sys.gfx.dc_mut(dc)?;
             let rect = rect.unwrap_or(surface.rect());
             if opcode == 200 {
@@ -594,7 +663,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 (None, 0)
             };
             let dc = args.int(machine, at)?;
-            let alpha = if n > at + 1 { args.int(machine, at + 1)? } else { 255 };
+            let alpha = if n > at + 1 {
+                args.int(machine, at + 1)?
+            } else {
+                255
+            };
             let surface = machine.sys.gfx.dc_mut(dc)?;
             let rect = rect.unwrap_or(surface.rect());
             if opcode == 300 {
@@ -642,7 +715,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let dst_rect = args.rect(machine, 5)?;
             let dst_dc = args.int(machine, 9)?;
             let alpha = if n > 10 { args.int(machine, 10)? } else { 255 };
-            let blend = if opcode == 409 { Blend::Mask } else { Blend::Copy };
+            let blend = if opcode == 409 {
+                Blend::Mask
+            } else {
+                Blend::Copy
+            };
             let gfx = &mut machine.sys.gfx;
             let src = (*gfx.dc(src_dc)?).clone();
             gfx.dc_mut(dst_dc)?
@@ -681,7 +758,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 (None, 0)
             };
             let colour = args.rgb(machine, at)?;
-            let time = if n > at + 3 { args.int(machine, at + 3)? } else { 50 };
+            let time = if n > at + 3 {
+                args.int(machine, at + 3)?
+            } else {
+                50
+            };
             let op = crate::longop::FlashOp::new(machine, rect, colour, time);
             machine.push_long_op(Box::new(op));
         }
@@ -696,7 +777,9 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             } else {
                 (args.int(machine, 9)?, args.int(machine, 10)?)
             };
-            let op = crate::longop::PanOp::new(machine, opcode, args.rec, src, a, b, window, direction, time)?;
+            let op = crate::longop::PanOp::new(
+                machine, opcode, args.rec, src, a, b, window, direction, time,
+            )?;
             machine.push_long_op(Box::new(op));
         }
         // grpNumber / grpMaskNumber
@@ -736,7 +819,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             } else {
                 (cell.2 - cell.0 + 1, cell.3 - cell.1 + 1)
             };
-            let blend = if opcode == 411 { Blend::Mask } else { Blend::Copy };
+            let blend = if opcode == 411 {
+                Blend::Mask
+            } else {
+                Blend::Copy
+            };
             let gfx = &mut machine.sys.gfx;
             let src = (*gfx.dc(src_dc)?).clone();
             let dst = gfx.dc_mut(dst_dc)?;

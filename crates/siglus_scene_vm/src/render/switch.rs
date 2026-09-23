@@ -1,7 +1,8 @@
-//! CPU scene renderer shared by the Switch and Vita native frontends.
+//! Native scene renderer shared by the Switch and Vita frontends.
 //!
 //! The desktop WGPU renderer stays in `render/mod.rs`; native frontends present
-//! this module's bounded RGBA output through their own display APIs.
+//! this module's RGBA output through their own display APIs. Vita uses GPU
+//! quads for simple sprites and the CPU compositor for complex effects.
 
 use anyhow::Result;
 
@@ -82,6 +83,7 @@ impl Renderer {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
+        #[cfg(not(target_os = "vita"))]
         let pixel_count = width as usize * height as usize;
         report_renderer_marker(b"siglus_switch: renderer rgba allocation begin\n\0");
         #[cfg(target_os = "vita")]
@@ -113,7 +115,7 @@ impl Renderer {
 
     pub fn adapter_name(&self) -> String {
         if cfg!(target_os = "vita") {
-            "PS Vita software renderer".to_owned()
+            "PS Vita vitaGL renderer".to_owned()
         } else {
             "Nintendo Switch native renderer".to_owned()
         }
@@ -122,8 +124,10 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.width = width.max(1);
         self.height = height.max(1);
-        self.framebuffer
-            .resize(self.width as usize * self.height as usize * 4, 0);
+        if !cfg!(target_os = "vita") || !self.framebuffer.is_empty() {
+            self.framebuffer
+                .resize(self.width as usize * self.height as usize * 4, 0);
+        }
         if !self.mesh_depth.is_empty() {
             self.mesh_depth
                 .resize(self.width as usize * self.height as usize, f32::INFINITY);
@@ -160,14 +164,15 @@ impl Renderer {
         (self.width, self.height)
     }
 
-    /// Compose the engine's existing painter-ordered sprite list into RGBA8,
-    /// then hand it to the native deko3d presentation pass. This intentionally
+    /// Draw the engine's existing painter-ordered sprite list. This intentionally
     /// consumes `RenderFrame` and `ImageManager` directly: scene/VM/resource
     /// code remains identical to desktop.
     pub fn render_frame(&mut self, images: &ImageManager, frame: &RenderFrame) -> Result<()> {
         #[cfg(target_os = "vita")]
-        if self.try_render_gpu(images, frame) {
-            return Ok(());
+        {
+            if self.try_render_gpu(images, frame) {
+                return Ok(());
+            }
         }
         self.render_frame_cpu(images, frame)
     }

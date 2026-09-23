@@ -4566,6 +4566,8 @@ impl CommandContext {
     }
 
     pub fn tick_frame(&mut self) {
+        #[cfg(target_os = "vita")]
+        self.movie.evict_idle_streams();
         let now = crate::platform_time::Instant::now();
         let last = self.frame_clock_last.replace(now);
         let real_delta_ms = match last {

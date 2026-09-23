@@ -22,9 +22,21 @@ pub enum ShakeKind {
     Pattern(Vec<(i32, i32, i32)>),
     /// One motion with an amount (pixels, or percent for zoom) and the
     /// duration of one cycle in ms.
-    Single { motion: Motion, amount: i32, speed: i32 },
+    Single {
+        motion: Motion,
+        amount: i32,
+        speed: i32,
+    },
     /// Horizontal and vertical oscillation together.
     TwoD {
+        h_amount: i32,
+        h_speed: i32,
+        v_amount: i32,
+        v_speed: i32,
+    },
+    /// `QUAKE_CIRCLE`: horizontal (cosine) and vertical (sine) together,
+    /// so equal amounts and periods trace a circle.
+    Circle {
         h_amount: i32,
         h_speed: i32,
         v_amount: i32,
@@ -87,6 +99,9 @@ impl Shake {
             ShakeKind::Pattern(steps) => steps.iter().map(|s| s.2.max(1)).sum::<i32>() as f64,
             ShakeKind::Single { speed, .. } => f64::from((*speed).max(1)),
             ShakeKind::TwoD {
+                h_speed, v_speed, ..
+            }
+            | ShakeKind::Circle {
                 h_speed, v_speed, ..
             } => f64::from((*h_speed).max(*v_speed).max(1)),
         }
@@ -198,6 +213,19 @@ impl Shake {
                 dy: f64::from(*v_amount) * extent * wave(*v_speed),
                 zoom: 0.0,
             },
+            ShakeKind::Circle {
+                h_amount,
+                h_speed,
+                v_amount,
+                v_speed,
+            } => {
+                let phase = |speed: i32| elapsed / f64::from(speed.max(1)) * std::f64::consts::TAU;
+                Offset {
+                    dx: f64::from(*h_amount) * extent * phase(*h_speed).cos(),
+                    dy: f64::from(*v_amount) * extent * phase(*v_speed).sin(),
+                    zoom: 0.0,
+                }
+            }
             ShakeKind::Pattern(_) => unreachable!("handled above"),
         })
     }

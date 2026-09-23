@@ -75,6 +75,45 @@ impl ObjectRef {
     }
 }
 
+/// A flash of colour over the screen or part of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Flash {
+    pub area: Option<Rect>,
+    pub colour: [u8; 3],
+    pub start: u64,
+    /// Length of one flash, in ms.
+    pub time: u64,
+    /// How many times it flashes.
+    pub count: u32,
+    /// Fades out instead of cutting off.
+    pub fade: bool,
+}
+
+impl Flash {
+    pub fn finished(&self, now: u64) -> bool {
+        now >= self.start + self.time * u64::from(self.count.max(1))
+    }
+
+    /// The opacity at `now` (0 when off).
+    pub fn alpha(&self, now: u64) -> u8 {
+        if now < self.start || self.finished(now) || self.time == 0 {
+            return 0;
+        }
+        let t = (now - self.start) % self.time;
+        let blinking = self.count > 1;
+        // Blinks are on for the first half of each period.
+        let on = if blinking { self.time / 2 } else { self.time };
+        if t >= on.max(1) {
+            return 0;
+        }
+        if self.fade {
+            (255.0 * (1.0 - t as f64 / on.max(1) as f64)) as u8
+        } else {
+            255
+        }
+    }
+}
+
 /// Graphics state captured at a savepoint.
 #[derive(Debug, Clone, Default)]
 pub struct GraphicsSnapshot {
@@ -82,6 +121,8 @@ pub struct GraphicsSnapshot {
     pub fg: Vec<Option<Object>>,
     pub bg: Vec<Option<Object>>,
     pub stack: Vec<String>,
+    /// The HIK background: (file, position).
+    pub hik: Option<(String, (i32, i32))>,
 }
 
 #[derive(Debug)]
@@ -99,6 +140,8 @@ pub struct Graphics {
     pub object_settings: HashMap<i32, ObjectSettings>,
     pub default_object_settings: ObjectSettings,
     pub draw_mode: DrawMode,
+    /// `refresh` was called (manual drawing mode shows a new frame).
+    pub refresh_requested: bool,
     /// The screen needs redrawing.
     pub dirty: bool,
     /// Entries of the graphics stack (`stackSize` and friends).
@@ -111,6 +154,27 @@ pub struct Graphics {
     pub transition_frame: Option<Rc<Surface>>,
     /// `ShowBackground` / space key: hide the interface.
     pub interface_hidden: bool,
+    /// `CCOM_OBJECT_OFF`: foreground objects hidden while a system menu
+    /// is up.
+    pub ccom_hidden_objects: std::collections::BTreeSet<i32>,
+    /// `CCOM_BTNSEL_OFF`: button selections hidden while a menu is up.
+    pub ccom_hide_buttons: bool,
+    /// `OBJFRONTANM_PAUSE`: foreground objects whose pattern animation is
+    /// frozen, with the time it stopped at.
+    pub paused_animations: HashMap<usize, u64>,
+    /// `*GANANM_NEXT_*`: animations to start when the running one ends
+    /// (a looping one at the end of its cycle): (object, when, animation).
+    pub queued_animations: Vec<(ObjectRef, Option<u64>, crate::object::Animation)>,
+    /// An animated HIK background shown over DC 0.
+    pub hik: Option<crate::hik::HikRenderer>,
+    /// `HAIKEI_SET_POS`: the background's scroll position.
+    pub haikei_pos: (i32, i32),
+    /// A screen flash (`BOXFLUSH` and friends, module 1:41).
+    pub flash: Option<Flash>,
+    /// `CAPTURE*` without a bank: the last screen capture.
+    pub capture: Option<Rc<Surface>>,
+    /// `G00BUF_LOAD`: images kept in the cache, by buffer number.
+    pub preloaded: HashMap<i32, (String, Rc<Image>)>,
     pub fonts: FontSet,
     pub snapshot: GraphicsSnapshot,
     /// Names of images loaded since the last query (CG tracking).
@@ -172,12 +236,22 @@ impl Graphics {
             object_settings,
             default_object_settings,
             draw_mode: DrawMode::Auto,
+            refresh_requested: false,
             dirty: true,
             stack: Vec::new(),
             screen_shake: None,
             layer_shake: None,
             transition_frame: None,
             interface_hidden: false,
+            ccom_hidden_objects: Default::default(),
+            ccom_hide_buttons: false,
+            paused_animations: HashMap::new(),
+            queued_animations: Vec::new(),
+            preloaded: HashMap::new(),
+            capture: None,
+            flash: None,
+            hik: None,
+            haikei_pos: (0, 0),
             fonts,
             snapshot: GraphicsSnapshot::default(),
             loaded_images: Vec::new(),
@@ -259,7 +333,15 @@ impl Graphics {
             return Ok(());
         }
         let mut grown = Surface::new(current.width.max(width), current.height.max(height));
-        grown.blit(&current, current.rect(), 0, 0, 255, crate::surface::Blend::Copy, None);
+        grown.blit(
+            &current,
+            current.rect(),
+            0,
+            0,
+            255,
+            crate::surface::Blend::Copy,
+            None,
+        );
         self.set_dc(dc, grown)
     }
 
@@ -280,6 +362,9 @@ impl Graphics {
         );
         if self.images.len() > 256 {
             self.images.clear();
+            for (name, image) in self.preloaded.values() {
+                self.images.insert(name.clone(), image.clone());
+            }
         }
         self.images.insert(key, image.clone());
         self.loaded_images.push(name.to_owned());
@@ -298,7 +383,9 @@ impl Graphics {
         match r.child {
             None => Some(parent),
             Some(child) => match parent.data.as_ref()? {
-                ObjectData::Parent(children) => children.get(usize::try_from(child).ok()?)?.as_ref(),
+                ObjectData::Parent(children) => {
+                    children.get(usize::try_from(child).ok()?)?.as_ref()
+                }
                 _ => None,
             },
         }
@@ -380,6 +467,29 @@ impl Graphics {
     /// Advances animations and mutators.
     pub fn update(&mut self, now: u64) {
         let mut changed = false;
+        if self.hik.is_some() {
+            changed = true;
+        }
+        if self.flash.as_ref().is_some_and(|flash| flash.finished(now)) {
+            self.flash = None;
+            changed = true;
+        } else if self.flash.is_some() {
+            changed = true;
+        }
+        for (r, due, mut animation) in std::mem::take(&mut self.queued_animations) {
+            let Ok(object) = self.object_mut(r) else { continue };
+            let ready = match due {
+                Some(due) => now >= due,
+                None => !object.is_animating(),
+            };
+            if ready {
+                animation.start = due.unwrap_or(now).min(now);
+                object.animation = Some(animation);
+                changed = true;
+            } else {
+                self.queued_animations.push((r, due, animation));
+            }
+        }
         for layer in [&mut self.fg, &mut self.bg] {
             for object in layer.iter_mut().flatten() {
                 changed |= object.update(now);
@@ -393,7 +503,14 @@ impl Graphics {
     // ---- composition ------------------------------------------------------
 
     /// The current offsets of the screen shake and of each shaken layer.
-    pub fn shake_offsets(&mut self, now: u64) -> (crate::shake::Offset, crate::shake::Layers, crate::shake::Offset) {
+    pub fn shake_offsets(
+        &mut self,
+        now: u64,
+    ) -> (
+        crate::shake::Offset,
+        crate::shake::Layers,
+        crate::shake::Offset,
+    ) {
         let screen = match &self.screen_shake {
             Some(shake) => match shake.offset(now) {
                 Some(offset) => offset,
@@ -437,7 +554,10 @@ impl Graphics {
             let Some(object) = object else {
                 continue;
             };
-            if !object.params.visible || object.data.is_none() {
+            if !object.params.visible
+                || object.data.is_none()
+                || self.ccom_hidden_objects.contains(&(index as i32))
+            {
                 continue;
             }
             let settings = self.settings_for(index);
@@ -463,6 +583,7 @@ impl Graphics {
             let Some(object) = &self.fg[index] else {
                 continue;
             };
+            ctx.now = self.paused_animations.get(&index).copied().unwrap_or(now);
             if offset == (0, 0) {
                 object.render(frame, &mut ctx, None);
             } else {
@@ -474,6 +595,21 @@ impl Graphics {
         }
     }
 
+    /// `OBJFRONTANM_PAUSE` / `_PAUSEALL`.
+    pub fn pause_animation(&mut self, index: usize, now: u64) {
+        self.paused_animations.entry(index).or_insert(now);
+    }
+
+    /// `OBJFRONTANM_RESUME` / `_RESUMEALL`: continue from where it stopped.
+    pub fn resume_animation(&mut self, index: usize, now: u64) {
+        if let Some(since) = self.paused_animations.remove(&index)
+            && let Some(Some(object)) = self.fg.get_mut(index)
+            && let Some(animation) = &mut object.animation
+        {
+            animation.start += now.saturating_sub(since);
+        }
+    }
+
     // ---- savepoints and saves --------------------------------------------
 
     pub fn take_savepoint(&mut self) {
@@ -482,6 +618,7 @@ impl Graphics {
             fg: self.fg.clone(),
             bg: self.bg.clone(),
             stack: self.stack.clone(),
+            hik: self.hik.as_ref().map(|hik| (hik.name.clone(), hik.offset)),
         };
     }
 
@@ -497,6 +634,8 @@ impl Graphics {
         self.layer_shake = None;
         self.transition_frame = None;
         self.interface_hidden = false;
+        self.hik = None;
+        self.flash = None;
         self.dirty = true;
     }
 
@@ -551,6 +690,11 @@ impl Graphics {
                 crate::object_io::write(w, object);
             }
         }
+        // Added later: older saves end here.
+        let (name, (x, y)) = snapshot.hik.clone().unwrap_or_default();
+        w.str(&name);
+        w.i32(x);
+        w.i32(y);
     }
 
     pub fn load(&mut self, r: &mut Reader, resources: &Resources) -> Result<()> {
@@ -589,6 +733,21 @@ impl Graphics {
                 self.bg = layer;
             } else {
                 self.fg = layer;
+            }
+        }
+        self.hik = None;
+        if !r.is_empty() {
+            let name = r.str()?;
+            let offset = (r.i32()?, r.i32()?);
+            if !name.is_empty()
+                && let Some(bytes) = resources.read(crate::resource::Kind::Hik, &name)
+            {
+                let script = crate::hik::HikScript::parse(&bytes, |frame| {
+                    self.load_image(resources, frame)
+                })?;
+                let mut renderer = crate::hik::HikRenderer::new(&name, Rc::new(script), 0);
+                renderer.offset = offset;
+                self.hik = Some(renderer);
             }
         }
         self.transition_frame = None;
@@ -688,7 +847,9 @@ mod tests {
     #[test]
     fn promotion_respects_wipe_copy() {
         let mut graphics = Graphics::new(&Gameexe::default(), FontSet::empty());
-        graphics.set_object(ObjectRef::fg(1), ObjectData::Text).unwrap();
+        graphics
+            .set_object(ObjectRef::fg(1), ObjectData::Text)
+            .unwrap();
         graphics
             .set_object(ObjectRef::fg(2), ObjectData::Text)
             .unwrap()

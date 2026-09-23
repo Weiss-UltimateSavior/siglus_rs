@@ -225,12 +225,20 @@ fn lay_out_in_window(sys: &mut System, window: usize, choices: Vec<Choice>) -> V
         textout::clear_window(sys, window);
         row = 0;
     }
-    let indent = if config.selcom_use { config.selcom_mojipos.max(0) } else { 0 };
+    let indent = if config.selcom_use {
+        config.selcom_mojipos.max(0)
+    } else {
+        0
+    };
     choices
         .into_iter()
         .enumerate()
         .map(|(i, choice)| {
-            let width: i32 = choice.text.chars().map(|c| cell_width(c) as i32 * cell / 2).sum();
+            let width: i32 = choice
+                .text
+                .chars()
+                .map(|c| cell_width(c) as i32 * cell / 2)
+                .sum();
             let y = config.luby_size + (row + i as i32) * line;
             Item {
                 rect: Rect::new(indent, y - config.moji_rep.1 / 2, width.max(cell), line),
@@ -258,7 +266,11 @@ fn button_style(sys: &mut System, set: i32) -> (ButtonStyle, (i32, i32), (i32, i
             values.get(2).copied().unwrap_or(0),
         )
     };
-    let named = |part: &str| exe.str(&key(part)).filter(|s| !s.is_empty()).map(str::to_owned);
+    let named = |part: &str| {
+        exe.str(&key(part))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
     let default_colour = exe.int(&key("MOJIDEFAULTCOL")).unwrap_or(0);
     let mut select_colour = exe.int(&key("MOJISELECTCOL")).unwrap_or(1);
     if select_colour == default_colour {
@@ -275,9 +287,19 @@ fn button_style(sys: &mut System, set: i32) -> (ButtonStyle, (i32, i32), (i32, i
         moji_size: exe.int(&key("MOJISIZE")).unwrap_or(24).max(1),
         default_colour,
         select_colour,
-        frames: [frame("NORMAL"), frame("SELECT"), frame("PUSH"), frame("DONTSEL")],
+        frames: [
+            frame("NORMAL"),
+            frame("SELECT"),
+            frame("PUSH"),
+            frame("DONTSEL"),
+        ],
     };
-    (style, pair("BASEPOS"), pair("REPPOS"), (centering.0 != 0, centering.1 != 0))
+    (
+        style,
+        pair("BASEPOS"),
+        pair("REPPOS"),
+        (centering.0 != 0, centering.1 != 0),
+    )
 }
 
 fn lay_out_buttons(sys: &mut System, set: i32, choices: Vec<Choice>) -> (ButtonStyle, Vec<Item>) {
@@ -324,7 +346,13 @@ pub struct SelectOp {
 }
 
 impl SelectOp {
-    fn new(machine: &mut Machine, layout: Layout, items: Vec<Item>, cursor: Option<usize>, restore_window: Option<usize>) -> Self {
+    fn new(
+        machine: &mut Machine,
+        layout: Layout,
+        items: Vec<Item>,
+        cursor: Option<usize>,
+        restore_window: Option<usize>,
+    ) -> Self {
         let sys = &mut machine.sys;
         // Skip mode stops at choices.
         sys.syscom.skip_mode = false;
@@ -332,7 +360,11 @@ impl SelectOp {
         let selection = Selection {
             layout,
             items,
-            highlighted: if sys.input.key_mouse || cursor.is_some() { highlighted } else { None },
+            highlighted: if sys.input.key_mouse || cursor.is_some() {
+                highlighted
+            } else {
+                None
+            },
             pressed: false,
         };
         sys.selection = Some(selection.clone());
@@ -363,11 +395,19 @@ impl LongOp for SelectOp {
                 let choice = self.selection.items[i].choice.clone();
                 machine.sys.play_se(1);
                 machine.sys.selection = None;
-                crate::save::remember_selection(machine);
+                if machine.selpoint_auto {
+                    crate::save::remember_selection(machine);
+                }
+                if machine.sys.read_jump_cancel {
+                    machine.sys.syscom.skip_mode = false;
+                }
                 machine.store = choice.index as i32;
                 let sys = &mut machine.sys;
                 sys.text.log.push(format!("→ {}", choice.text));
-                sys.text.current_page.lines.push(format!("→ {}", choice.text));
+                sys.text
+                    .current_page
+                    .lines
+                    .push(format!("→ {}", choice.text));
                 sys.text.commit_page();
                 match (&self.selection.layout, self.restore_window) {
                     (Layout::Window(window), Some(restore)) => {
@@ -426,7 +466,12 @@ pub fn button_select(machine: &mut Machine, select: &Select) -> Result<()> {
         Some(expression) => machine.eval_int(expression)?,
         None => 0,
     };
-    let set = if machine.gameexe.filter(&format!("SELBTN.{requested:03}")).next().is_some() {
+    let set = if machine
+        .gameexe
+        .filter(&format!("SELBTN.{requested:03}"))
+        .next()
+        .is_some()
+    {
         requested
     } else {
         0
@@ -438,7 +483,13 @@ pub fn button_select(machine: &mut Machine, select: &Select) -> Result<()> {
 }
 
 /// Draws the options of a window selection (called by the text renderer).
-pub fn draw_window_items(sys: &mut System, frame: &mut Surface, window: usize, origin: (i32, i32), alpha: u8) {
+pub fn draw_window_items(
+    sys: &mut System,
+    frame: &mut Surface,
+    window: usize,
+    origin: (i32, i32),
+    alpha: u8,
+) {
     let Some(selection) = sys.selection.clone() else {
         return;
     };
@@ -467,7 +518,9 @@ pub fn draw_window_items(sys: &mut System, frame: &mut Surface, window: usize, o
         }
         let colour_index = item.choice.colour.unwrap_or(0);
         let mut colour = textout::colour_index(sys, colour_index);
-        if !item.choice.enabled || (config.selcom_mojidark != 0 && !highlighted && selection.highlighted.is_some()) {
+        if !item.choice.enabled
+            || (config.selcom_mojidark != 0 && !highlighted && selection.highlighted.is_some())
+        {
             colour = colour.map(|c| c / 2);
         }
         let mut x = origin.0 + r.x;
@@ -482,6 +535,9 @@ pub fn draw_window_items(sys: &mut System, frame: &mut Surface, window: usize, o
 
 /// Draws `#SELBTN` buttons.
 pub fn draw_buttons(sys: &mut System, frame: &mut Surface) {
+    if sys.gfx.ccom_hide_buttons {
+        return;
+    }
     let Some(selection) = sys.selection.clone() else {
         return;
     };
@@ -489,8 +545,14 @@ pub fn draw_buttons(sys: &mut System, frame: &mut Surface) {
         return;
     };
     let attr = sys.settings.window_attr;
-    let name = style.name.as_deref().and_then(|name| textout::load_named(sys, name));
-    let back = style.back.as_deref().and_then(|back| textout::load_named(sys, back));
+    let name = style
+        .name
+        .as_deref()
+        .and_then(|name| textout::load_named(sys, name));
+    let back = style
+        .back
+        .as_deref()
+        .and_then(|back| textout::load_named(sys, back));
     for (i, item) in selection.items.iter().enumerate() {
         if item.choice.blank {
             continue;
@@ -523,7 +585,12 @@ pub fn draw_buttons(sys: &mut System, frame: &mut Surface) {
         let colour = textout::colour_index(sys, colour_index);
         let shadow = textout::colour_index(sys, 255);
         let size = style.moji_size;
-        let width: i32 = item.choice.text.chars().map(|c| cell_width(c) as i32 * size / 2).sum();
+        let width: i32 = item
+            .choice
+            .text
+            .chars()
+            .map(|c| cell_width(c) as i32 * size / 2)
+            .sum();
         let mut x = r.x + (r.w - width) / 2;
         let y = r.y + (r.h - size) / 2;
         for c in item.choice.text.chars() {
@@ -552,31 +619,108 @@ impl ObjectButtonSelect {
         }
     }
 
-    /// Button objects of the group: (object slot, button number, bounds).
     fn buttons(&self, sys: &mut System) -> Vec<(usize, i32, Rect)> {
-        let now = sys.now();
-        let gfx = &mut sys.gfx;
-        let mut out = Vec::new();
-        for (slot, object) in gfx.fg.iter().enumerate() {
-            let Some(object) = object else { continue };
-            let b = &object.params.button;
-            if b.is_button == 0 || b.group != self.group || !object.params.visible {
-                continue;
-            }
-            let bounds = object.bounds(now, &mut gfx.fonts, &gfx.colours, (0, 0));
-            out.push((slot, b.number, bounds));
-        }
-        // The topmost object wins.
-        out.sort_by_key(|&(slot, ..)| {
-            let p = &gfx.fg[slot].as_ref().expect("present").params;
-            std::cmp::Reverse((p.z_order, p.z_layer, p.z_depth, slot))
-        });
-        out
+        group_buttons(sys, self.group)
     }
 
     fn set_state(sys: &mut System, slot: usize, state: i32) {
-        if let Some(object) = sys.gfx.fg.get_mut(slot).and_then(Option::as_mut) {
-            object.params.button.state = state;
+        set_button_state(sys, slot, state);
+    }
+}
+
+/// Button objects of a group, topmost first: (object slot, button number,
+/// bounds).
+fn group_buttons(sys: &mut System, group: i32) -> Vec<(usize, i32, Rect)> {
+    let now = sys.now();
+    let gfx = &mut sys.gfx;
+    let mut out = Vec::new();
+    for (slot, object) in gfx.fg.iter().enumerate() {
+        let Some(object) = object else { continue };
+        let b = &object.params.button;
+        if b.is_button == 0 || b.group != group || !object.params.visible {
+            continue;
+        }
+        let bounds = object.bounds(now, &mut gfx.fonts, &gfx.colours, (0, 0));
+        out.push((slot, b.number, bounds));
+    }
+    out.sort_by_key(|&(slot, ..)| {
+        let p = &gfx.fg[slot].as_ref().expect("present").params;
+        std::cmp::Reverse((p.z_order, p.z_layer, p.z_depth, slot))
+    });
+    out
+}
+
+fn set_button_state(sys: &mut System, slot: usize, state: i32) {
+    if let Some(object) = sys.gfx.fg.get_mut(slot).and_then(Option::as_mut) {
+        object.params.button.state = state;
+    }
+}
+
+/// `select_btnobjstart`..`select_btnobjend`: a button-object selection
+/// the script polls (`select_btnobjnow_hit`, `select_btnobjnow_decide`)
+/// instead of waiting for it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PolledButtons {
+    pub group: i32,
+    hovered: Option<(usize, i32)>,
+    /// A click on a button not yet collected by `now_decide`.
+    decided: Option<i32>,
+}
+
+impl PolledButtons {
+    pub fn new(group: i32) -> Self {
+        Self {
+            group,
+            ..Self::default()
+        }
+    }
+
+    /// Per frame: hover highlighting and clicks.
+    pub fn update(&mut self, sys: &mut System) {
+        let buttons = group_buttons(sys, self.group);
+        let (mx, my) = sys.input.mouse;
+        let hit = buttons
+            .iter()
+            .find(|(_, _, r)| mx >= r.x && my >= r.y && mx < r.right() && my < r.bottom())
+            .map(|&(slot, number, _)| (slot, number));
+        if hit != self.hovered {
+            if let Some((slot, _)) = self.hovered {
+                set_button_state(sys, slot, 0);
+            }
+            if let Some((slot, _)) = hit {
+                sys.play_se(0);
+                set_button_state(sys, slot, 1);
+            }
+            self.hovered = hit;
+        }
+        let Some((slot, number)) = hit else { return };
+        let mut rest = Vec::new();
+        for event in std::mem::take(&mut sys.input.events) {
+            match event {
+                InputEvent::Press(Button::Left) => set_button_state(sys, slot, 2),
+                InputEvent::Release(Button::Left) if self.decided.is_none() => {
+                    set_button_state(sys, slot, 1);
+                    sys.play_se(1);
+                    self.decided = Some(number);
+                }
+                other => rest.push(other),
+            }
+        }
+        sys.input.events = rest;
+    }
+
+    pub fn hovered(&self) -> i32 {
+        self.hovered.map_or(-1, |(_, number)| number)
+    }
+
+    pub fn take_decided(&mut self) -> i32 {
+        self.decided.take().unwrap_or(-1)
+    }
+
+    /// Returns the highlighted button to normal.
+    pub fn finish(&mut self, sys: &mut System) {
+        if let Some((slot, _)) = self.hovered.take() {
+            set_button_state(sys, slot, 0);
         }
     }
 }

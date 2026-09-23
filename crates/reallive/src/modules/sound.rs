@@ -14,14 +14,22 @@ fn ms(value: i32) -> u64 {
 
 fn wait(machine: &mut Machine, event: WaitEvent, cancellable: bool) {
     let wait = Wait::event(event);
-    let wait = if cancellable { wait.cancellable() } else { wait };
+    let wait = if cancellable {
+        wait.cancellable()
+    } else {
+        wait
+    };
     machine.push_long_op(Box::new(wait));
 }
 
 /// Errors from missing or undecodable files are reported, not fatal.
 fn report(machine: &mut Machine, result: Result<()>) {
     if let Err(error) = result {
-        machine.report(format!("SEEN{:04} line {}: {error:#}", machine.scene_number(), machine.line));
+        machine.report(format!(
+            "SEEN{:04} line {}: {error:#}",
+            machine.scene_number(),
+            machine.line
+        ));
     }
 }
 
@@ -35,7 +43,15 @@ pub fn bgm(machine: &mut Machine, command: &Command) -> Result<Next> {
             let fade_out = ms(machine.int_param_or(command, 2, 0)?);
             let looped = command.op.opcode != 2;
             let sys = &mut machine.sys;
-            let result = sys.sound.bgm_play(&sys.resources, &sys.settings, now, &name, looped, fade_in, fade_out);
+            let result = sys.sound.bgm_play(
+                &sys.resources,
+                &sys.settings,
+                now,
+                &name,
+                looped,
+                fade_in,
+                fade_out,
+            );
             report(machine, result);
             if command.op.opcode == 1 {
                 wait(machine, WaitEvent::Bgm, false);
@@ -83,7 +99,9 @@ pub fn bgm(machine: &mut Machine, command: &Command) -> Result<Next> {
 }
 
 fn channel(machine: &mut Machine, command: &Command, index: usize) -> Result<usize> {
-    Ok(machine.int_param(command, index)?.clamp(0, WAV_CHANNELS as i32 - 1) as usize)
+    Ok(machine
+        .int_param(command, index)?
+        .clamp(0, WAV_CHANNELS as i32 - 1) as usize)
 }
 
 pub fn pcm(machine: &mut Machine, command: &Command) -> Result<Next> {
@@ -99,9 +117,19 @@ pub fn pcm(machine: &mut Machine, command: &Command) -> Result<Next> {
             let fade_in = ms(machine.int_param_or(command, 2, 0)?);
             let looped = command.op.opcode == 2;
             let sys = &mut machine.sys;
-            let played = sys.sound.wav_play(&sys.resources, &sys.settings, now, &name, channel, looped, fade_in);
+            let played = sys.sound.wav_play(
+                &sys.resources,
+                &sys.settings,
+                now,
+                &name,
+                channel,
+                looped,
+                fade_in,
+            );
             match played {
-                Ok(channel) if command.op.opcode == 1 => wait(machine, WaitEvent::Wav(channel), false),
+                Ok(channel) if command.op.opcode == 1 => {
+                    wait(machine, WaitEvent::Wav(channel), false)
+                }
                 Ok(_) => {}
                 Err(error) => report(machine, Err(error)),
             }
@@ -136,6 +164,69 @@ pub fn pcm(machine: &mut Machine, command: &Command) -> Result<Next> {
             machine.sys.sound.set_wav_volume(channel, now, volume, fade);
         }
         20 => machine.sys.sound.wav_stop_all(0, now),
+        // PCMEVENT_LOOP / _RANDOM / _ONESHOT(event, (name, [weight,] min, max)...)
+        40..=42 => {
+            use crate::pcm_event::{Entry, Mode, PcmEvent};
+            let number = machine.int_param(command, 0)?;
+            let mode = match command.op.opcode {
+                40 => Mode::Loop,
+                41 => Mode::Random,
+                _ => Mode::OneShot,
+            };
+            let mut entries = Vec::new();
+            for index in 1..command.params.len() {
+                let pieces = machine.complex_param(command, index)?;
+                let Some(name) = pieces.first() else { continue };
+                let name = machine.eval_str(name)?;
+                let ints = pieces[1..]
+                    .iter()
+                    .map(|piece| machine.eval_int(piece))
+                    .collect::<Result<Vec<_>>>()?;
+                let (weight, waits) = if mode == Mode::Random && ints.len() >= 3 {
+                    (ints[0], &ints[1..])
+                } else {
+                    (1, &ints[..])
+                };
+                entries.push(Entry {
+                    name,
+                    weight,
+                    wait_min: waits.first().copied().unwrap_or(0),
+                    wait_max: waits.get(1).copied().unwrap_or(0),
+                });
+            }
+            if let Some(mut old) = machine.sys.pcm_events.remove(&number) {
+                old.stop(&mut machine.sys, true);
+            }
+            machine.sys.pcm_events.insert(number, PcmEvent::new(mode, entries));
+        }
+        // PCMEVENT_STOP(event, stop sound) / PCMEVENT_STOPALL(stop sound)
+        50 | 51 => {
+            let (numbers, stop_sound) = if command.op.opcode == 50 {
+                let number = machine.int_param(command, 0)?;
+                (vec![number], machine.int_param_or(command, 1, 0)? != 0)
+            } else {
+                let all = machine.sys.pcm_events.keys().copied().collect();
+                (all, machine.int_param_or(command, 0, 0)? != 0)
+            };
+            for number in numbers {
+                if let Some(mut event) = machine.sys.pcm_events.remove(&number) {
+                    event.stop(&mut machine.sys, stop_sound);
+                }
+            }
+        }
+        // PCMEVENT_CHECK(event)
+        52 => {
+            let number = machine.int_param(command, 0)?;
+            machine.store = i32::from(machine.sys.pcm_events.contains_key(&number));
+        }
+        // PCMEVENT_WAIT(event)
+        53 => {
+            let number = machine.int_param(command, 0)?;
+            machine.push_long_op(Box::new(crate::longop::Wait::event(WaitEvent::PcmEvent(number))));
+        }
+        // PCMBUF_LOAD / PCMBUF_FREE / PCMBUF_FREEALL: preloading; files are
+        // read when played.
+        1000..=1002 => {}
         105 | 106 => {
             let channel = channel(machine, command, 0)?;
             let fade = ms(machine.int_param_or(command, 1, 1000)?);
@@ -199,6 +290,12 @@ pub fn koe(machine: &mut Machine, command: &Command) -> Result<Next> {
         }
         3 => wait(machine, WaitEvent::Koe, false),
         4 => machine.store = i32::from(machine.sys.sound.koe_playing(now)),
+        // KOE_REPLAY_CLEAR: drop the voice-replay markers.
+        101 => {
+            for state in &mut machine.sys.text.states {
+                state.koe_markers.clear();
+            }
+        }
         5 => machine.sys.sound.koe_stop(),
         6 => wait(machine, WaitEvent::Koe, true),
         11 => machine.store = machine.sys.sound.koe_volume(now),

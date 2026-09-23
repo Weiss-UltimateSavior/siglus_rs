@@ -96,11 +96,25 @@ pub struct Select {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandKind {
     Plain,
-    Goto { target: usize },
-    GotoIf { condition: Option<Expr>, target: usize },
-    GotoOn { value: Expr, targets: Vec<usize> },
-    GotoCase { value: Expr, cases: Vec<Option<Expr>>, targets: Vec<usize> },
-    GosubWith { target: usize },
+    Goto {
+        target: usize,
+    },
+    GotoIf {
+        condition: Option<Expr>,
+        target: usize,
+    },
+    GotoOn {
+        value: Expr,
+        targets: Vec<usize>,
+    },
+    GotoCase {
+        value: Expr,
+        cases: Vec<Option<Expr>>,
+        targets: Vec<usize>,
+    },
+    GosubWith {
+        target: usize,
+    },
     Select(Select),
 }
 
@@ -214,9 +228,7 @@ impl Script {
                 .element()
                 .with_context(|| format!("while decoding bytecode at 0x{start:x}"))?;
             if let Element::Entrypoint(entrypoint) = element {
-                script
-                    .entrypoints
-                    .insert(entrypoint, script.elements.len());
+                script.entrypoints.insert(entrypoint, script.elements.len());
             }
             by_offset.insert(start, script.elements.len());
             script.offsets.push(start as u32);
@@ -233,10 +245,9 @@ impl Script {
                     if offset == code.len() {
                         return Ok(count);
                     }
-                    by_offset
-                        .get(&offset)
-                        .copied()
-                        .ok_or_else(|| anyhow!("reallive: jump to 0x{offset:x} is not an element boundary"))
+                    by_offset.get(&offset).copied().ok_or_else(|| {
+                        anyhow!("reallive: jump to 0x{offset:x} is not an element boundary")
+                    })
                 })?;
             }
         }
@@ -324,11 +335,7 @@ impl Reader<'_> {
                 }
                 self.pos += 1;
                 let index = self.read_i16()?;
-                let value = self
-                    .kidoku_table
-                    .get(index as usize)
-                    .copied()
-                    .unwrap_or(0);
+                let value = self.kidoku_table.get(index as usize).copied().unwrap_or(0);
                 Ok(if value >= 1_000_000 {
                     Element::Entrypoint(value - 1_000_000)
                 } else {
@@ -580,14 +587,12 @@ impl Reader<'_> {
                     let effect = self.at(0);
                     self.pos += 1;
                     let takes_argument = effect != b'2' && effect != b'3';
-                    let argument = if takes_argument
-                        && self.at(0) != b')'
-                        && !self.at(0).is_ascii_digit()
-                    {
-                        Some(self.expression()?)
-                    } else {
-                        None
-                    };
+                    let argument =
+                        if takes_argument && self.at(0) != b')' && !self.at(0).is_ascii_digit() {
+                            Some(self.expression()?)
+                        } else {
+                            None
+                        };
                     conditions.push(SelectCondition {
                         condition,
                         effect,

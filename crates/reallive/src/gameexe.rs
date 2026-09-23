@@ -237,11 +237,9 @@ fn parse_int(token: &str) -> i32 {
     // Leading zeros are common (`#SEEN_START=0001`); huge values saturate.
     let negative = token.starts_with('-');
     let digits = token.trim_start_matches('-');
-    let magnitude = digits
-        .bytes()
-        .fold(0i64, |acc, digit| {
-            (acc * 10 + i64::from(digit - b'0')).min(i64::from(i32::MAX) + 1)
-        });
+    let magnitude = digits.bytes().fold(0i64, |acc, digit| {
+        (acc * 10 + i64::from(digit - b'0')).min(i64::from(i32::MAX) + 1)
+    });
     let value = if negative { -magnitude } else { magnitude };
     value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
@@ -266,14 +264,20 @@ mod tests {
         assert_eq!(exe.int("window.000.moji_size"), Some(25));
         assert_eq!(exe.ints("SEL.000"), vec![0, 0, 639, 479, 0, 0, -1, 0]);
         assert_eq!(exe.str("#CAPTION"), Some("CLANNAD"));
-        assert_eq!(exe.get("WINDOW.000.MOJI_SIZE").unwrap().key_number(1), Some(0));
+        assert_eq!(
+            exe.get("WINDOW.000.MOJI_SIZE").unwrap().key_number(1),
+            Some(0)
+        );
     }
 
     #[test]
     fn keeps_repeated_keys_in_order() {
         let exe = Gameexe::parse("#SE.001=\"a\"\n#SE.002=\"b\"\n#SE.001=\"c\"\n");
         assert_eq!(exe.str("SE.001"), Some("a"));
-        let all: Vec<_> = exe.filter("SE.").map(|entry| entry.str(0).unwrap()).collect();
+        let all: Vec<_> = exe
+            .filter("SE.")
+            .map(|entry| entry.str(0).unwrap())
+            .collect();
         assert_eq!(all, vec!["a", "b", "c"]);
     }
 }
