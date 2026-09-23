@@ -11,7 +11,7 @@ pub mod emote;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub mod emote_key;
 pub mod image_manager;
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 pub mod ime;
 pub mod layer;
 pub mod mesh3d;
@@ -35,9 +35,9 @@ pub mod vm;
 // parsers/decoders without wiring a second direct dependency.
 pub use siglus_assets as formats;
 
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 pub mod render;
-#[cfg(target_os = "horizon")]
+#[cfg(any(target_os = "horizon", target_os = "vita"))]
 #[path = "render/switch.rs"]
 pub mod render;
 
@@ -52,12 +52,12 @@ pub mod desktop_messagebox;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod desktop_twitter;
 pub mod host;
-#[cfg(target_os = "horizon")]
-pub mod switch_host;
 #[cfg(target_os = "ios")]
 pub mod ios_host;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub mod pump_host;
+#[cfg(target_os = "horizon")]
+pub mod switch_host;
 
 pub mod display_ffi;
 

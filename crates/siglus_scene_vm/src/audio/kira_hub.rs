@@ -1,12 +1,12 @@
 use std::fmt;
 
+#[cfg(any(target_os = "horizon", target_os = "vita"))]
+use super::switch_backend::SwitchBackend as PlatformBackend;
 use anyhow::{Context, Result, anyhow};
 use kira::Volume;
-use kira::manager::{AudioManager, AudioManagerSettings};
-#[cfg(not(target_os = "horizon"))]
+#[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 use kira::manager::backend::DefaultBackend as PlatformBackend;
-#[cfg(target_os = "horizon")]
-use super::switch_backend::SwitchBackend as PlatformBackend;
+use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle};

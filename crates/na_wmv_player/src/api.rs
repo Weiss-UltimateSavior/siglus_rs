@@ -10,7 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::asf::{AsfFile, AsfPayload, VideoStreamInfo};
 use crate::decoder::{MacroblockDecoder, YuvFrame};
 use crate::error::{DecoderError, Result};
-use crate::vc1::{vc1_unescape_buffer, PictureHeader, SequenceHeader};
+use crate::vc1::{PictureHeader, SequenceHeader, vc1_unescape_buffer};
 #[cfg(feature = "audio")]
 use crate::wma::{PcmFrameF32, WmaDecoder, WmaProDecoder};
 use crate::wmv2::{Wmv2FrameHeader, Wmv2FrameType, Wmv2Params};
@@ -375,8 +375,7 @@ impl Wvc1Decoder {
         if data.len() < 4 || from > data.len().saturating_sub(4) {
             return None;
         }
-        (from..=data.len() - 4)
-            .find(|&i| data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+        (from..=data.len() - 4).find(|&i| data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
     }
 
     /// Convert one ASF WVC1 media object into the raw Advanced picture

@@ -1,7 +1,6 @@
 //! Decoder and scheduler data for AVG32 `ANM32` animations.
 
 use anyhow::{Result, bail};
-use encoding_rs::SHIFT_JIS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnimationCell {
@@ -124,11 +123,7 @@ fn c_string(bytes: &[u8], at: usize) -> Result<String> {
         .iter()
         .position(|byte| *byte == 0)
         .ok_or_else(|| anyhow::anyhow!("avg32: unterminated ANM32 source PDT"))?;
-    let (text, _, error) = SHIFT_JIS.decode(&tail[..length]);
-    if error {
-        bail!("avg32: invalid Shift-JIS ANM32 source PDT");
-    }
-    Ok(text.into_owned())
+    Ok(crate::nls::decode_name(&tail[..length]))
 }
 
 fn le_u32(bytes: &[u8], at: usize) -> Result<u32> {
@@ -151,8 +146,8 @@ mod tests {
 
     /// Builds a synthetic ANM32 buffer with 2 cells, 2 single-frame streams,
     /// and one scene referencing both streams in order — enough to exercise
-    /// multi-stream playback (see `animation_player.rs`), which the original
-    /// engine's `SYSTEM::AnimationExec`/`MultiAnimationExec` advance through
+    /// multi-stream playback, which the engine
+    /// advances through
     /// in full before looping or finishing.
     fn sample_anm32() -> Vec<u8> {
         const CELL_SIZE: usize = 0x60;

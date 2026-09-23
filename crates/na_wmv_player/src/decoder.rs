@@ -1524,12 +1524,7 @@ fn vc1_apply_advanced_selective_i_overlap(
             return;
         }
 
-        let top_on = mb_row > 0
-            && overflags
-                .get(cur - mb_width)
-                .copied()
-                .unwrap_or(0)
-                != 0;
+        let top_on = mb_row > 0 && overflags.get(cur - mb_width).copied().unwrap_or(0) != 0;
         // Preserve FFmpeg's block-number order: cross-row luma blocks 0/1,
         // internal luma blocks 2/3, then chroma 4/5.
         if top_on {
@@ -1550,8 +1545,7 @@ fn vc1_apply_advanced_selective_i_overlap(
             let cur_on = overflags.get(cur).copied().unwrap_or(0) != 0;
 
             if cur_on {
-                let left_on = mb_col > 0
-                    && overflags.get(cur - 1).copied().unwrap_or(0) != 0;
+                let left_on = mb_col > 0 && overflags.get(cur - 1).copied().unwrap_or(0) != 0;
                 // Preserve i=0..5 ordering from ff_vc1_i_overlap_filter().
                 if left_on {
                     h_cross(blocks, mb_width, mb_row, mb_col, 1, 0);
@@ -4990,7 +4984,14 @@ impl MacroblockDecoder {
 
         let pat = match tt {
             TT_8X8 => {
-                decode_part(self, &FF_WMV1_SCANTABLE[0], 0, 64, false, seq.uses_transposed_scans())?;
+                decode_part(
+                    self,
+                    &FF_WMV1_SCANTABLE[0],
+                    0,
+                    64,
+                    false,
+                    seq.uses_transposed_scans(),
+                )?;
                 0x0f
             }
             TT_4X4 => {
@@ -5014,14 +5015,7 @@ impl MacroblockDecoder {
                     &FF_WMV2_SCANTABLE_A
                 };
                 for j in 0..2usize {
-                    decode_part(
-                        self,
-                        scan,
-                        j * 32,
-                        32,
-                        (sub & (1 << (1 - j))) != 0,
-                        false,
-                    )?;
+                    decode_part(self, scan, j * 32, 32, (sub & (1 << (1 - j))) != 0, false)?;
                 }
                 (!((sub & 2) * 6 + (sub & 1) * 3)) & 0x0f
             }
@@ -5032,14 +5026,7 @@ impl MacroblockDecoder {
                     &FF_WMV2_SCANTABLE_B
                 };
                 for j in 0..2usize {
-                    decode_part(
-                        self,
-                        scan,
-                        j * 4,
-                        32,
-                        (sub & (1 << (1 - j))) != 0,
-                        false,
-                    )?;
+                    decode_part(self, scan, j * 4, 32, (sub & (1 << (1 - j))) != 0, false)?;
                 }
                 (!(sub * 5)) & 0x0f
             }
@@ -5403,7 +5390,11 @@ impl MacroblockDecoder {
             // ff_vc1_pred_b_mv(): Advanced Profile uses the 64-unit
             // macroblock coordinate domain (sh=6, MV=-60); older profiles use
             // sh=5 / MV=-28 for non-direct B prediction.
-            let sh = if seq.profile == Profile::Advanced { 6 } else { 5 };
+            let sh = if seq.profile == Profile::Advanced {
+                6
+            } else {
+                5
+            };
             let lim = 4 - (1 << sh);
             let qx = (c as i32) << sh;
             let qy = (r as i32) << sh;
@@ -5479,9 +5470,8 @@ impl MacroblockDecoder {
                             != 0
                     }
                 } else {
-                    br.read_bit().ok_or_else(|| {
-                        DecoderError::InvalidData("truncated WMV3 ACPRED".into())
-                    })?
+                    br.read_bit()
+                        .ok_or_else(|| DecoderError::InvalidData("truncated WMV3 ACPRED".into()))?
                 };
 
                 if advanced && pic.condover == 2 && pic.overflags_raw {
@@ -6009,8 +5999,8 @@ impl MacroblockDecoder {
                     if direct {
                         mode = 2;
                     }
-                    let mv =
-                        self.vc1_b_predict(r, c, dmv, direct, mode, false, pic, seq, &fhist, &bhist);
+                    let mv = self
+                        .vc1_b_predict(r, c, dmv, direct, mode, false, pic, seq, &fhist, &bhist);
                     fhist[idx] = mv[0];
                     bhist[idx] = mv[1];
                     if direct || mode == 2 {
@@ -6054,7 +6044,8 @@ impl MacroblockDecoder {
                     mv = self.vc1_b_predict(r, c, dmv, true, 2, false, pic, seq, &fhist, &bhist);
                     self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
                 } else if !md.has_coeffs && !md.intra {
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
+                    mv = self
+                        .vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                     if mode == 2 {
                         self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);
                     } else if mode == 0 {
@@ -6078,7 +6069,8 @@ impl MacroblockDecoder {
                     acpred = br.read_bit().ok_or_else(|| {
                         DecoderError::InvalidData("truncated WMV3 B ACPRED".into())
                     })?;
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
+                    mv = self
+                        .vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                 } else {
                     if mode == 2 {
                         let md2 = self.vc1_read_mvdata(&mut br, pic, quarter)?;
@@ -6095,7 +6087,8 @@ impl MacroblockDecoder {
                         md.has_coeffs = md2.has_coeffs;
                         md.intra = md2.intra;
                     }
-                    mv = self.vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
+                    mv = self
+                        .vc1_b_predict(r, c, dmv, false, mode, md.intra, pic, seq, &fhist, &bhist);
                     if !md.intra {
                         if mode == 2 {
                             self.vc1_mc_blend(frame, r, c, &fwd, &bwd, mv[0], mv[1], pic, seq);

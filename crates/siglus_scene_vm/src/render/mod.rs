@@ -3543,10 +3543,8 @@ impl Renderer {
                     edge_x[2] * edge_y[0] - edge_x[0] * edge_y[2],
                     edge_x[0] * edge_y[1] - edge_x[1] * edge_y[0],
                 ];
-                let normal_len = (normal[0] * normal[0]
-                    + normal[1] * normal[1]
-                    + normal[2] * normal[2])
-                    .sqrt();
+                let normal_len =
+                    (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
                 if normal_len > 1e-6 {
                     normal[0] /= normal_len;
                     normal[1] /= normal_len;
@@ -3857,10 +3855,7 @@ impl Renderer {
         self.organize_textures(images);
 
         self.ensure_draw_pipelines();
-        self.ensure_pipeline(
-            sprite2d_copy_render_pipeline_key(),
-            "siglus-sprite2d-copy",
-        );
+        self.ensure_pipeline(sprite2d_copy_render_pipeline_key(), "siglus-sprite2d-copy");
 
         Ok(blit_range)
     }
@@ -3870,10 +3865,7 @@ impl Renderer {
         self.draws.clear();
         let range = append_fullscreen_blit_vertices(&mut self.verts);
         self.upload_prepared_vertices()?;
-        self.ensure_pipeline(
-            sprite2d_copy_render_pipeline_key(),
-            "siglus-sprite2d-copy",
-        );
+        self.ensure_pipeline(sprite2d_copy_render_pipeline_key(), "siglus-sprite2d-copy");
         Ok(range)
     }
 
@@ -4846,12 +4838,10 @@ impl Renderer {
                 let shadow = cmd.shadow_cast.then(|| {
                     let key = cmd.pipeline_key.shadow_render_pipeline_key();
                     let label = (!self.pipelines.contains_key(&key)).then(|| {
-                        cmd.shadow_pipeline_name
-                            .as_deref()
-                            .map_or_else(
-                                || format!("siglus-{}", key.program.short_name()),
-                                |name| format!("siglus-{name}#{}", key.program.short_name()),
-                            )
+                        cmd.shadow_pipeline_name.as_deref().map_or_else(
+                            || format!("siglus-{}", key.program.short_name()),
+                            |name| format!("siglus-{name}#{}", key.program.short_name()),
+                        )
                     });
                     (key, label)
                 });

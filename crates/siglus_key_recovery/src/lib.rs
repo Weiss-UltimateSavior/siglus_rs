@@ -447,7 +447,8 @@ fn scene_pack_blob_ranges(data: &[u8]) -> Result<Vec<(usize, usize, usize)>, Str
 fn parse_scene_pack(data: &[u8]) -> Result<ParsedScenePack, String> {
     let _original_source_header_size =
         read_u32(data, 22 * 4).ok_or("Scene.pck missing original_source_header_size")? as usize;
-    let exe_angou_mode = read_u32(data, 21 * 4).ok_or("Scene.pck missing scn_data_exe_angou_mod")?;
+    let exe_angou_mode =
+        read_u32(data, 21 * 4).ok_or("Scene.pck missing scn_data_exe_angou_mod")?;
     if exe_angou_mode == 0 {
         return Err("Scene.pck says scn_data_exe_angou_mod=0; crack mode requires normal EXE-key encryption".to_string());
     }
@@ -1898,7 +1899,13 @@ fn scene_object_layout_ok(header: &[u8], org_size: usize) -> bool {
     if d[0] != SCENE_HEADER_SIZE as u32 || d[3] != SCENE_HEADER_SIZE as u32 {
         return false;
     }
-    if d[4] != d[6] || d[14] != d[16] || d[14] != d[18] || d[20] != d[22] || d[20] != d[24] || d[26] != d[28] {
+    if d[4] != d[6]
+        || d[14] != d[16]
+        || d[14] != d[18]
+        || d[20] != d[22]
+        || d[20] != d[24]
+        || d[26] != d[28]
+    {
         return false;
     }
     if d[2] == 0 || d[7] != d[1].saturating_add(d[2]) {
@@ -1924,7 +1931,9 @@ fn scene_object_layout_ok(header: &[u8], org_size: usize) -> bool {
     if d[31].saturating_add(d[32].saturating_mul(4)) as usize > org_size {
         return false;
     }
-    for &idx in &[1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] {
+    for &idx in &[
+        1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+    ] {
         if d[idx] as usize > org_size {
             return false;
         }
@@ -2026,7 +2035,8 @@ mod configured_key_tests {
     use super::*;
 
     const TEST_KEY: [u8; 16] = [
-        0x36, 0x0F, 0xC9, 0x37, 0x2E, 0xBA, 0x09, 0xDC, 0xE4, 0x0D, 0xF2, 0x00, 0x23, 0xA3, 0x6E, 0x94,
+        0x36, 0x0F, 0xC9, 0x37, 0x2E, 0xBA, 0x09, 0xDC, 0xE4, 0x0D, 0xF2, 0x00, 0x23, 0xA3, 0x6E,
+        0x94,
     ];
     const WRONG_KEY: [u8; 16] = [0x5A; 16];
 
@@ -2070,9 +2080,7 @@ mod configured_key_tests {
         d[5] = SCENE_HEADER_SIZE as u32;
         let end = d[1] + d[2];
         // Every table is empty, so every list starts where the previous ended.
-        for idx in [
-            7usize, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
-        ] {
+        for idx in [7usize, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] {
             d[idx] = end;
         }
 
@@ -2167,17 +2175,16 @@ mod configured_key_tests {
     #[test]
     fn rejects_a_wrong_key_for_a_compressed_pack() {
         let (game, scene) = fixtures();
-        assert_eq!(check_key(&game, &scene, &WRONG_KEY), Ok(KeyStatus::Mismatch));
+        assert_eq!(
+            check_key(&game, &scene, &WRONG_KEY),
+            Ok(KeyStatus::Mismatch)
+        );
     }
 
     #[test]
     fn accepts_an_easy_link_pack() {
         let game = gameexe("Rewrite+ configured key test\n", &TEST_KEY, 1);
-        let scene = scene_pack(
-            &[scene_object(false), scene_object(true)],
-            false,
-            &TEST_KEY,
-        );
+        let scene = scene_pack(&[scene_object(false), scene_object(true)], false, &TEST_KEY);
         assert_eq!(scene_pack_is_compressed(&scene), Ok(false));
         assert_eq!(check_key(&game, &scene, &TEST_KEY), Ok(KeyStatus::Accepted));
     }

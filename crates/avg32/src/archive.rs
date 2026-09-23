@@ -60,7 +60,7 @@ impl PaclArchive {
             if name_end == 0 {
                 bail!("avg32: PACL entry {index} has an empty name");
             }
-            let name = String::from_utf8_lossy(&name_bytes[..name_end]).into_owned();
+            let name = crate::nls::decode_name(&name_bytes[..name_end]);
             let offset = read_u32(&bytes, at + 0x10)?;
             let packed_size = read_u32(&bytes, at + 0x14)?;
             let unpacked_size = read_u32(&bytes, at + 0x18)?;
@@ -86,9 +86,12 @@ impl PaclArchive {
     }
 
     pub fn entry(&self, name: &str) -> Option<&PaclEntry> {
-        self.entries
-            .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+        let find = |name: &str| {
+            self.entries
+                .iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+        };
+        find(name).or_else(|| find(&crate::nls::sjis_fallback(name)?))
     }
 
     /// Reads an entry and expands its `PACK` payload when it is compressed.

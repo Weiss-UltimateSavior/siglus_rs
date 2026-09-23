@@ -13,6 +13,10 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(target_os = "horizon")]
+use lewton_switch as lewton;
+#[cfg(target_os = "horizon")]
+use ogg_switch as ogg;
 #[cfg(any(not(target_os = "horizon"), target_env = "newlib"))]
 use lewton::audio::{PreviousWindowRight, read_audio_packet_generic};
 #[cfg(any(not(target_os = "horizon"), target_env = "newlib"))]
