@@ -598,8 +598,8 @@ fn vmkey_to_vk(k: VmKey) -> Option<u8> {
         VmKey::ArrowRight => Some(0x27),
         VmKey::ArrowDown => Some(0x28),
 
-        VmKey::F(n) if (1..=12).contains(&n) => Some(0x6F + n), // F1=0x70
-        VmKey::Digit(n) if n <= 9 => Some(0x30 + n),
+        VmKey::F(n @ 1..=12) => Some(0x6F + n), // F1=0x70
+        VmKey::Digit(n @ 0..=9) => Some(0x30 + n),
         VmKey::Letter(c) => {
             let uc = c.to_ascii_uppercase();
             if uc.is_ascii_uppercase() {

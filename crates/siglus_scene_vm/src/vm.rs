@@ -5410,36 +5410,36 @@ impl<'a> SceneVm<'a> {
         } else {
             sub
         };
-        match prop.form {
-            FM_INT if sub.is_empty() => {
+        match (prop.form, sub) {
+            (FM_INT, []) => {
                 if let CallPropValue::Int(n) = &prop.value {
                     self.push_int(*n);
                 } else {
                     bail!("CALL_PROP int storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_STR if sub.is_empty() => {
+            (FM_STR, []) => {
                 if let CallPropValue::Str(s) = &prop.value {
                     self.push_str(s.clone());
                 } else {
                     bail!("CALL_PROP str storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_STR => {
+            (FM_STR, _) => {
                 if let CallPropValue::Str(s) = &prop.value {
                     self.call_prop_eval_str_op(s, sub[0], &[], 0)?;
                 } else {
                     bail!("CALL_PROP str storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_INTLIST => {
+            (FM_INTLIST, _) => {
                 if let CallPropValue::IntList(v) = &prop.value {
                     self.intlist_dispatch_read(v, sub, &prop.element)?;
                 } else {
                     bail!("CALL_PROP intlist storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_STRLIST => {
+            (FM_STRLIST, _) => {
                 if let CallPropValue::StrList(v) = &prop.value {
                     if sub.is_empty() {
                         self.push_element(prop.element.clone());
@@ -5462,7 +5462,7 @@ impl<'a> SceneVm<'a> {
                     bail!("CALL_PROP strlist storage mismatch for {:?}", full_elm);
                 }
             }
-            FM_INTREF | FM_STRREF if sub.is_empty() => {
+            (FM_INTREF | FM_STRREF, []) => {
                 // C++ tnm_command_proc_prop() does not read the scalar here.
                 // For every *_REF form it pushes the referenced element back to
                 // the element stack. SiglusCompiler emits another CD_PROPERTY
@@ -5481,12 +5481,12 @@ impl<'a> SceneVm<'a> {
                 }
                 self.push_element(target);
             }
-            FM_INTLISTREF | FM_STRLISTREF => {
+            (FM_INTLISTREF | FM_STRLISTREF, _) => {
                 // Lists remain element-valued after dereference; their ARRAY and
                 // list-command suffixes are dispatched through the target chain.
                 self.push_element(self.call_prop_effective_element(prop));
             }
-            FM_INTREF | FM_STRREF => {
+            (FM_INTREF | FM_STRREF, _) => {
                 // A non-empty suffix should normally have been composed by
                 // compose_call_prop_tail(). Keep a precise failure here rather
                 // than silently returning the reference itself as a scalar.
@@ -5496,9 +5496,6 @@ impl<'a> SceneVm<'a> {
                     sub,
                     full_elm
                 );
-            }
-            _ if !sub.is_empty() => {
-                self.push_element(prop.element.clone());
             }
             _ => {
                 self.push_element(prop.element.clone());
@@ -5637,20 +5634,20 @@ impl<'a> SceneVm<'a> {
             FM_STRLISTREF, FM_STRREF,
         };
 
-        match prop.form {
-            FM_INT if sub.is_empty() => match rhs {
+        match (prop.form, sub) {
+            (FM_INT, []) => match rhs {
                 Value::Int(n) => {
                     prop.value = CallPropValue::Int(n as i32);
                 }
                 _ => bail!("unsupported CALL_PROP int assign sub={:?}", sub),
             },
-            FM_STR if sub.is_empty() => match rhs {
+            (FM_STR, []) => match rhs {
                 Value::Str(s) => {
                     prop.value = CallPropValue::Str(s);
                 }
                 _ => bail!("unsupported CALL_PROP str assign sub={:?}", sub),
             },
-            FM_INTLIST => {
+            (FM_INTLIST, _) => {
                 let Some((bit, index)) = Self::intlist_assignment_subscript(sub) else {
                     bail!("unsupported CALL_PROP intlist assign sub={:?}", sub);
                 };
@@ -5674,7 +5671,7 @@ impl<'a> SceneVm<'a> {
                 Self::set_user_int_list_value(&mut dst, bit, index, n as i32);
                 prop.value = CallPropValue::IntList(dst);
             }
-            FM_STRLIST if sub.len() >= 2 && sub[0] == ELM_ARRAY => match rhs {
+            (FM_STRLIST, [ELM_ARRAY, _, ..]) => match rhs {
                 Value::Str(s) => {
                     let idx = sub[1].max(0) as usize;
                     let mut dst = match std::mem::replace(
@@ -5695,7 +5692,7 @@ impl<'a> SceneVm<'a> {
                 }
                 _ => bail!("unsupported CALL_PROP strlist assign sub={:?}", sub),
             },
-            FM_INTREF | FM_STRREF | FM_INTLISTREF | FM_STRLISTREF => match rhs {
+            (FM_INTREF | FM_STRREF | FM_INTLISTREF | FM_STRLISTREF, _) => match rhs {
                 Value::Element(e) => {
                     prop.element = e.clone();
                     prop.value = CallPropValue::Element(e);
@@ -8096,7 +8093,7 @@ impl<'a> SceneVm<'a> {
         }
 
         match owner {
-            o if o == elm_code::ELM_OWNER_FORM => {
+            elm_code::ELM_OWNER_FORM => {
                 if let Some(synthetic) = self.legacy_global_world_stage_chain(&elm, 1) {
                     self.exec_command(synthetic, al_id, ret_form, args)?;
                     self.sync_legacy_global_worlds_from_front();
@@ -8230,7 +8227,7 @@ impl<'a> SceneVm<'a> {
                 self.ctx.vm_call = None;
                 self.drain_pending_frame_action_finishes()?;
             }
-            o if o == elm_code::ELM_OWNER_USER_CMD || o == elm_code::ELM_OWNER_CALL_CMD => {
+            elm_code::ELM_OWNER_USER_CMD | elm_code::ELM_OWNER_CALL_CMD => {
                 if self.vm_trace_config.commands_enabled {
                     let cmd_no = elm_code::code(raw_head);
                     let elm_tail = elm

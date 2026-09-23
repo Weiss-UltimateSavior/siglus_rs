@@ -10,7 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -258,32 +258,35 @@ impl DesktopTwitterWindow {
                 self.input_events.push(egui::Event::Ime(event));
                 self.window.request_redraw();
             }
+            #[cfg(target_os = "windows")]
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Process),
+                        ..
+                    },
+                ..
+            } => return None,
             WindowEvent::KeyboardInput { event, .. } => {
-                #[cfg(target_os = "windows")]
-                if matches!(
-                    event.logical_key,
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Process)
-                ) {
-                    return None;
-                }
-
-                if event.state == ElementState::Pressed && self.modifiers.command {
-                    match event.physical_key {
-                        PhysicalKey::Code(KeyCode::KeyC) => {
+                if self.modifiers.command {
+                    match (event.state, event.physical_key) {
+                        (ElementState::Pressed, PhysicalKey::Code(KeyCode::KeyC)) => {
                             self.input_events.push(egui::Event::Copy);
                         }
-                        PhysicalKey::Code(KeyCode::KeyX) => {
+                        (ElementState::Pressed, PhysicalKey::Code(KeyCode::KeyX)) => {
                             self.input_events.push(egui::Event::Cut);
                         }
-                        PhysicalKey::Code(KeyCode::KeyV) => match read_system_clipboard() {
-                            Ok(text) if !text.is_empty() => {
-                                self.input_events.push(egui::Event::Paste(text));
+                        (ElementState::Pressed, PhysicalKey::Code(KeyCode::KeyV)) => {
+                            match read_system_clipboard() {
+                                Ok(text) if !text.is_empty() => {
+                                    self.input_events.push(egui::Event::Paste(text));
+                                }
+                                Ok(_) => {}
+                                Err(err) => {
+                                    log::debug!("desktop Twitter clipboard read failed: {err:#}");
+                                }
                             }
-                            Ok(_) => {}
-                            Err(err) => {
-                                log::debug!("desktop Twitter clipboard read failed: {err:#}");
-                            }
-                        },
+                        }
                         _ => {}
                     }
                 }
@@ -298,9 +301,12 @@ impl DesktopTwitterWindow {
                         modifiers: self.modifiers,
                     });
                 }
-                if event.state == ElementState::Pressed
+                if let KeyEvent {
+                    state: ElementState::Pressed,
+                    text: Some(text),
+                    ..
+                } = event
                     && !self.modifiers.command
-                    && let Some(text) = event.text
                 {
                     let text = text.to_string();
                     if !text.is_empty() && !text.chars().all(char::is_control) {

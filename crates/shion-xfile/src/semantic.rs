@@ -1286,7 +1286,7 @@ impl<'a> ScalarCursor<'a> {
 
     fn next_u32(&mut self) -> Result<u32> {
         match self.next()? {
-            PrimitiveValue::Integer(v) if *v >= 0 => Ok(*v as u32),
+            PrimitiveValue::Integer(v @ 0..) => Ok(*v as u32),
             other => Err(Error::Semantic(format!("expected u32, got {:?}", other))),
         }
     }

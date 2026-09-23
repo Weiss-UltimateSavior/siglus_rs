@@ -11285,7 +11285,7 @@ impl SymbolTables {
         let mut i = 0usize;
         while i < values.len() {
             match &values[i] {
-                ChainAtom::Code(v) if *v == ELM_ARRAY => {
+                ChainAtom::Code(ELM_ARRAY) => {
                     let index = values
                         .get(i + 1)
                         .map(|v| v.render_index(self))

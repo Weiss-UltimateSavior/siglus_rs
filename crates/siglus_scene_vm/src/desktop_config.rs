@@ -11,7 +11,7 @@ use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -171,15 +171,16 @@ impl DesktopConfigWindow {
                 self.input_events.push(egui::Event::Ime(event));
                 self.window.request_redraw();
             }
+            #[cfg(target_os = "windows")]
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Process),
+                        ..
+                    },
+                ..
+            } => return None,
             WindowEvent::KeyboardInput { event, .. } => {
-                #[cfg(target_os = "windows")]
-                if matches!(
-                    event.logical_key,
-                    winit::keyboard::Key::Named(winit::keyboard::NamedKey::Process)
-                ) {
-                    return None;
-                }
-
                 if let PhysicalKey::Code(code) = event.physical_key
                     && let Some(key) = map_key(code)
                 {
@@ -191,9 +192,12 @@ impl DesktopConfigWindow {
                         modifiers: self.modifiers,
                     });
                 }
-                if event.state == ElementState::Pressed
+                if let KeyEvent {
+                    state: ElementState::Pressed,
+                    text: Some(text),
+                    ..
+                } = event
                     && !self.modifiers.command
-                    && let Some(text) = event.text
                 {
                     let text = text.to_string();
                     if !text.is_empty() && !text.chars().all(char::is_control) {

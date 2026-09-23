@@ -72,9 +72,7 @@ fn dispatch_int_event_exact(
     ret_form: i32,
 ) -> (Option<Value>, MaskPostAction) {
     match sub_op {
-        x if x == constants::elm_value::INTEVENT_SET
-            || x == constants::elm_value::INTEVENT_SET_REAL =>
-        {
+        x @ (constants::elm_value::INTEVENT_SET | constants::elm_value::INTEVENT_SET_REAL) => {
             let value = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let total_time = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let delay_time = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -87,9 +85,7 @@ fn dispatch_int_event_exact(
             ev.set_event(value, total_time, delay_time, speed_type, real_flag);
             (None, MaskPostAction::None)
         }
-        x if x == constants::elm_value::INTEVENT_LOOP
-            || x == constants::elm_value::INTEVENT_LOOP_REAL =>
-        {
+        x @ (constants::elm_value::INTEVENT_LOOP | constants::elm_value::INTEVENT_LOOP_REAL) => {
             let start_value = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let end_value = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let loop_time = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -110,9 +106,7 @@ fn dispatch_int_event_exact(
             );
             (None, MaskPostAction::None)
         }
-        x if x == constants::elm_value::INTEVENT_TURN
-            || x == constants::elm_value::INTEVENT_TURN_REAL =>
-        {
+        x @ (constants::elm_value::INTEVENT_TURN | constants::elm_value::INTEVENT_TURN_REAL) => {
             let start_value = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let end_value = params.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let loop_time = params.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -133,13 +127,13 @@ fn dispatch_int_event_exact(
             );
             (None, MaskPostAction::None)
         }
-        x if x == constants::elm_value::INTEVENT_END => {
+        constants::elm_value::INTEVENT_END => {
             ev.end_event();
             (None, MaskPostAction::None)
         }
-        x if x == constants::elm_value::INTEVENT_WAIT => (None, MaskPostAction::Wait(false)),
-        x if x == constants::elm_value::INTEVENT_WAIT_KEY => (None, MaskPostAction::Wait(true)),
-        x if x == constants::elm_value::INTEVENT_CHECK => {
+        constants::elm_value::INTEVENT_WAIT => (None, MaskPostAction::Wait(false)),
+        constants::elm_value::INTEVENT_WAIT_KEY => (None, MaskPostAction::Wait(true)),
+        constants::elm_value::INTEVENT_CHECK => {
             let v = if ret_form != 0 && ev.check_event() {
                 1
             } else {
@@ -207,8 +201,8 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         let op = chain[3];
         if chain.len() >= 5 {
             let target_ev = match op {
-                x if x == constants::elm_value::MASK_X_EVE => &mut mask.x_event,
-                x if x == constants::elm_value::MASK_Y_EVE => &mut mask.y_event,
+                constants::elm_value::MASK_X_EVE => &mut mask.x_event,
+                constants::elm_value::MASK_Y_EVE => &mut mask.y_event,
                 _ => {
                     break 'blk (true, None, MaskPostAction::None);
                 }
@@ -237,49 +231,46 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
             break 'blk (true, r, action);
         }
 
-        match op {
-            x if x == constants::elm_value::MASK_INIT => {
+        match (op, al_id) {
+            (constants::elm_value::MASK_INIT, _) => {
                 mask.reinit();
                 break 'blk (true, None, MaskPostAction::None);
             }
-            x if x == constants::elm_value::MASK_CREATE => {
+            (constants::elm_value::MASK_CREATE, _) => {
                 let name = params.first().and_then(|v| v.as_str()).map(str::to_string);
                 mask.reinit();
                 mask.name = name;
                 break 'blk (true, None, MaskPostAction::None);
             }
-            x if x == constants::elm_value::MASK_X => {
-                if al_id == 0 {
-                    let r = if ret_form != 0 {
-                        Some(Value::Int(mask.x_event.get_total_value() as i64))
-                    } else {
-                        None
-                    };
-                    break 'blk (true, r, MaskPostAction::None);
-                }
-                if al_id == 1 {
-                    let v = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    mask.x_event.set_value(v);
-                    mask.x_event.frame();
-                    break 'blk (true, None, MaskPostAction::None);
-                }
+            (constants::elm_value::MASK_X, 0) => {
+                let r = if ret_form != 0 {
+                    Some(Value::Int(mask.x_event.get_total_value() as i64))
+                } else {
+                    None
+                };
+                break 'blk (true, r, MaskPostAction::None);
+            }
+            (constants::elm_value::MASK_X, 1) => {
+                let v = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                mask.x_event.set_value(v);
+                mask.x_event.frame();
                 break 'blk (true, None, MaskPostAction::None);
             }
-            x if x == constants::elm_value::MASK_Y => {
-                if al_id == 0 {
-                    let r = if ret_form != 0 {
-                        Some(Value::Int(mask.y_event.get_total_value() as i64))
-                    } else {
-                        None
-                    };
-                    break 'blk (true, r, MaskPostAction::None);
-                }
-                if al_id == 1 {
-                    let v = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    mask.y_event.set_value(v);
-                    mask.y_event.frame();
-                    break 'blk (true, None, MaskPostAction::None);
-                }
+            (constants::elm_value::MASK_Y, 0) => {
+                let r = if ret_form != 0 {
+                    Some(Value::Int(mask.y_event.get_total_value() as i64))
+                } else {
+                    None
+                };
+                break 'blk (true, r, MaskPostAction::None);
+            }
+            (constants::elm_value::MASK_Y, 1) => {
+                let v = params.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                mask.y_event.set_value(v);
+                mask.y_event.frame();
+                break 'blk (true, None, MaskPostAction::None);
+            }
+            (constants::elm_value::MASK_X | constants::elm_value::MASK_Y, _) => {
                 break 'blk (true, None, MaskPostAction::None);
             }
             _ => {

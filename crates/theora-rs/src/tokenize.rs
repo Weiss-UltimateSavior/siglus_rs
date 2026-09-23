@@ -161,12 +161,12 @@ pub fn oc_value_token(value: i32) -> usize {
         -1 => 10,
         2 => 11,
         -2 => 12,
-        v if (-3..=3).contains(&v) => OC_DCT_VAL_CAT2 + (v.unsigned_abs() > 2) as usize,
-        v if (-7..=7).contains(&v) => OC_DCT_VAL_CAT3,
-        v if (-15..=15).contains(&v) => OC_DCT_VAL_CAT4,
-        v if (-31..=31).contains(&v) => OC_DCT_VAL_CAT5,
-        v if (-63..=63).contains(&v) => OC_DCT_VAL_CAT6,
-        v if (-127..=127).contains(&v) => OC_DCT_VAL_CAT7,
+        v @ -3..=3 => OC_DCT_VAL_CAT2 + (v.unsigned_abs() > 2) as usize,
+        -7..=7 => OC_DCT_VAL_CAT3,
+        -15..=15 => OC_DCT_VAL_CAT4,
+        -31..=31 => OC_DCT_VAL_CAT5,
+        -63..=63 => OC_DCT_VAL_CAT6,
+        -127..=127 => OC_DCT_VAL_CAT7,
         _ => OC_DCT_VAL_CAT8,
     }
 }

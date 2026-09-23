@@ -649,7 +649,7 @@ fn vc1_apply_i_loop_filter(frame: &mut YuvFrame, pq: i32, mb_width: usize, mb_he
 /// Returns the signed differential value (NOT yet scaled / predicted).
 fn read_dc_diff(br: &mut BitReader<'_>, dc_vlc: &VlcTable) -> i32 {
     let dc_size = match dc_vlc.decode(br) {
-        Some(s) if s >= 0 => s as u8,
+        Some(s @ 0..) => s as u8,
         _ => return 0,
     };
     if dc_size == 0 {
@@ -6595,7 +6595,7 @@ impl MacroblockDecoder {
             };
 
             let cbpy_raw = match self.wmv2_cbpy.decode(&mut br) {
-                Some(v) if (0..=15).contains(&v) => v as u8,
+                Some(v @ 0..=15) => v as u8,
                 _ => break,
             };
 

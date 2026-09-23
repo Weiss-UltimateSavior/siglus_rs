@@ -3198,7 +3198,7 @@ pub(crate) fn poll_fallback_dialog(ctx: &mut CommandContext) {
                         close_fallback_dialog(ctx, false);
                     }
                 }
-                slot if slot >= 0 => {
+                slot @ 0.. => {
                     let idx = slot as usize;
                     if idx >= configured_save_count(ctx, false) {
                         open_save_load_fallback(ctx, save, state.page, state.return_kind);
