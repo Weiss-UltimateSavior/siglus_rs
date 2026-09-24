@@ -846,7 +846,7 @@ impl Engine {
                 continue;
             }
             let divider = u16::from(self.ob(e, 0x0f) & 0xf);
-            if divider == 0 || self.w(FRAME_COUNTER) % divider != 0 {
+            if divider == 0 || !self.w(FRAME_COUNTER).is_multiple_of(divider) {
                 continue;
             }
             let frame = self.ow(e, 4) ^ 2;

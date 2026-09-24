@@ -301,17 +301,6 @@ impl Engine {
         }
         let mut raw = false;
         let mut digits = false;
-        if self.trace {
-            eprintln!(
-                "draw_text idx={index} cursor=({},{}) origin=({},{}) size={}x{}",
-                self.osw(obj, 0x22),
-                self.osw(obj, 0x24),
-                self.osw(obj, 0x1e),
-                self.osw(obj, 0x20),
-                self.osw(obj, 0x12),
-                self.osw(obj, 0x14)
-            );
-        }
         let cursor = self.w(CURSOR_SHOWN);
         self.set_od(obj, 0x32, page);
         let origin_x = self.ow(obj, 0x1e);
@@ -469,12 +458,6 @@ impl Engine {
         let s1 = self.cell_state(col, y, owner);
         let s2 = self.cell_state(col + 1, y, owner);
         let mut draw = !(s1 == 0 || s1 == 4 || s2 == 0 || s2 == 4);
-        if self.trace {
-            eprintln!(
-                "char {:02x?} at col {col} y {y} states {s1} {s2} draw {draw}",
-                glyph
-            );
-        }
         if draw && self.w(FORCE_REDRAW) != 0 && s1 == 3 && s2 == 3 {
             draw = false;
         }

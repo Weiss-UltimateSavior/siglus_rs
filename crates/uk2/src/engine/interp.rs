@@ -568,10 +568,8 @@ impl Engine {
             if self.w(ABORT) != 0 {
                 return Ok(4);
             }
-            if self.w(SKIP_SERVICE) == 0 {
-                if !self.interpreter_service()? {
-                    continue;
-                }
+            if self.w(SKIP_SERVICE) == 0 && !self.interpreter_service()? {
+                continue;
             }
             let op = self.fetch()?;
             let mut status: u16 = 0;

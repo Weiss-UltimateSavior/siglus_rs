@@ -7,6 +7,7 @@
 //! bus mouse, keyboard) are emulated at the points where the original code
 //! polls their results.  Function names in comments refer to the IDA listing.
 
+pub mod audio;
 pub mod battle;
 pub mod ds;
 pub mod font;
@@ -15,6 +16,8 @@ pub mod interp;
 pub mod map;
 pub mod mem;
 pub mod object;
+pub mod opna;
+pub mod pmd;
 pub mod system;
 pub mod text;
 pub mod ui;
@@ -81,7 +84,8 @@ pub enum MusicCommand {
     },
     Start,
     Stop,
-    Volume(u8),
+    /// `M1`: driver fade-out (PMD/MMD function 2) with the given speed.
+    Fade(u8),
 }
 
 /// Host services required by the engine thread.
@@ -94,6 +98,11 @@ pub trait Platform {
     /// RGBA 640x400 frame of the displayed page, cursor included.
     fn present(&mut self, rgba: &[u8]);
     fn music(&mut self, _command: MusicCommand) {}
+    /// Resident music drivers reported to the game: bit 0 = MMD (MIDI),
+    /// bit 1 = PMD (FM).  The port only synthesises PMD scores.
+    fn music_drivers(&self) -> u16 {
+        2
+    }
 }
 
 /// Returned through `anyhow` when the host asked the engine to stop.
@@ -281,10 +290,10 @@ impl Engine {
     /// CPU to a plausible PC-98 speed.
     pub fn instruction_tick(&mut self) -> Result<()> {
         self.instruction_count += 1;
-        if let Some(limit) = self.max_instructions {
-            if self.instruction_count > limit {
-                bail!("uk2: instruction limit {limit} reached");
-            }
+        if let Some(limit) = self.max_instructions
+            && self.instruction_count > limit
+        {
+            bail!("uk2: instruction limit {limit} reached");
         }
         self.instructions_since_tick += 1;
         if self.instructions_since_tick >= INSTRUCTIONS_PER_TICK {

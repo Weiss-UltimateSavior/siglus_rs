@@ -209,11 +209,11 @@ impl Mem {
         if ptr == 0 || seg == DS_SEG || off_of(ptr) != 0 {
             return;
         }
-        if let Some(index) = seg.checked_sub(HEAP_SEG_BASE).map(usize::from) {
-            if self.heap.get(index).is_some_and(Option::is_some) {
-                self.heap[index] = None;
-                self.free_slots.push(index);
-            }
+        if let Some(index) = seg.checked_sub(HEAP_SEG_BASE).map(usize::from)
+            && self.heap.get(index).is_some_and(Option::is_some)
+        {
+            self.heap[index] = None;
+            self.free_slots.push(index);
         }
     }
 

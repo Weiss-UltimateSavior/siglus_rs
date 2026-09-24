@@ -118,11 +118,11 @@ impl Engine {
             self.mem
                 .strcpy_bytes(ds_ptr(ENTITY_FILE), config.font.as_bytes());
         }
-        if let Some(value) = config.extra.get("NOTE") {
-            if value.eq_ignore_ascii_case("ON") {
-                self.set_w(PDT_PALETTE, 0);
-                self.mem.strcpy_bytes(ds_ptr(0x7e0), b"note.tbl1");
-            }
+        if let Some(value) = config.extra.get("NOTE")
+            && value.eq_ignore_ascii_case("ON")
+        {
+            self.set_w(PDT_PALETTE, 0);
+            self.mem.strcpy_bytes(ds_ptr(0x7e0), b"note.tbl1");
         }
         self.set_w(EMS_ACTIVE, 0);
         self.set_w(EMS_WANTED, 0);
@@ -162,7 +162,8 @@ impl Engine {
         self.set_w(CURSOR_SHOWN2, 0);
         self.set_b(EVENT_LIFETIME, 0x13);
         self.mem.memset(ds_ptr(KEY_TABLE), 0, 0x100);
-        self.set_w(l(0x25DC6), 1 | 2);
+        let drivers = self.platform.music_drivers();
+        self.set_w(l(0x25DC6), drivers);
         self.cursor_show(1);
         // sub_1F835: graphics mode, black palette, page 0.
         self.mem.memset(ds_ptr(PALETTE), 0, 0x20);
@@ -721,7 +722,7 @@ impl Engine {
                 } else {
                     0x7f
                 };
-                self.music(MusicCommand::Volume(volume as u8));
+                self.music(MusicCommand::Fade(volume as u8));
             }
             (b'M', b'2') => self.music(MusicCommand::Stop),
             (b'M', b'3') => {}

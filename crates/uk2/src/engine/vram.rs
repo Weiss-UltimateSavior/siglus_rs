@@ -215,12 +215,10 @@ impl Vram {
     pub fn frame_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, colour: u8) {
         if !(0..=15).contains(&colour)
             || x2 < x1
-            || x1 < 0
-            || x1 > 0x4f
+            || !(0..=0x4f).contains(&x1)
             || x2 > 0x4f
             || y2 < y1
-            || y1 < 0
-            || y1 > 0x18f
+            || !(0..=0x18f).contains(&y1)
             || y2 > 0x18f
         {
             return;

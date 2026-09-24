@@ -177,7 +177,7 @@ impl Uk2Game {
             .map(|bytes| decode_pdt34(&bytes))
             .transpose()
             .with_context(|| format!("failed to decode base PDT {}", map.base))?
-            .unwrap_or_else(|| blank_pdt34());
+            .unwrap_or_else(blank_pdt34);
         if let Some(bytes) = self.read_optional(&map.overlay)? {
             let mut overlay = decode_pdt34(&bytes)
                 .with_context(|| format!("failed to decode overlay PDT {}", map.overlay))?;

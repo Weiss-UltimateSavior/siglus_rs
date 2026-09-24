@@ -642,7 +642,7 @@ impl Engine {
         for i in 0..count {
             let e = ptr_add(ents, i * ENTITY_SIZE);
             let divider = u16::from(self.ob(e, 0x0f) & 0xf);
-            if divider != 0 && self.w(FRAME_COUNTER) % divider == 0 {
+            if divider != 0 && self.w(FRAME_COUNTER).is_multiple_of(divider) {
                 let v = self.ow(e, 4) ^ 2;
                 self.set_ow(e, 4, v);
             }
@@ -655,7 +655,7 @@ impl Engine {
                 continue;
             }
             let divider = u16::from(self.ob(e, 0x0f) & 0xf);
-            if divider == 0 || self.w(FRAME_COUNTER) % divider != 0 {
+            if divider == 0 || !self.w(FRAME_COUNTER).is_multiple_of(divider) {
                 continue;
             }
             let v = self.ow(e, 4) ^ 2;

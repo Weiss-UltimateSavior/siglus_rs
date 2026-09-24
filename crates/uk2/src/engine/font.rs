@@ -66,13 +66,12 @@ impl KanjiRom {
             lead -= 0x40;
         }
         let mut row = (lead - 0x81) * 2 + 0x21;
-        let col;
-        if trail >= 0x9f {
+        let col = if trail >= 0x9f {
             row += 1;
-            col = trail - 0x7e;
+            trail - 0x7e
         } else {
-            col = trail - 0x1f - u16::from(trail >= 0x80);
-        }
+            trail - 0x1f - u16::from(trail >= 0x80)
+        };
         (row << 8) | col
     }
 
