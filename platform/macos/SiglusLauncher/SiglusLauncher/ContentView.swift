@@ -6,7 +6,7 @@ struct ContentView: View {
     @State private var dropTargeted = false
 
     private let columns: [GridItem] = [
-        GridItem(.adaptive(minimum: 210, maximum: 280), spacing: 18),
+        GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 16, alignment: .top),
     ]
 
     var body: some View {
@@ -18,7 +18,7 @@ struct ContentView: View {
                     EmptyLibraryView()
                 } else {
                     ScrollView(.vertical) {
-                        LazyVGrid(columns: columns, spacing: 18) {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
                             ForEach(library.visibleGames) { game in
                                 GameTileView(game: game)
                             }
@@ -209,91 +209,77 @@ struct GameTileView: View {
     @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topLeading) {
-                cover
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 150)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+        VStack(alignment: .leading, spacing: 0) {
+            // A fixed 16:9 frame that follows the column width. The artwork is an
+            // overlay, so a fill-scaled image can never widen the tile.
+            Color.clear
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .overlay(cover)
+                .overlay(
+                    ZStack {
+                        Color.black.opacity(0.35)
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 42))
+                            .foregroundColor(.white)
+                    }
+                    .opacity(hovering ? 1 : 0)
+                )
+                .overlay(
+                    EngineBadge(engine: game.engine, name: game.engineName).padding(8),
+                    alignment: .topLeading
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+                .onTapGesture { library.launch(game: game) }
 
-                EngineBadge(engine: game.engine, name: game.engineName)
-                    .padding(8)
-
-                if hovering {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.black.opacity(0.35))
-                        .frame(height: 150)
-                        .overlay(
-                            Image(systemName: "play.circle.fill")
-                                .font(.system(size: 46))
-                                .foregroundColor(.white)
-                        )
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { library.launch(game: game) }
-            .onHover { hovering = $0 }
-
-            HStack(alignment: .top) {
+            HStack(spacing: 6) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(game.title)
-                        .font(.headline)
-                        .lineLimit(2)
-                    if let label = game.nlsLabel {
-                        Text(label)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(game.nlsLabel ?? game.engineName)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 Menu {
-                    Button("Play") { library.launch(game: game) }
-                    if !game.nlsOptions.isEmpty {
-                        Menu("Text Encoding") {
-                            ForEach(game.nlsOptions, id: \.id) { option in
-                                Button((option.id == game.nls ? "✓ " : "") + option.label) {
-                                    library.setNls(option.id, for: game)
-                                }
-                            }
-                        }
-                    }
-                    Divider()
-                    Button("Reveal in Finder") { library.revealInFinder(game: game) }
-                    Button("Remove from Library") { library.remove(game: game) }
+                    tileMenu
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
                 .menuStyle(BorderlessButtonMenuStyle())
-                .frame(width: 28)
+                .fixedSize()
             }
-
-            Button {
-                library.launch(game: game)
-            } label: {
-                Text("Play").frame(maxWidth: .infinity)
-            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color(NSColor.controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.secondary.opacity(hovering ? 0.45 : 0.18)))
-        .shadow(color: Color.black.opacity(hovering ? 0.18 : 0.06), radius: hovering ? 8 : 3, y: 2)
-        .contextMenu {
-            Button("Play") { library.launch(game: game) }
-            if !game.nlsOptions.isEmpty {
-                Menu("Text Encoding") {
-                    ForEach(game.nlsOptions, id: \.id) { option in
-                        Button((option.id == game.nls ? "✓ " : "") + option.label) {
-                            library.setNls(option.id, for: game)
-                        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(hovering ? 0.4 : 0.15)))
+        .shadow(color: Color.black.opacity(hovering ? 0.16 : 0.05), radius: hovering ? 6 : 2, y: 1)
+        .onHover { inside in
+            withAnimation(.easeOut(duration: 0.12)) { hovering = inside }
+        }
+        .contextMenu { tileMenu }
+        .help(game.title + "\n" + game.rootPath)
+    }
+
+    @ViewBuilder
+    private var tileMenu: some View {
+        Button("Play") { library.launch(game: game) }
+        if !game.nlsOptions.isEmpty {
+            Menu("Text Encoding") {
+                ForEach(game.nlsOptions, id: \.id) { option in
+                    Button((option.id == game.nls ? "✓ " : "") + option.label) {
+                        library.setNls(option.id, for: game)
                     }
                 }
             }
-            Button("Reveal in Finder") { library.revealInFinder(game: game) }
-            Button("Remove from Library") { library.remove(game: game) }
         }
-        .help(game.rootPath)
+        Divider()
+        Button("Reveal in Finder") { library.revealInFinder(game: game) }
+        Button("Remove from Library") { library.remove(game: game) }
     }
 
     @ViewBuilder
@@ -302,7 +288,7 @@ struct GameTileView: View {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(game.coverKind == "icon" ? .none : .medium)
-                .aspectRatio(contentMode: .fill)
+                .scaledToFill()
         } else {
             ZStack {
                 LinearGradient(
@@ -311,11 +297,11 @@ struct GameTileView: View {
                     endPoint: .bottom
                 )
                 Text(game.title)
-                    .font(.title3)
-                    .bold()
+                    .font(.headline)
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
-                    .padding(14)
+                    .lineLimit(3)
+                    .padding(12)
             }
         }
     }
