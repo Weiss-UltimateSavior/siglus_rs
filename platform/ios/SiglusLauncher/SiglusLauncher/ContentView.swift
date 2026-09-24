@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var showPicker: Bool = false
 
     private let columns: [GridItem] = [
-        GridItem(.adaptive(minimum: 170, maximum: 260), spacing: 14),
+        GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 12, alignment: .top),
     ]
 
     var body: some View {
@@ -20,7 +20,7 @@ struct ContentView: View {
                     emptyState
                 } else {
                     ScrollView(.vertical) {
-                        LazyVGrid(columns: columns, spacing: 14) {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                             ForEach(library.games) { game in
                                 GameTileView(game: game, isLaunching: $isLaunching)
                             }
@@ -207,56 +207,60 @@ struct GameTileView: View {
     @Binding var isLaunching: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topLeading) {
-                cover
-                    .frame(height: 118)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                EngineBadge(engine: game.engine, name: game.engineName)
-                    .padding(7)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { play() }
+        VStack(alignment: .leading, spacing: 0) {
+            // A fixed 16:9 frame that follows the column width. The artwork is an
+            // overlay, so a fill-scaled image can never widen the tile.
+            Color.clear
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .overlay(cover)
+                .overlay(
+                    EngineBadge(engine: game.engine, name: game.engineName).padding(6),
+                    alignment: .topLeading
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+                .onTapGesture { play() }
 
-            Text(game.title)
-                .font(.subheadline)
-                .bold()
-                .lineLimit(2)
-
-            HStack {
-                if let label = game.nlsLabel {
-                    Text(label)
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(game.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                    Text(game.nlsLabel ?? game.engineName)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 Menu {
-                    Button("Play") { play() }
-                    if !game.nlsOptions.isEmpty {
-                        Menu("Text Encoding") {
-                            ForEach(game.nlsOptions, id: \.id) { option in
-                                Button((option.id == game.nls ? "✓ " : "") + option.label) {
-                                    library.setNls(option.id, for: game)
-                                }
-                            }
-                        }
-                    }
-                    Button("Delete") { library.remove(game: game) }
+                    tileMenu
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .font(.title3)
+                        .padding(.vertical, 4)
+                }
+                .fixedSize()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor.secondarySystemGroupedBackground)))
+        .contextMenu { tileMenu }
+    }
+
+    @ViewBuilder
+    private var tileMenu: some View {
+        Button("Play") { play() }
+        if !game.nlsOptions.isEmpty {
+            Menu("Text Encoding") {
+                ForEach(game.nlsOptions, id: \.id) { option in
+                    Button((option.id == game.nls ? "✓ " : "") + option.label) {
+                        library.setNls(option.id, for: game)
+                    }
                 }
             }
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(UIColor.secondarySystemGroupedBackground)))
-        .contextMenu {
-            Button("Play") { play() }
-            Button("Delete") { library.remove(game: game) }
-        }
+        Button("Delete") { library.remove(game: game) }
     }
 
     private func play() {
@@ -272,7 +276,7 @@ struct GameTileView: View {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(game.coverKind == "icon" ? .none : .medium)
-                .aspectRatio(contentMode: .fill)
+                .scaledToFill()
         } else {
             ZStack {
                 LinearGradient(
@@ -284,6 +288,7 @@ struct GameTileView: View {
                     .font(.headline)
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
+                    .lineLimit(3)
                     .padding(10)
             }
         }
