@@ -14,6 +14,24 @@ use crate::nls::Nls;
 use crate::probe;
 use crate::runtime::{self, FramebufferGame, GameKey, PointerButton};
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(message: &str);
+}
+
+/// Routes Rust panics to the browser console (wasm aborts without a message).
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            console_error(&format!("game_launcher panic: {info}"));
+            previous(info);
+        }));
+    });
+}
+
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -58,6 +76,7 @@ fn probe_value(root: &str, nls: Option<Nls>) -> Value {
 /// Describes the game at `root` (a path in the registered folder index).
 #[wasm_bindgen(js_name = launcherProbe)]
 pub fn launcher_probe(root: &str, nls: Option<String>) -> String {
+    install_panic_hook();
     let nls = nls.as_deref().and_then(Nls::parse);
     probe_value(root, nls).to_json()
 }
@@ -65,6 +84,7 @@ pub fn launcher_probe(root: &str, nls: Option<String>) -> String {
 /// Finds and describes every game at or below `path`.
 #[wasm_bindgen(js_name = launcherScan)]
 pub fn launcher_scan(path: &str, depth: u32) -> String {
+    install_panic_hook();
     let roots = probe::scan(Path::new(path), depth.min(8) as usize);
     Value::Array(
         roots
@@ -91,6 +111,7 @@ pub struct WebGame {
 impl WebGame {
     #[wasm_bindgen(constructor)]
     pub fn new(root: &str, engine: &str, nls: Option<String>) -> Result<WebGame, JsValue> {
+        install_panic_hook();
         let nls = nls.as_deref().and_then(Nls::parse);
         runtime::open(Path::new(root), probe::engine_from_id(engine), nls)
             .map(|game| WebGame { game })

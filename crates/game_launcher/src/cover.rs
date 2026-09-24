@@ -55,13 +55,12 @@ const CARD_HEIGHT: u32 = 270;
 pub fn resolve(root: &Path, engine: EngineKind) -> Option<Cover> {
     let files = list_files(root);
     for wanted in COVER_FILES {
-        if let Some(path) = files.iter().find(|path| name_is(path, wanted)) {
-            if let Some(image) = game_fs::read(path)
+        if let Some(path) = files.iter().find(|path| name_is(path, wanted))
+            && let Some(image) = game_fs::read(path)
                 .ok()
                 .and_then(|bytes| image::load_from_memory(&bytes).ok())
-            {
-                return Some(cover(image, CoverKind::Image, path));
-            }
+        {
+            return Some(cover(image, CoverKind::Image, path));
         }
     }
     let mut icons: Vec<&PathBuf> = files.iter().filter(|path| has_ext(path, "ico")).collect();
@@ -526,12 +525,10 @@ fn uk2_picture(root: &Path) -> Option<Cover> {
                     if best
                         .as_ref()
                         .is_none_or(|(best_score, _, _)| score > *best_score)
-                    {
-                        if let Some(buffer) =
+                        && let Some(buffer) =
                             RgbaImage::from_raw(image.width, image.height, image.rgba.clone())
-                        {
-                            best = Some((score, DynamicImage::ImageRgba8(buffer), engine_name));
-                        }
+                    {
+                        best = Some((score, DynamicImage::ImageRgba8(buffer), engine_name));
                     }
                 }
             }

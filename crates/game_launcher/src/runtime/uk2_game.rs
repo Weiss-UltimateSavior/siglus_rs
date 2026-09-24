@@ -107,10 +107,10 @@ impl Uk2FramebufferGame {
                     engine.run()
                 });
                 let mut shared = thread_shared.lock().expect("uk2 state poisoned");
-                if let Err(error) = result {
-                    if !Engine::quit_requested(&error) {
-                        shared.error = Some(format!("{error:#}"));
-                    }
+                if let Err(error) = result
+                    && !Engine::quit_requested(&error)
+                {
+                    shared.error = Some(format!("{error:#}"));
                 }
                 shared.finished = true;
             })

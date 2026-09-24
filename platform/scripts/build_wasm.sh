@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLATFORM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$PLATFORM_DIR/.." && pwd)"
 
-PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
+PKG="${SIGLUS_CARGO_PKG:-game_launcher}"
 WASM_BINDGEN_TARGET="${WASM_BINDGEN_TARGET:-web}"
 WASM_BINDGEN_VERSION="0.2.111"
 DIST="$ROOT_DIR/dist/wasm"

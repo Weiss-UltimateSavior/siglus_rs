@@ -6,8 +6,8 @@ ANDROID_DIR="${ROOT_DIR}/platform/android"
 APP_DIR="${ANDROID_DIR}/app"
 JNI_LIBS_DIR="${APP_DIR}/src/main/jniLibs"
 
-SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
-SIGLUS_RUST_LIB_NAME="${SIGLUS_RUST_LIB_NAME:-siglus_scene_vm}"
+SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-game_launcher}"
+SIGLUS_RUST_LIB_NAME="${SIGLUS_RUST_LIB_NAME:-game_launcher}"
 SIGLUS_SO_NAME="${SIGLUS_SO_NAME:-siglus}"
 ANDROID_PLATFORM="${ANDROID_PLATFORM:-28}"
 VARIANT="${VARIANT:-debug}"
@@ -79,7 +79,7 @@ cargo ndk $(for abi in ${ABIS}; do printf -- "-t %s " "${abi}"; done) \
   build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} -p "${SIGLUS_CARGO_PKG}"
 popd >/dev/null
 
-# Cargo outputs lib${SIGLUS_RUST_LIB_NAME}.so for the siglus_scene_vm package.
+# Cargo outputs lib${SIGLUS_RUST_LIB_NAME}.so for the game_launcher package.
 # The Android Java side intentionally loads the stable ABI name libsiglus.so.
 for abi in ${ABIS}; do
   src="${JNI_LIBS_DIR}/${abi}/lib${SIGLUS_RUST_LIB_NAME}.so"

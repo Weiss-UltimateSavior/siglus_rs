@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn reads_caption_in_the_chosen_encoding() {
         let (sjis, _, _) = encoding_rs::SHIFT_JIS.encode("#CAPTION = \"リトルバスターズ！\"\r\n");
-        let text = format!("#REGNAME=\"x\"\r\n");
+        let text = "#REGNAME=\"x\"\r\n".to_string();
         let mut bytes = text.into_bytes();
         bytes.extend_from_slice(&sjis);
         assert_eq!(

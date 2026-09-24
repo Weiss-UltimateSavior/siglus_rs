@@ -11,8 +11,8 @@ HDR_DIR="$IOS_DIR/Headers"
 VENDOR_DIR="$IOS_DIR/Vendor"
 OUT_XCF="$VENDOR_DIR/Siglus.xcframework"
 
-SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
-RUST_LIB_NAME="${RUST_LIB_NAME:-siglus_scene_vm}" # cargo output: lib${RUST_LIB_NAME}.a
+SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-game_launcher}"
+RUST_LIB_NAME="${RUST_LIB_NAME:-game_launcher}" # cargo output: lib${RUST_LIB_NAME}.a
 LIB_NAME="${LIB_NAME:-siglus}" # xcframework public library name: lib${LIB_NAME}.a
 
 TGT_IOS="aarch64-apple-ios"
@@ -47,7 +47,7 @@ LIB_SIM_A="$TMP_LIB_DIR/ios-arm64-simulator/lib${LIB_NAME}.a"
 
 if [[ ! -f "$LIB_IOS_RUST_A" ]]; then
   echo "ERROR: Missing iOS static lib: $LIB_IOS_RUST_A" >&2
-  echo "Hint: ensure siglus_scene_vm outputs staticlib for iOS." >&2
+  echo "Hint: ensure game_launcher outputs staticlib for iOS." >&2
   exit 1
 fi
 if [[ ! -f "$LIB_SIM_RUST_A" ]]; then

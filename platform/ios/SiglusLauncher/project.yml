@@ -16,7 +16,7 @@ settings:
     SDKROOT: iphoneos
     SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
 
-# No ZIP import: games are copied into Files/Documents and scanned.
+# Games are imported from Files (folder picker) or copied into Documents, then scanned.
 
 targets:
   SiglusLauncher:
@@ -97,6 +97,8 @@ targets:
       - sdk: QuartzCore.framework
       - sdk: CoreGraphics.framework
       - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreText.framework
       - framework: Vendor/Siglus.xcframework
         embed: false
         codeSign: false

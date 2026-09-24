@@ -124,10 +124,10 @@ impl App {
         window.set_cursor_visible(self.game.cursor_visible());
         let viewport = self.viewport();
         let size = self.game.size();
-        if let Some(gpu) = &mut self.gpu {
-            if let Err(error) = gpu.draw(self.game.frame(), size, viewport) {
-                log::warn!("render: {error:#}");
-            }
+        if let Some(gpu) = &mut self.gpu
+            && let Err(error) = gpu.draw(self.game.frame(), size, viewport)
+        {
+            log::warn!("render: {error:#}");
         }
     }
 }
