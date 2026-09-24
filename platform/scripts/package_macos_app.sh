@@ -7,8 +7,10 @@ MACOS_DIR="${ROOT_DIR}/platform/macos/SiglusLauncher"
 VENDOR_DIR="${MACOS_DIR}/Vendor"
 DIST_DIR="${ROOT_DIR}/dist/macos"
 
-SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-game_launcher}"
-RUST_LIB_NAME="${RUST_LIB_NAME:-game_launcher}"
+# The app library package. Deliberately not SIGLUS_CARGO_PKG: CI sets that to
+# siglus_scene_vm for the desktop binary builds.
+LAUNCHER_CARGO_PKG="${LAUNCHER_CARGO_PKG:-game_launcher}"
+RUST_LIB_NAME="${RUST_LIB_NAME:-${LAUNCHER_CARGO_PKG}}"
 SIGLUS_DYLIB_NAME="${SIGLUS_DYLIB_NAME:-siglus}"
 SCHEME="${SCHEME:-SiglusLauncher}"
 CONFIG="${CONFIG:-Release}"
@@ -42,7 +44,7 @@ command -v xcodegen >/dev/null 2>&1 || { echo "ERROR: xcodegen not found. Instal
 
 echo "[macos] Building libsiglus.dylib ..."
 pushd "${ROOT_DIR}" >/dev/null
-CARGO_ARGS=(build --release -p "${SIGLUS_CARGO_PKG}")
+CARGO_ARGS=(build --release -p "${LAUNCHER_CARGO_PKG}")
 if [[ -n "${RUST_TARGET}" ]]; then
   CARGO_ARGS+=(--target "${RUST_TARGET}")
 fi
@@ -56,7 +58,7 @@ else
 fi
 if [[ ! -f "${DYLIB_PATH}" ]]; then
   echo "ERROR: Missing ${DYLIB_PATH}"
-  echo "Hint: ensure macOS build produces a cdylib named libsiglus.dylib."
+  echo "Hint: ensure ${LAUNCHER_CARGO_PKG} builds a cdylib (lib${RUST_LIB_NAME}.dylib); it is packaged as lib${SIGLUS_DYLIB_NAME}.dylib."
   exit 1
 fi
 
