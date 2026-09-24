@@ -86,5 +86,3 @@ pub struct CompatState {
     pub api: Option<ApiWrapper>,
     pub th_info: Option<Info>,
 }
-#[cfg(all(target_os = "horizon", not(target_env = "newlib")))]
-use alloc::vec::Vec;

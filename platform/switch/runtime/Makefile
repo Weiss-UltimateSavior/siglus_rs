@@ -18,6 +18,14 @@ LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g \
 	-Wl,--wrap=nvMapCreate -Wl,--wrap=nvAddressSpaceMap -L$(DEVKITPRO)/libnx/lib
 LDLIBS := -ldeko3dd -lnx -lm
 RUST_LIB := ../../../target/aarch64-switch/release/libsiglus_scene_vm.a
+# Crates patched for the pinned nightly (see platform/switch/patches/README.md).
+# Opt-in and scoped to this build: nothing in the current NRO depends on
+# unwinding, and an unused patch only produces a Cargo warning.
+# Use `make UNWINDING_PATCH=1` when adding a Rust dependency that needs it (nx).
+RUST_PATCHES :=
+ifeq ($(UNWINDING_PATCH),1)
+RUST_PATCHES += --config 'patch.crates-io.unwinding.path="platform/switch/patches/unwinding-0.2.10"'
+endif
 
 OBJECTS := $(BUILD)/main.o
 SHADERS := $(ROMFS)/shaders/siglus_vsh.dksh $(ROMFS)/shaders/siglus_fsh.dksh
@@ -26,7 +34,7 @@ SHADERS := $(ROMFS)/shaders/siglus_vsh.dksh $(ROMFS)/shaders/siglus_fsh.dksh
 all: $(TARGET).nro
 
 $(RUST_LIB):
-	cd ../../.. && RUSTFLAGS='--cfg getrandom_backend="custom"' rustup run nightly-2026-01-20 cargo build -p siglus_scene_vm --lib --release --target platform/switch/rust/aarch64-switch.json -Zbuild-std=std,panic_abort
+	cd ../../.. && RUSTFLAGS='--cfg getrandom_backend="custom"' rustup run nightly-2026-01-20 cargo build $(RUST_PATCHES) -p siglus_scene_vm --lib --release --target platform/switch/rust/aarch64-switch.json -Zbuild-std=std,panic_abort
 
 $(BUILD) $(ROMFS)/shaders:
 	mkdir -p $@
