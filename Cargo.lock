@@ -1337,6 +1337,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "avg32",
+ "encoding_rs",
+ "engine-detect",
+ "game_fs",
+ "image",
+ "js-sys",
+ "log",
+ "pollster",
+ "reallive",
+ "siglus_scene_vm",
+ "uk2",
+ "wasm-bindgen",
+ "wgpu 0.20.1",
+ "winit 0.31.0-beta.3",
+]
+
+[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4183,6 +4204,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "encoding_rs",
+ "game_fs",
  "image",
  "kira",
  "log",

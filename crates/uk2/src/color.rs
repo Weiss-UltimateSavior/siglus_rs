@@ -57,10 +57,11 @@ impl ColorTable {
     }
 }
 
+/// Converts a PC-98 analog palette word (`0xGRB`) to RGB.
 pub fn color_word_to_rgb(color: u16) -> [u8; 3] {
     [
-        (((color >> 8) & 0x0f) as u8) * 17,
         (((color >> 4) & 0x0f) as u8) * 17,
+        (((color >> 8) & 0x0f) as u8) * 17,
         ((color & 0x0f) as u8) * 17,
     ]
 }
@@ -125,14 +126,15 @@ mod tests {
     }
 
     #[test]
-    fn expands_rgb_nibbles_to_eight_bit_channels() {
-        assert_eq!(color_word_to_rgb(0x0f8), [0, 255, 136]);
+    fn expands_grb_nibbles_to_eight_bit_channels() {
+        assert_eq!(color_word_to_rgb(0x0f8), [255, 0, 136]);
+        assert_eq!(color_word_to_rgb(0xf00), [0, 255, 0]);
     }
 
     #[test]
     fn palette_transition_reaches_selected_bank_colors() {
         let mut target = [0u16; COLOR_BANK_COLORS];
-        target[0] = 0x0f0;
+        target[0] = 0xf00;
         let pixels = [0u8, 0, 0, 255, 10, 10, 10, 255];
         let transitioned = transition_rgba(&pixels, &[0], &target, 16, 16).unwrap();
         assert_eq!(&transitioned[..4], &[0, 255, 0, 255]);

@@ -123,6 +123,8 @@ pub struct Engine {
     pub game: Uk2Game,
     pub platform: Box<dyn Platform>,
     pub kanji: font::KanjiRom,
+    pub(crate) text_encoding: font::TextEncoding,
+    foreign_font: Option<font::ForeignFont>,
     pub(crate) programs: Vec<interp::Program>,
     pub(crate) last_map_name: Vec<u8>,
     last_tick: u64,
@@ -162,6 +164,8 @@ impl Engine {
             game,
             platform,
             kanji,
+            text_encoding: font::TextEncoding::default(),
+            foreign_font: None,
             programs: Vec::new(),
             last_map_name: Vec::new(),
             last_tick: 0,
@@ -607,6 +611,25 @@ impl Engine {
     }
 
     // ---- music ---------------------------------------------------------
+
+    /// Encoding of the game's double-byte text (Shift-JIS by default).
+    pub fn set_text_encoding(&mut self, encoding: font::TextEncoding) {
+        self.text_encoding = encoding;
+        if self
+            .foreign_font
+            .as_ref()
+            .is_some_and(|font| font.encoding() != encoding)
+        {
+            self.foreign_font = None;
+        }
+    }
+
+    pub(crate) fn foreign_glyph(&mut self, lead: u8, trail: u8) -> [u8; 32] {
+        let encoding = self.text_encoding;
+        self.foreign_font
+            .get_or_insert_with(|| font::ForeignFont::load(encoding))
+            .glyph(lead, trail)
+    }
 
     pub fn music(&mut self, command: MusicCommand) {
         self.platform.music(command);

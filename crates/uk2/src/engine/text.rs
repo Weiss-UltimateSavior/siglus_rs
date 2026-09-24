@@ -349,7 +349,7 @@ impl Engine {
             let glyph: Vec<u8>;
             if c.is_ascii_digit() && digits {
                 glyph = vec![0x82, 0x4f + (c - b'0')];
-            } else if c < 0x80 || (0xa0..0xe0).contains(&c) {
+            } else if self.text_encoding.is_single_byte(c) {
                 if raw {
                     glyph = vec![c];
                 } else {
@@ -357,6 +357,9 @@ impl Engine {
                     let entry = ptr_add(table, i32::from(c) * 2);
                     glyph = vec![self.mem.rb(entry), self.mem.rb(ptr_add(entry, 1))];
                 }
+            } else if self.text_encoding != super::font::TextEncoding::ShiftJis {
+                glyph = vec![super::font::FOREIGN_GLYPH, c, self.mem.rb(ptr_add(p, 1))];
+                p = ptr_add(p, 1);
             } else {
                 glyph = vec![c, self.mem.rb(ptr_add(p, 1))];
                 p = ptr_add(p, 1);
