@@ -1,4 +1,4 @@
-//! Game-root detection and resource opening for AVG32 installations.
+//! Resource opening for AVG32 installations.
 
 use std::path::{Path, PathBuf};
 
@@ -9,80 +9,13 @@ use crate::pdt::{PdtImage, decode_pdt};
 use crate::resource::{Avg32Resources, find_case_insensitive};
 use crate::scene::Avg32SceneHeader;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineKind {
-    Avg32,
-    Siglus,
-    Unknown,
-}
+pub use engine_detect::{EngineKind, GameLayout};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GameLayout {
-    pub root: PathBuf,
-    pub kind: EngineKind,
-    pub gameexe_ini: Option<PathBuf>,
-    pub seen_archive: Option<PathBuf>,
-    pub pdt_root: Option<PathBuf>,
-}
-
-/// Distinguishes AVG32 from Siglus by on-disk formats, not publisher or title.
+/// Detects the engine of a game directory (see the `engine-detect` crate).
 pub fn detect_game_root(root: impl AsRef<Path>) -> Result<GameLayout> {
-    let root = root
-        .as_ref()
-        .canonicalize()
-        .with_context(|| format!("invalid game root {}", root.as_ref().display()))?;
-    if !root.is_dir() {
-        bail!("{} is not a game directory", root.display());
-    }
-    let gameexe_ini = find_case_insensitive(&root, Path::new("Gameexe.ini"));
-    if find_case_insensitive(&root, Path::new("Scene.pck")).is_some()
-        || find_case_insensitive(&root, Path::new("Gameexe.dat")).is_some()
-    {
-        return Ok(GameLayout {
-            root,
-            kind: EngineKind::Siglus,
-            gameexe_ini,
-            seen_archive: None,
-            pdt_root: None,
-        });
-    }
-    let seen_archive = [Path::new("DAT/SEEN.TXT"), Path::new("SEEN.TXT")]
-        .into_iter()
-        .find_map(|path| find_case_insensitive(&root, path));
-    let pdt_root = [Path::new("PDT"), Path::new("DAT/PDT")]
-        .into_iter()
-        .find_map(|path| find_case_insensitive(&root, path))
-        .filter(|path| path.is_dir());
-    let is_avg32_seen = seen_archive
-        .as_deref()
-        .and_then(|path| std::fs::read(path).ok())
-        .is_some_and(|bytes| bytes.starts_with(b"PACL"));
-    let has_loose_scenes = [Path::new("DAT"), Path::new("")]
-        .into_iter()
-        .filter_map(|directory| {
-            find_case_insensitive(&root, directory).or_else(|| Some(root.clone()))
-        })
-        .filter_map(|directory| std::fs::read_dir(directory).ok())
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry.file_name().to_str().is_some_and(|name| {
-                let upper = name.to_ascii_uppercase();
-                upper.starts_with("SEEN") && upper.ends_with(".TXT") && upper.len() > 8
-            })
-        });
-    let kind = if gameexe_ini.is_some() && (is_avg32_seen || has_loose_scenes) {
-        EngineKind::Avg32
-    } else {
-        EngineKind::Unknown
-    };
-    Ok(GameLayout {
-        root,
-        kind,
-        gameexe_ini,
-        seen_archive,
-        pdt_root,
-    })
+    let root = root.as_ref();
+    engine_detect::detect_game_root(root)
+        .with_context(|| format!("invalid game root {}", root.display()))
 }
 
 #[derive(Debug)]

@@ -190,24 +190,30 @@ discovery and base/overlay image reads use the same archive-aware path.
 
 ## Music resource status
 
-The reference routes `M0` score bytes to its installed PC-98 music driver,
-clamps `M1` volume to 0..127, sends driver function 1 for `M2`, and sends
-function 0 for `M4` to start the current score again. The Rust player uses
-`UK2.CFG`'s `FM_EXT` / `MIDI_EXT` settings when resolving extensionless names;
-explicit virtual extensions are normalized before loading. `.MMM` files begin
-with thirteen big-endian absolute channel offsets; offsets before byte 26 are
-empty-channel markers, and offsets need not be in channel order. The parser
-exposes bounded channel slices. Music playback and the `.MMM` command decoder
-are not implemented yet.
+`UK2.EXE` talks to two resident KAJA drivers, both shipped with the game:
+`MMD.COM` (MIDI, `int 61h`) and `PMD.COM` v4.8e (FM, `int 60h`). At start-up
+`word_25DC6` records which are present (bit 0 = MMD, bit 1 = PMD); MMD wins
+when both are loaded. `M0` (`sub_22AB8`) swaps the name's extension for
+`UK2.CFG`'s `MIDI_EXT` or `FM_EXT`, loads the score and starts it (driver
+function 0). `M1` (`sub_22C40`) is driver function 2, **fade-out**, with the
+speed clamped to 0..127. `M2` (`sub_22C1F`) is function 1 (stop) and `M4`
+(`sub_22BFE`) is function 0 (start).
 
-The MMD reader validates the 18-entry directory observed in all 31 SK `.MMD`
-assets. Each entry stores a little-endian absolute stream offset, a per-track
-key byte, and a MIDI channel byte; `0xff` marks the driver control streams.
-The header stores tempo and global key at bytes 0 and 1, and the title begins
-at offset `0x50`. These streams are KAJA MMD driver data, not Standard MIDI
-Files. The Rust reader expands four-byte delta-compressed records and checks
-each stream's `0xfe` end marker. MIDI command interpretation and audio output
-are still missing, so neither configured music format currently plays.
+`.MMM` files are compiled PMD "M" data for the YM2608 (the PC-9801-86 board):
+one leading byte, then (relative to byte 1) eleven little-endian part offsets
+A-K, the R-pattern table offset and, because the first offset is not 24, the
+offset of the embedded FM voice table (26-byte records: voice number, DT/ML,
+TL, KS/AR, AM/DR, SR, SL/RR in slot order 1,3,2,4, then FB/ALG). Parts D-F are
+the second FM port, G-I the SSG and K the rhythm part. The supplied K parts
+only set rhythm levels and pans; the drums are triggered with the rhythm-key
+command (`EBh`) inside the other parts.
+
+The engine port includes a PMD driver port (`engine::pmd`) and a YM2608 model
+(`engine::opna`) and reports only the FM driver, so the game picks `.MMM`.
+The `.MMD` reader validates the 18-entry directory of all 31 SK `.MMD` files
+(little-endian stream offset, key byte, MIDI channel byte with `0xff` for
+the control streams; tempo and key at bytes 0/1, title at `0x50`). MMD
+playback is not implemented.
 
 ## MAP resource
 
@@ -261,6 +267,39 @@ All 350 Sorcer Kingdom `.PDT` files in the supplied directory begin with `0x34`.
 
 The display path is recovered from `sub_22893`, `sub_226B7`, and `sub_225BE`. `sub_22893` consumes the tag byte before calling the image decoder. The 32-byte palette block is followed by RLE marker bytes at file offsets `0x21` and `0x22`, four little-endian rectangle bounds at `0x23..0x2b`, then four planar streams beginning at `0x2b`. Each plane stores byte-columns and pairs of scanlines; the PC-98 display buffer is 640x400. The Rust decoder uses this layout and decodes all 350 supplied PDT files. Palette words use `0xRGB` nibble order: the animation/palette routine at `sub_1FCFD` extracts red from bits 8..11, green from bits 4..7, blue from bits 0..3, then rebuilds the same 12-bit order.
 
+## Engine port
+
+`engine::Engine` ports `UK2.EXE` routine by routine. Important data-segment
+locations (DS linear base `0x23610`; IDA `word_2XXXX` is DS offset
+`0x2XXXX - 0x23610`):
+
+- The top loop (`sub_14A52`) reruns the start MES while the interpreter
+  returns status 5 (`U7` load and the J3/U7 restart path). The restart name is at
+  `unk_28EDA`.
+- The expression accumulator at `DS:38D7` is not cleared between expressions;
+  only nested operands zero it.
+- Objects: `dword_23B72` holds 70 far pointers into a pool of `0x62`-byte
+  records, and `word_2901C` counts them. `sub_1F505` rewrites its index
+  argument in place (-1 selects the top object), and callers reuse that
+  index.
+- Composition (`sub_16455`): two 40x25 cell-owner maps (`DS:59D0`, `0xF0`
+  = background). Windows are drawn on page 0, and uncovered cells are copied
+  back from the page-1 background.
+- Text (`sub_16F89`, `sub_171C6`): `U2` formats into the object's `0x7D0`-byte
+  buffer. Single-byte characters map through the zenkaku table at the far
+  pointer `DS:F2`, and half-width glyphs come from `kana.pdt`, captured at
+  start-up into `DS:5F2A`.
+- Maps: a `0x3A`-byte header, 10-byte cell buffers double-buffered through
+  `DS:3B52`, and 17-byte entities, including the global entity list loaded
+  from the file named by the config `FONT` key.
+- Battles: party slots at `DS:391C` (13 x `0x1D`), `FIGHT.TAB` and `LEVEL.TAB`.
+- Random numbers use the Borland C runtime LCG.
+
 ## Implementation boundary
 
-The `uk2` crate implements the verified MES grammar, reachable disassembler, operand/expression/condition evaluation, assignments, recursive block calls, J0-J3, L0-L5, T0/T1 slot storage, external MES context handling, UK2.CFG parsing, DLB parsing, and PDT34 decoding. Device/presentation handlers are surfaced through `Uk2Host::command` with decoded and evaluated arguments. A handler with unknown semantics is therefore never silently treated as success by the core.
+The engine port covers the interpreter and all two-character service
+commands used by the supplied scripts. The EMS effect sequencer (`A*`) stays
+inactive, like it does without EMS. The PMD port omits sound effects, the
+FM3 extended parts, and the ADPCM part J, which needs a sample bank the game
+does not ship. The older format layer (`Uk2Vm`/`Uk2Host`) still surfaces
+decoded service commands for `uk2_verify`.

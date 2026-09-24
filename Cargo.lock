@@ -305,6 +305,7 @@ dependencies = [
  "chrono",
  "clap",
  "encoding_rs",
+ "engine-detect",
  "kira",
  "oxideav-cinepak",
  "pollster",
@@ -1063,6 +1064,10 @@ checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "engine-detect"
+version = "0.1.0"
 
 [[package]]
 name = "enum-iterator"
@@ -4157,7 +4162,9 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "bytemuck",
+ "chrono",
  "encoding_rs",
+ "image",
  "kira",
  "log",
  "pollster",

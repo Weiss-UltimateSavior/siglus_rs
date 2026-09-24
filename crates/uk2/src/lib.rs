@@ -8,6 +8,7 @@ pub mod color;
 pub mod config;
 pub mod disasm;
 pub mod dlb;
+pub mod engine;
 pub mod game;
 pub mod map;
 pub mod mes;

@@ -1,76 +1,88 @@
 # uk2
 
-`uk2` is a format-first implementation of AyPio's UK2 engine, initially
-reconstructed from the PC-98 version of *Sorcer Kingdom*.
+`uk2` implements AyPio's early UK2 engine (`UK2.EXE`, "SOSAR SYSTEM"), using
+the PC-98 version of *Sorcer Kingdom* as the reference game.
 
-The crate intentionally does not route UK2 through AVG32: UK2 uses a distinct
-MES VM, operand model, recursive status protocol, DLB archive format, and the
-older PDT34 graphics family.
+UK2 is not routed through AVG32: it has its own MES interpreter, operand
+model, recursive status protocol, DLB archive format and the older PDT34
+graphics family.
 
-Implemented in this initial port:
+## Engine port (`uk2::engine`)
 
-- `<< UK2 TEXT Ver1.00 >>` MES validation and entry point;
-- all 88 two-character opcodes plus the six single-byte commands;
-- direct operands, nested expressions, conditions, and null-terminated
-  expression lists;
-- control-flow-aware disassembly (validated against all 552 supplied MES
+`uk2::engine::Engine` is a port of `UK2.EXE` itself. The interpreter,
+window system, text renderer, maps, actors and battles work on the same state
+the original keeps in its data segment, so they behave like the executable
+instead of like a reimplementation built from observed script behaviour:
+
+- **Memory** (`mem`): the 64 KiB data segment is loaded from the game's own
+  `UK2.EXE` image (its initialised tables, strings and defaults), and
+  every `farmalloc` block gets its own segment. Far pointers keep their
+  original `seg:off` encoding, so pointer-valued MES operands and the save
+  files match the original layout.
+- **Graphics** (`vram`, `gfx`): two pages of four PC-98 bit planes, the
+  analog `0xGRB` palette with `COLOR.TBL` banks and fades, the PDT34 decoder,
+  16x16 cell chips, sprite merging and the dissolve transitions.
+- **Objects and text** (`object`, `text`, `ui`): the 70-entry object table,
+  window composition on page 0 over the page-1 background using the cell
+  ownership maps, frames and gadgets, `U2`/`D0` formatted text with
+  its escapes, text speed and scrolling, `W8` menus, mouse hit testing and
+  window dragging.
+- **Maps and actors** (`map`): `F*` map loading, viewport, triggers,
+  collisions, entity AI and movement, chip views and the overlay chips.
+- **Battles** (`battle`): the `I*` commands with `FIGHT.TAB` and
+  `LEVEL.TAB`.
+- **System** (`system`): the start-up sequence, the top-level `MES` loop,
+  save/load (`U6`/`U7`/`UJ`, `flagNN.dat` files) and the remaining service
+  commands.
+- **Input and timing** (`mod.rs`): the VSYNC (56.4 Hz), mouse and keyboard
+  interrupt handlers, with PC-98 scan codes and the RETURN/SPACE/ESC mouse
+  button aliases.
+- **Fonts** (`font`): kanji come from a real `KANJI16.ROM`
+  (`UK2_KANJI_ROM`), if you have one, or from the embedded public-domain
+  Shinonome 16-dot JIS font. Half-width characters are captured from the
+  game's own `kana.pdt` at start-up, like the original does.
+- **Music** (`pmd`, `opna`, `audio`): a port of KAJA's PMD v4.8 driver
+  (FM parts A-F, SSG parts G-I, rhythm part K) that plays the game's `.MMM`
+  scores on a YM2608 (PC-9801-86) model. The OPNA rhythm ROM is not
+  available, so the six rhythm voices are synthesised. The engine reports
+  only the FM driver to the game, so it chooses `.MMM` over the MIDI `.MMD`
+  scores.
+
+The engine runs on its own thread and talks to the host through the
+`Platform` trait: VSYNC ticks, input events, finished frames and music
+commands.
+
+## Format layer
+
+The older format modules are still available and are used by `uk2_verify`:
+
+- `<< UK2 TEXT Ver1.00 >>` MES validation, the full opcode table and a
+  control-flow-aware disassembler (checked against all 552 supplied MES
   files);
-- deterministic VM core for assignment, increment/decrement, J0-J3, L0-L5,
-  block calls, T0/T1 text-slot tables, and external MES local-context reset;
-- `UK2.CFG` parsing and UK2 virtual extension mapping (`.mes1` -> `.MES`, etc.);
-- DLB Ver1.00 parsing and resource lookup behind directory files;
-- PDT34 12-bit palette, rectangle, and four-plane RLE decoding at 640x400;
-- MAP row-major tile-grid, 17-byte entity, and 10-byte trigger parsing with
-  bounds-checked dimensions and tail counts;
-- `.MMM` 13-channel directory parsing and `.MMD` 18-track delta-record
-  expansion with bounds-checked channel slices;
-- virtual `.mmm1` music-name resolution to the on-disk `.MMM` resource and
-  confirmed M0 load, M1 volume, M2 stop, and M4 status-call VM behavior.
+- `UK2.CFG` parsing and virtual extension mapping (`.mes1` -> `.MES`, etc.);
+- DLB Ver1.00 archives, PDT34 images, MAP files, and the `.MMM`/`.MMD`
+  directories.
 
-PC-98 rendering/input/audio handlers are exposed through `Uk2Host`; handlers
-whose semantics have not yet been proven from `UK2.EXE` are not replaced by
-placeholder behavior. See `UK2_REVERSE_ENGINEERING.md` for the recovered
-encoding and handler table.
-
-Useful binaries:
+## Binaries
 
 ```text
+uk2_player <game-directory>                 desktop player (wgpu + winit + kira)
+uk2_run <game-directory> [--script FILE] [--out DIR] [--ticks N] [--trace|--trace-mes] [--start NAME]
+uk2_music <score.MMM> <out.wav> [seconds]   render a PMD score to WAV
 uk2_disasm <file.MES>
-uk2_verify <game-directory>
-uk2_verify <game-directory> --assets
-uk2_verify <game-directory> --boot-menu
-uk2_verify <game-directory> --boot-path=3
-uk2_verify <game-directory> --stats
-uk2_player <game-directory>
+uk2_verify <game-directory> [--assets|--boot-menu|--boot-path=N|--stats]
 ```
 
-`--assets` also decodes every PDT, parses every MAP and MMD/MMM resource, and
-resolves and decodes literal PDTs referenced by UE image commands.
-`--boot-menu` executes `START.MES` through the VM until the first `W8` menu,
-checking each window definition and opening referenced image/music resources.
-`--boot-path=3` selects the new-game option and traces the live VM path into
-the first gameplay scene. `--boot-inputs=5` schedules synthetic button presses
-to move through its asynchronous input loops and input-wait commands.
-`--stats` reports reachable service-opcode frequency across the supplied game.
-The desktop player currently presents W5 backgrounds through wgpu, renders F0
-MAP tile grids from the referenced chip PDT and composites UE PDT sprite rectangles,
-accepts keyboard and mouse input,
-renders U2/W6 text objects in W1-defined windows and W8 choice menus using a host Japanese font when
-available, and routes W6 fixed-string dialogue through the same text layer.
-W7 pauses the VM until confirm/cancel input, as required by the game's
-dialogue scripts; U0 controls mouse cursor visibility; W8 supports keyboard
-navigation and mouse selection; WA removes the matching text object.
-U1 reads `COLOR.TBL` and interpolates the displayed frame to a selected palette
-bank. MAP and UE composition preserve the packed 4bpp framebuffer indices so
-the palette transition recolors pixels by their original PC-98 palette index.
-FA updates loaded MAP entities by ID, FB changes map cells, FC/FD change trigger
-flags, F5 binds a MAP to its object ID, and FJ scrolls the clamped viewport.
-The host polls button edges between VM instructions, including input loops;
-FK advances the map frame; U3 displays named scene images, and FI restores the
-scene background region before compositing a named PDT. MAP actors, collisions, trigger
-effects, and original transition timing are not yet implemented.
-The M0 resource command now keeps the loaded music score while the VM
-continues; MMD/MMM sound synthesis is not yet implemented. Other high-frequency
-window, effect, and device services still
-need their `UK2.EXE` behavior ported before the game can be considered fully
-playable.
+`uk2_player` maps the keyboard to PC-98 scan codes (arrow keys and the
+numeric keypad move, Enter/Space act as the left button and Esc as the right
+button) and passes the mouse through as an absolute pointer. The engine
+draws the game's own software cursor.
+
+`uk2_run` runs the engine headless on a virtual VSYNC clock. A script lists
+timed input, one command per line: `<tick> move X Y`, `click X Y`,
+`rclick X Y`, `down`/`up`/`rdown`/`rup`, `key NAME`, `keydown NAME`,
+`keyup NAME`, and `shot FILE.png`. At the end it writes `final.png` and prints
+the engine state (palette, objects, text).
+
+See `UK2_REVERSE_ENGINEERING.md` for the recovered formats and `UK2.EXE`
+routines.

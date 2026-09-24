@@ -101,6 +101,30 @@ impl Uk2Game {
         bail!("uk2: resource {engine_name:?} was not found")
     }
 
+    /// Reads a file of the game directory by its real (case-insensitive)
+    /// name, bypassing virtual extensions and archives.
+    pub fn read_raw_file(&self, name: &str) -> Result<Vec<u8>> {
+        let path = self
+            .files
+            .get(&name.to_ascii_uppercase())
+            .ok_or_else(|| anyhow::anyhow!("uk2: {} has no {name}", self.root.display()))?;
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+    }
+
+    /// Writes a data file (save data, entity lists) into the game directory.
+    pub fn write_file(&mut self, engine_name: &str, bytes: &[u8]) -> Result<()> {
+        let mapped = map_virtual_extension(engine_name);
+        let key = mapped.to_ascii_uppercase();
+        let path = match self.files.get(&key) {
+            Some(path) => path.clone(),
+            None => self.root.join(&key),
+        };
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        self.files.insert(key, path);
+        Ok(())
+    }
+
     pub fn load_mes(&self, engine_name: &str) -> Result<MesProgram> {
         MesProgram::from_bytes(self.read(engine_name)?)
             .with_context(|| format!("failed to parse UK2 MES {engine_name:?}"))
@@ -153,7 +177,7 @@ impl Uk2Game {
             .map(|bytes| decode_pdt34(&bytes))
             .transpose()
             .with_context(|| format!("failed to decode base PDT {}", map.base))?
-            .unwrap_or_else(|| blank_pdt34());
+            .unwrap_or_else(blank_pdt34);
         if let Some(bytes) = self.read_optional(&map.overlay)? {
             let mut overlay = decode_pdt34(&bytes)
                 .with_context(|| format!("failed to decode overlay PDT {}", map.overlay))?;
