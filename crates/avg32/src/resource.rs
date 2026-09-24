@@ -101,7 +101,7 @@ impl Avg32Resources {
                     route.directory.display()
                 )
             })?;
-        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
+        game_fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
     }
 
     pub fn exists(&self, kind: &str, name: &str) -> bool {
@@ -154,7 +154,7 @@ pub fn find_case_insensitive(directory: &Path, wanted: &Path) -> Option<PathBuf>
 /// One directory entry matched case-insensitively. A name that is not
 /// found is retried with its Shift-JIS reading (see [`crate::nls`]).
 pub fn find_component(directory: &Path, wanted: &str) -> Option<PathBuf> {
-    let entries: Vec<_> = std::fs::read_dir(directory).ok()?.flatten().collect();
+    let entries: Vec<_> = game_fs::read_dir(directory).ok()?.flatten().collect();
     let find = |wanted: &str| {
         entries.iter().find_map(|entry| {
             entry

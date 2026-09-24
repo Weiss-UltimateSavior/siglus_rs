@@ -6,6 +6,7 @@ license.workspace = true
 description = "Identifies which engine (SiglusEngine, RealLive, AVG32 or UK2) a game directory uses"
 
 [dependencies]
+game_fs = { path = "../game_fs" }
 
 [[bin]]
 name = "engine_detect"

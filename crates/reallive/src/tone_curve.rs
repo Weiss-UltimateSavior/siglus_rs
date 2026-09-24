@@ -98,7 +98,7 @@ mod tests {
         let Some(root) = std::env::var_os("REALLIVE_TEST_GAME") else {
             return;
         };
-        let Ok(data) = std::fs::read(std::path::Path::new(&root).join("dat/tcdata.tcc")) else {
+        let Ok(data) = game_fs::read(std::path::Path::new(&root).join("dat/tcdata.tcc")) else {
             return;
         };
         let mut curves = ToneCurves::parse(&data);

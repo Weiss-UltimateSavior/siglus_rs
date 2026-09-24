@@ -120,7 +120,7 @@ impl Resources {
         let mut listings = self.listings.lock().ok()?;
         let listing = listings.entry(directory.to_path_buf()).or_insert_with(|| {
             let mut map = HashMap::new();
-            if let Ok(entries) = std::fs::read_dir(directory) {
+            if let Ok(entries) = game_fs::read_dir(directory) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_lowercase();
                     map.insert(name, entry.path());
@@ -129,11 +129,11 @@ impl Resources {
             // Case-insensitive directory resolution for the folder itself.
             if map.is_empty() {
                 if let (Some(parent), Some(leaf)) = (directory.parent(), directory.file_name()) {
-                    if let Ok(entries) = std::fs::read_dir(parent) {
+                    if let Ok(entries) = game_fs::read_dir(parent) {
                         let leaf = leaf.to_string_lossy().to_lowercase();
                         for entry in entries.flatten() {
                             if entry.file_name().to_string_lossy().to_lowercase() == leaf {
-                                if let Ok(inner) = std::fs::read_dir(entry.path()) {
+                                if let Ok(inner) = game_fs::read_dir(entry.path()) {
                                     for file in inner.flatten() {
                                         let name =
                                             file.file_name().to_string_lossy().to_lowercase();
@@ -208,7 +208,7 @@ impl Resources {
     }
 
     pub fn read(&self, kind: Kind, name: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.find(kind, name)?).ok()
+        game_fs::read(self.find(kind, name)?).ok()
     }
 
     /// A file relative to the game root (case-insensitive).

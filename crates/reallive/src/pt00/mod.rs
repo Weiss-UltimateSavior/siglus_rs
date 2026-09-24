@@ -405,7 +405,7 @@ mod tests {
 
     fn game_dll() -> Option<Vec<u8>> {
         let root = std::env::var("REALLIVE_TEST_GAME").ok()?;
-        std::fs::read(std::path::Path::new(&root).join("PT00.dll")).ok()
+        game_fs::read(std::path::Path::new(&root).join("PT00.dll")).ok()
     }
 
     #[test]

@@ -1367,7 +1367,7 @@ impl Scenario {
                 &format!("{name}.AVI"),
             )
             .ok_or_else(|| anyhow::anyhow!("movie {name} not found"))
-            .and_then(|path| Ok(std::fs::read(path)?))
+            .and_then(|path| Ok(game_fs::read(path)?))
         });
         let movie = match bytes.and_then(|bytes| AviMovie::parse(&bytes)) {
             Ok(movie) => movie,

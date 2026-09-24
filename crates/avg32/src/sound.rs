@@ -268,7 +268,7 @@ impl Sound {
                 &ini.bgm_dir,
                 &format!("{}.WAV", track.file),
             )
-            .and_then(|path| std::fs::read(path).ok())?;
+            .and_then(|path| game_fs::read(path).ok())?;
             let mut clip = wav_clip(&bytes, ini.music_linear != 0).ok()?;
             if track.cut_size > 0 {
                 let cut = track.cut_size as usize;
@@ -297,7 +297,7 @@ impl Sound {
         ] {
             let path = find_file(&self.game_root, &ini.bgm_dir, &candidate)
                 .or_else(|| find_file(&self.game_root, "BGM", &candidate));
-            if let Some(bytes) = path.and_then(|path| std::fs::read(path).ok()) {
+            if let Some(bytes) = path.and_then(|path| game_fs::read(path).ok()) {
                 if let Ok(clip) = wav_clip(&bytes, false) {
                     return Some(clip);
                 }
@@ -423,7 +423,7 @@ impl Sound {
         let entry = *self.koe_tables[&archive]
             .iter()
             .find(|item| item.id == entry)?;
-        let bytes = std::fs::read(&path).ok()?;
+        let bytes = game_fs::read(&path).ok()?;
         let pcm = decode_koe_entry(&bytes, entry).ok()?;
         Some(pcm_clip(entry.rate, 1, &pcm))
     }
@@ -436,7 +436,7 @@ impl Sound {
             &name,
         )
         .or_else(|| find_file(&self.game_root, &ini.koe_dir, &name))?;
-        wav_clip(&std::fs::read(path).ok()?, ini.koe_linear != 0).ok()
+        wav_clip(&game_fs::read(path).ok()?, ini.koe_linear != 0).ok()
     }
 
     // ---- movie ------------------------------------------------------------------
@@ -601,7 +601,7 @@ pub fn wrap_pcm_as_wav(
 }
 
 fn read_koe_table(path: &Path) -> Result<Vec<KoeEntry>> {
-    let bytes = std::fs::read(path)?;
+    let bytes = game_fs::read(path)?;
     if bytes.len() < 32 || &bytes[0..6] != b"KOEPAC" {
         bail!("avg32: {} is not a KOEPAC archive", path.display());
     }
@@ -712,7 +712,7 @@ pub fn decode_afs_voice(game_root: &Path, voice_id: u32) -> Result<Clip> {
         .find_map(|directory| find_file(&directory, "", &name))
         .with_context(|| format!("{name} not found"))?;
     let mut file =
-        std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+        game_fs::open(&path).with_context(|| format!("open {}", path.display()))?;
     let mut header = [0u8; 8];
     file.read_exact(&mut header)?;
     if &header[..3] != b"AFS" {
@@ -781,12 +781,12 @@ fn discover_cd_tracks(game_root: &Path) -> BTreeMap<usize, CdTrack> {
     let mut directories = vec![game_root.to_path_buf()];
     if let Some(parent) = game_root.parent() {
         directories.push(parent.to_path_buf());
-        if let Ok(entries) = std::fs::read_dir(parent) {
+        if let Ok(entries) = game_fs::read_dir(parent) {
             directories.extend(
                 entries
                     .flatten()
                     .map(|entry| entry.path())
-                    .filter(|path| path.is_dir()),
+                    .filter(|path| game_fs::is_dir(path)),
             );
         }
     }
@@ -803,7 +803,7 @@ fn discover_cd_tracks(game_root: &Path) -> BTreeMap<usize, CdTrack> {
 }
 
 fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
-    let ccd = std::fs::read_dir(directory)?
+    let ccd = game_fs::read_dir(directory)?
         .flatten()
         .map(|entry| entry.path())
         .find(|path| {
@@ -815,9 +815,9 @@ fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
     let image = ["img", "IMG"]
         .iter()
         .map(|extension| ccd.with_extension(extension))
-        .find(|path| path.is_file())
+        .find(|path| game_fs::is_file(path))
         .context("no CloneCD image")?;
-    let text = std::fs::read_to_string(&ccd)?;
+    let text = game_fs::read_to_string(&ccd)?;
     let mut entries = BTreeMap::new();
     let mut data_tracks = std::collections::BTreeSet::new();
     let mut point = None;
@@ -870,7 +870,7 @@ fn parse_ccd(directory: &Path) -> Result<BTreeMap<usize, CdTrack>> {
 fn decode_cd_track(track: &CdTrack) -> Result<Clip> {
     use std::io::{Read, Seek, SeekFrom};
     const SECTOR: usize = 2352;
-    let mut image = std::fs::File::open(&track.image)?;
+    let mut image = game_fs::open(&track.image)?;
     image.seek(SeekFrom::Start((track.first_sector * SECTOR) as u64))?;
     let mut data = vec![0; track.sector_count * SECTOR];
     image.read_exact(&mut data)?;
@@ -916,13 +916,13 @@ mod tests {
     use super::*;
 
     fn write_disc(dir: &Path, entries: &[(u8, u8, usize)]) {
-        std::fs::create_dir_all(dir).unwrap();
+        game_fs::create_dir_all(dir).unwrap();
         let mut ccd = String::from("[CloneCD]\nVersion=3\n");
         for (i, (point, control, lba)) in entries.iter().enumerate() {
             ccd += &format!("[Entry {i}]\nSession=1\nPoint=0x{point:02x}\nControl=0x{control:02x}\nPLBA={lba}\n");
         }
-        std::fs::write(dir.join("IMAGE.CCD"), ccd).unwrap();
-        std::fs::write(dir.join("IMAGE.img"), []).unwrap();
+        game_fs::write(dir.join("IMAGE.CCD"), ccd).unwrap();
+        game_fs::write(dir.join("IMAGE.img"), []).unwrap();
     }
 
     /// AIR ships a data-only disc next to the music disc; the data disc
@@ -930,15 +930,15 @@ mod tests {
     #[test]
     fn cd_tracks_skip_data_discs() {
         let root = std::env::temp_dir().join(format!("avg32-ccd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = game_fs::remove_dir_all(&root);
         write_disc(&root.join("blue"), &[(0xa2, 0x04, 1000), (0x01, 0x04, 0)]);
         write_disc(
             &root.join("orange"),
             &[(0xa2, 0x00, 900), (0x01, 0x04, 0), (0x02, 0x00, 600), (0x03, 0x00, 700)],
         );
-        std::fs::create_dir_all(root.join("game")).unwrap();
+        game_fs::create_dir_all(root.join("game")).unwrap();
         let tracks = discover_cd_tracks(&root.join("game"));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = game_fs::remove_dir_all(&root);
         assert_eq!(tracks.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
         assert!(tracks[&2].image.ends_with("orange/IMAGE.img"));
         assert_eq!((tracks[&2].first_sector, tracks[&2].sector_count), (600, 100));

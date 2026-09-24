@@ -180,7 +180,7 @@ fn pt00_call(
             let path = sys.resources.root_file("PT00.dll").ok_or_else(|| {
                 anyhow::anyhow!("reallive: PT00.dll not found in the game directory")
             })?;
-            let dll = std::fs::read(&path)?;
+            let dll = game_fs::read(&path)?;
             let seed = sys.random(0, i32::MAX) as u32;
             state.insert(Box::new(Pt00::load(&dll, seed)?))
         }
@@ -206,7 +206,7 @@ fn dt00_call(
             let path = sys.resources.root_file("dt00.dll").ok_or_else(|| {
                 anyhow::anyhow!("reallive: dt00.dll not found in the game directory")
             })?;
-            let dll = std::fs::read(&path)?;
+            let dll = game_fs::read(&path)?;
             let seed = sys.random(0, i32::MAX) as u32;
             dt00_trace(|out| {
                 out.extend_from_slice(b"DT00TRC1");
@@ -246,7 +246,7 @@ fn dt00_call(
     if let Some(dir) = std::env::var_os("RL_DT00_IMAGES") {
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = std::fs::write(
+        let _ = game_fs::write(
             std::path::Path::new(&dir).join(format!("image_{n}.bin")),
             dt.image(),
         );

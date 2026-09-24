@@ -1,6 +1,6 @@
 //! Time: the engine clock, RealLive timers and frame counters.
 
-use std::time::Instant;
+use web_time::Instant;
 
 /// Milliseconds since the interpreter started, either from the wall clock
 /// or advanced explicitly (headless tools and tests).

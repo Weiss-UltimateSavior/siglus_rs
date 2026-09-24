@@ -81,7 +81,7 @@ pub struct Gameexe {
 impl Gameexe {
     pub fn open(path: &Path, nls: Nls) -> Result<Self> {
         let bytes =
-            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+            game_fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         Ok(Self::parse(&decode_config(&bytes, nls)))
     }
 

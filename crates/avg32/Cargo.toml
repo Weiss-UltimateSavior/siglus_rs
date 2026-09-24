@@ -5,11 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+game_fs = { path = "../game_fs" }
+web-time = "1.1"
 anyhow.workspace = true
 chrono.workspace = true
 encoding_rs = "0.8"
 engine-detect = { path = "../engine-detect" }
 ab_glyph = "0.2"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }
+cpal = { version = "0.15", features = ["wasm-bindgen"] }
 
 [features]
 desktop-player = ["dep:bytemuck", "dep:clap", "dep:pollster", "dep:wgpu", "dep:winit"]

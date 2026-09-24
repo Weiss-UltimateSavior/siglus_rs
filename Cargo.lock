@@ -304,11 +304,14 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
+ "cpal",
  "encoding_rs",
  "engine-detect",
+ "game_fs",
  "kira",
  "oxideav-cinepak",
  "pollster",
+ "web-time 1.1.0",
  "wgpu 0.20.1",
  "winit 0.31.0-beta.3",
 ]
@@ -591,7 +594,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1068,6 +1073,9 @@ dependencies = [
 [[package]]
 name = "engine-detect"
 version = "0.1.0"
+dependencies = [
+ "game_fs",
+]
 
 [[package]]
 name = "enum-iterator"
@@ -1318,6 +1326,14 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "game_fs"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3023,12 +3039,15 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
+ "cpal",
  "encoding_rs",
+ "game_fs",
  "image",
  "kira",
  "na_mpeg2_decoder",
  "pollster",
  "siglus_assets",
+ "web-time 1.1.0",
  "wgpu 0.20.1",
  "winit 0.31.0-beta.3",
 ]

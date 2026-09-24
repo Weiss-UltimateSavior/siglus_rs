@@ -277,7 +277,7 @@ struct VoiceArchive {
 impl VoiceArchive {
     fn open(path: &Path) -> Result<Self> {
         let bytes =
-            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+            game_fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         let extension = path
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -324,7 +324,7 @@ impl VoiceArchive {
         let &(offset, length) = self.entries.get(&sample).with_context(|| {
             format!("reallive: voice {sample} is not in {}", self.path.display())
         })?;
-        let bytes = std::fs::read(&self.path)?;
+        let bytes = game_fs::read(&self.path)?;
         match self.kind {
             ArchiveKind::Koepac { rate } => decode_koepac(&bytes, offset, length, rate),
             ArchiveKind::Nwk | ArchiveKind::Ovk => {
@@ -590,7 +590,7 @@ impl Sound {
         let path = resources
             .find(kind, name)
             .with_context(|| format!("reallive: sound {name:?} not found"))?;
-        let pcm = decode(std::fs::read(&path)?)
+        let pcm = decode(game_fs::read(&path)?)
             .with_context(|| format!("reallive: cannot decode {}", path.display()))?;
         // Keep short effects; music is decoded again when needed.
         if pcm.samples.len() < 2_000_000 {
@@ -960,7 +960,7 @@ impl Sound {
             .find(Kind::Koe, &loose)
             .or_else(|| resources.find(Kind::Koe, &format!("{file:04}/{loose}")))
             .with_context(|| format!("reallive: voice {id} not found"))?;
-        decode(std::fs::read(path)?)
+        decode(game_fs::read(path)?)
     }
 
     /// Whether a voice of `character` should play (`#KOEONOFF` / `UseKoe`).
