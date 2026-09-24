@@ -1,12 +1,3 @@
-#![cfg_attr(all(target_os = "horizon", not(target_env = "newlib")), no_std)]
-
-#[cfg(all(target_os = "horizon", not(target_env = "newlib")))]
-#[macro_use]
-extern crate alloc;
-
-#[cfg(all(target_os = "horizon", not(target_env = "newlib")))]
-extern crate siglus_switch_compat as std;
-
 pub mod analyze;
 pub mod api;
 pub mod apiwrapper;

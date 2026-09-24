@@ -92,5 +92,3 @@ mod tests {
         assert_eq!(th_comment_query(&comment, "artist", 1), Some(&b"Org"[..]));
     }
 }
-#[cfg(all(target_os = "horizon", not(target_env = "newlib")))]
-use alloc::vec::Vec;

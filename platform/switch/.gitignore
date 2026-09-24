@@ -1,6 +1,3 @@
-probe/target/
-window/target/
-compat/target/
 runtime/build/
 runtime/romfs/
 runtime/*.elf

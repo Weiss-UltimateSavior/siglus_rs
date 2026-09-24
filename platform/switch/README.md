@@ -62,6 +62,6 @@ Install devkitA64, libnx, deko3d, and switch-tools.  The expected installation p
 - `runtime/` — deployable libnx/deko3d frontend linked to the existing Rust engine; `source/*.glsl` are the new Switch shader sources.
 - `build_switch.sh` — packages `runtime/siglus_switch.nro`.
 - `package_game_nro.sh` — embeds a chosen game directory in a standalone NRO.
-- `window/` — retained Rust/libnx CPU bootstrap experiment; it is not the production NRO path.
-- `compat/`, `std/`, and `patches/` — Horizon compatibility work required to compile the existing engine dependency graph.
+- `rust/aarch64-switch.json` — the Rust target (`os = "horizon"`, `env = "newlib"`). The standard library is built with `-Zbuild-std`, so engine crates and their dependencies compile unmodified from crates.io.
+- `patches/` — crates that must be patched for the pinned nightly; see `patches/README.md`.
 - `ROADMAP.md` — historical staged-port notes.
