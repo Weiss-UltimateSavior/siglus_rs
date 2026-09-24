@@ -2863,6 +2863,16 @@ pub struct RuntimeConstants {
     pub obj_free: i32,
     pub obj_init_param: i32,
     pub obj_get_file_name: i32,
+
+    /// Tables derived from the ids above, built on first use.
+    object_op_tables: std::sync::OnceLock<std::sync::Arc<crate::runtime::globals::ObjectOpTables>>,
+}
+
+impl RuntimeConstants {
+    pub fn object_op_tables(&self) -> &crate::runtime::globals::ObjectOpTables {
+        self.object_op_tables
+            .get_or_init(|| std::sync::Arc::new(crate::runtime::globals::ObjectOpTables::new(self)))
+    }
 }
 
 impl Default for RuntimeConstants {
@@ -3322,6 +3332,7 @@ impl Default for RuntimeConstants {
             obj_free: elm_value::OBJECT_FREE,
             obj_init_param: elm_value::OBJECT_INIT_PARAM,
             obj_get_file_name: elm_value::OBJECT_GET_FILE_NAME,
+            object_op_tables: std::sync::OnceLock::new(),
         }
     }
 }

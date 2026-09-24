@@ -264,7 +264,19 @@ pub struct ImageManager {
     solid_to_id: HashMap<(u8, u8, u8, u8), WeakImageHandle>,
     images: HashMap<ImageKey, WeakImageHandle>,
     next_id: u32,
+    /// Recently used G00 albums, kept alive after their last handle drops.
+    /// Scripts free and recreate objects with the same image (GameData's
+    /// 1080p text overlay, once per line), which decoded the file again
+    /// every time: over 100 ms on PS Vita.
+    recent_albums: std::collections::VecDeque<(Arc<ImageAlbum>, usize)>,
 }
+
+/// Bounds of `ImageManager::recent_albums`.
+const RECENT_ALBUMS: usize = 64;
+#[cfg(any(target_os = "vita", target_os = "horizon"))]
+const RECENT_ALBUM_BYTES: usize = 24 * 1024 * 1024;
+#[cfg(not(any(target_os = "vita", target_os = "horizon")))]
+const RECENT_ALBUM_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ImageMemoryStats {
@@ -407,6 +419,45 @@ impl ImageManager {
             solid_to_id: HashMap::new(),
             images: HashMap::new(),
             next_id: 0,
+            recent_albums: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Lets the recently used albums go once nothing else holds them.
+    pub fn release_recent_albums(&mut self) {
+        self.recent_albums.clear();
+    }
+
+    /// Marks an album as just used (see `recent_albums`).
+    fn keep_recent_album(&mut self, album: &Arc<ImageAlbum>) {
+        if let Some(at) = self
+            .recent_albums
+            .iter()
+            .position(|(kept, _)| Arc::ptr_eq(kept, album))
+        {
+            if at != 0 {
+                let entry = self.recent_albums.remove(at).expect("recent album");
+                self.recent_albums.push_front(entry);
+            }
+            return;
+        }
+        let bytes = album
+            .frames
+            .read()
+            .expect("image album lock poisoned")
+            .iter()
+            .map(|entry| entry.img.rgba.len())
+            .sum::<usize>();
+        if bytes > RECENT_ALBUM_BYTES {
+            return;
+        }
+        self.recent_albums.push_front((album.clone(), bytes));
+        let mut total: usize = self.recent_albums.iter().map(|(_, bytes)| bytes).sum();
+        while self.recent_albums.len() > RECENT_ALBUMS || total > RECENT_ALBUM_BYTES {
+            let Some((_, bytes)) = self.recent_albums.pop_back() else {
+                break;
+            };
+            total -= bytes;
         }
     }
 
@@ -449,6 +500,16 @@ impl ImageManager {
     }
 
     /// Script-visible canvas size, independent of the cropped GPU texture.
+    /// The number of cuts in the album an image belongs to (a G00's
+    /// pattern count).
+    pub fn album_len(&self, id: &ImageHandle) -> usize {
+        id.album
+            .frames
+            .read()
+            .expect("image album lock poisoned")
+            .len()
+    }
+
     pub fn original_size(&self, id: &ImageHandle) -> Option<(u32, u32)> {
         let registered = self.images.get(&id.key)?;
         if registered.album.as_ptr() != Arc::as_ptr(&id.album) {
@@ -552,6 +613,7 @@ impl ImageManager {
                     count
                 );
             }
+            self.keep_recent_album(&album);
             return Ok(ImageHandle::new(album, cut));
         }
 
@@ -667,6 +729,7 @@ impl ImageManager {
 
     fn ensure_g00_album(&mut self, resolved: &Path) -> Result<Arc<ImageAlbum>> {
         if let Some(album) = self.g00_album_to_ids.get(resolved).and_then(Weak::upgrade) {
+            self.keep_recent_album(&album);
             return Ok(album);
         }
         let bytes = crate::resource::read_file_bytes(resolved)
@@ -707,6 +770,7 @@ impl ImageManager {
         }
         self.g00_album_to_ids
             .insert(resolved.to_path_buf(), Arc::downgrade(&album));
+        self.keep_recent_album(&album);
         Ok(album)
     }
 
@@ -1033,7 +1097,7 @@ mod composed_g00_tests {
     }
 
     #[test]
-    fn g00_cache_reuses_live_album_and_reloads_after_last_release() {
+    fn g00_cache_reuses_recent_album_and_reloads_after_release() {
         struct TempFile(PathBuf);
         impl Drop for TempFile {
             fn drop(&mut self) {
@@ -1064,11 +1128,18 @@ mod composed_g00_tests {
         images.organize();
         assert_eq!(images.load_file(&file.0, 0).unwrap(), second);
         drop(second);
+        // A recently used album outlives its last handle and is reused.
+        assert_eq!(images.resident_bytes(), 4);
+        let kept = images.load_file(&file.0, 0).unwrap();
+        assert_eq!(kept.key(), index);
+        drop(kept);
+        images.release_recent_albums();
         assert_eq!(images.resident_bytes(), 0);
         // Reload must also handle expired entries before organize runs.
         let reloaded = images.load_file(&file.0, 0).unwrap();
         assert!(reloaded.key() > index);
         drop(reloaded);
+        images.release_recent_albums();
         images.organize();
         assert!(images.key_to_id.is_empty());
         assert!(images.g00_album_to_ids.is_empty());

@@ -7,7 +7,7 @@
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageHandle, ImageManager};
-use ab_glyph::{Font, FontArc, FontRef, FontVec, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontArc, FontRef, PxScale, ScaleFont, point};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -340,8 +340,8 @@ impl FontCache {
         false
     }
 
-    fn install_font_face(&mut self, path: &Path, bytes: Vec<u8>, face_index: u32) -> bool {
-        match FontVec::try_from_vec_and_index(bytes, face_index) {
+    fn install_font_face(&mut self, path: &Path, data: &'static [u8], face_index: u32) -> bool {
+        match FontRef::try_from_slice_and_index(data, face_index) {
             Ok(font) => {
                 self.font = Some(FontArc::from(font));
                 self.loaded_from = Some(path.to_path_buf());
@@ -359,13 +359,10 @@ impl FontCache {
         if !crate::resource::game_file_exists(path) || !is_supported_font_path(path) {
             return false;
         }
-        let Ok(bytes) = crate::resource::read_file_bytes(path) else {
+        let Some((data, face_index)) = font_file_face(path, normalized_name) else {
             return false;
         };
-        let Some(face_index) = matching_font_face_index(&bytes, normalized_name) else {
-            return false;
-        };
-        self.install_font_face(path, bytes, face_index)
+        self.install_font_face(path, data, face_index)
     }
 
     fn try_load_font_file(&mut self, path: &Path) -> bool {
@@ -375,10 +372,10 @@ impl FontCache {
         if !crate::resource::game_file_exists(path) || !is_supported_font_path(path) {
             return false;
         }
-        let Ok(bytes) = crate::resource::read_file_bytes(path) else {
+        let Some((data, face_index)) = font_file_face(path, "") else {
             return false;
         };
-        self.install_font_face(path, bytes, 0)
+        self.install_font_face(path, data, face_index)
     }
 
     fn try_load_embedded_default_font(&mut self) -> bool {
@@ -2209,39 +2206,94 @@ fn normalize_font_name_for_match(name: &str) -> String {
         .collect()
 }
 
-fn matching_font_face_index(bytes: &[u8], normalized_name: &str) -> Option<u32> {
+/// A font file seen by any `FontCache`: the normalized names of each face,
+/// and the file's bytes once a face of it is used.
+struct FontFileInfo {
+    face_names: Vec<Vec<String>>,
+    data: Option<&'static [u8]>,
+}
+
+/// Font files by path, for the whole process. Matching a requested name
+/// needs only the face names, so a file is not read again for each new
+/// request (a 22 MiB TTC was read on every font switch, a second or more
+/// on PS Vita). Used files stay loaded once and every face and cache
+/// shares them: each switch used to keep its own copy, hundreds of MiB.
+static FONT_FILES: OnceLock<Mutex<std::collections::HashMap<PathBuf, FontFileInfo>>> =
+    OnceLock::new();
+
+/// The data of the font file at `path` and its face matching
+/// `normalized_name` (the first face for an empty name).
+fn font_file_face(path: &Path, normalized_name: &str) -> Option<(&'static [u8], u32)> {
+    let files = FONT_FILES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut files = files.lock().ok()?;
+    if let Some(info) = files.get_mut(path) {
+        let face_index = matching_face_in_names(&info.face_names, normalized_name)?;
+        let data = match info.data {
+            Some(data) => data,
+            None => {
+                let data: &'static [u8] = Box::leak(
+                    crate::resource::read_file_bytes(path)
+                        .ok()?
+                        .into_boxed_slice(),
+                );
+                info.data = Some(data);
+                data
+            }
+        };
+        return Some((data, face_index));
+    }
+    let bytes = crate::resource::read_file_bytes(path).ok()?;
+    let face_names = font_face_names(&bytes);
+    let face_index = matching_face_in_names(&face_names, normalized_name);
+    // Only files that are used are kept.
+    let data = face_index.map(|_| &*Box::leak(bytes.into_boxed_slice()));
+    files.insert(path.to_path_buf(), FontFileInfo { face_names, data });
+    Some((data?, face_index?))
+}
+
+/// The normalized engine-visible names (family, full, typographic family,
+/// WWS family, PostScript) of every face in a font file or collection.
+fn font_face_names(bytes: &[u8]) -> Vec<Vec<String>> {
+    let face_count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
+    (0..face_count)
+        .map(|face_index| {
+            let Ok(face) = ttf_parser::Face::parse(bytes, face_index) else {
+                return Vec::new();
+            };
+            face.names()
+                .into_iter()
+                .filter(|name| {
+                    matches!(
+                        name.name_id,
+                        ttf_parser::name::name_id::FAMILY
+                            | ttf_parser::name::name_id::FULL_NAME
+                            | ttf_parser::name::name_id::POST_SCRIPT_NAME
+                            | ttf_parser::name::name_id::TYPOGRAPHIC_FAMILY
+                            | ttf_parser::name::name_id::WWS_FAMILY
+                            | ttf_parser::name::name_id::COMPATIBLE_FULL
+                    )
+                })
+                .filter_map(|name| name.to_string())
+                .map(|value| normalize_font_name_for_match(value.trim_start_matches('@')))
+                .collect()
+        })
+        .collect()
+}
+
+fn matching_face_in_names(face_names: &[Vec<String>], normalized_name: &str) -> Option<u32> {
     if normalized_name.is_empty() {
         return Some(0);
     }
-
-    let face_count = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
     let mut partial_match = None;
-    for face_index in 0..face_count {
-        let Ok(face) = ttf_parser::Face::parse(bytes, face_index) else {
-            continue;
-        };
-        for name in face.names() {
-            if !matches!(
-                name.name_id,
-                ttf_parser::name::name_id::FAMILY
-                    | ttf_parser::name::name_id::FULL_NAME
-                    | ttf_parser::name::name_id::POST_SCRIPT_NAME
-                    | ttf_parser::name::name_id::TYPOGRAPHIC_FAMILY
-                    | ttf_parser::name::name_id::WWS_FAMILY
-                    | ttf_parser::name::name_id::COMPATIBLE_FULL
-            ) {
-                continue;
-            }
-            let Some(value) = name.to_string() else {
-                continue;
-            };
-            let key = normalize_font_name_for_match(value.trim_start_matches('@'));
+    for (face_index, names) in face_names.iter().enumerate() {
+        let face_index = face_index as u32;
+        for key in names {
             if key == normalized_name {
                 return Some(face_index);
             }
             if !key.is_empty()
                 && partial_match.is_none()
-                && (key.contains(normalized_name) || normalized_name.contains(&key))
+                && (key.contains(normalized_name) || normalized_name.contains(key.as_str()))
             {
                 partial_match = Some(face_index);
             }

@@ -39,6 +39,26 @@ pub fn oc_calloc_2d<T: Clone + Default>(height: usize, width: usize) -> Vec<Vec<
     oc_malloc_2d(height, width)
 }
 
+/// `oc_ycbcr_buffer_flip` as a borrowed view of `src`.
+pub fn oc_ycbcr_buffer_flip_ref(src: &YCbCrBuffer) -> crate::codec::YCbCrRef<'_> {
+    std::array::from_fn(|pli| {
+        let height = src[pli].height;
+        let stride = -src[pli].stride;
+        let offset = src[pli].data_offset as isize + ((1 - height) as isize) * (stride as isize);
+        assert!(
+            offset >= 0,
+            "oc_ycbcr_buffer_flip produced a negative data offset"
+        );
+        crate::codec::ImgPlaneRef {
+            width: src[pli].width,
+            height,
+            stride,
+            data: &src[pli].data,
+            data_offset: offset as usize,
+        }
+    })
+}
+
 pub fn oc_ycbcr_buffer_flip(dst: &mut YCbCrBuffer, src: &YCbCrBuffer) {
     for pli in 0..3 {
         let height = src[pli].height;

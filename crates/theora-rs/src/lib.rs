@@ -44,9 +44,9 @@ pub use api::{
 };
 pub use apiwrapper::{ApiInfo, ApiWrapper, CompatState, YuvBuffer};
 pub use codec::{
-    Colorspace, Comment, HuffCode, ImgPlane, Info, LegacyTheoraInfo, OC_VENDOR_STRING, PixelFmt,
-    QuantBase, QuantInfo, QuantRanges, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES, TH_PF_NFORMATS,
-    TH_VERSION_MAJOR, TH_VERSION_MINOR, TH_VERSION_SUB, YCbCrBuffer,
+    Colorspace, Comment, HuffCode, ImgPlane, ImgPlaneRef, Info, LegacyTheoraInfo, OC_VENDOR_STRING,
+    PixelFmt, QuantBase, QuantInfo, QuantRanges, TH_NDCT_TOKENS, TH_NHUFFMAN_TABLES,
+    TH_PF_NFORMATS, TH_VERSION_MAJOR, TH_VERSION_MINOR, TH_VERSION_SUB, YCbCrBuffer, YCbCrRef,
 };
 pub use decinfo::{SetupInfo, th_decode_headerin, th_setup_free};
 pub use decoder::{
@@ -54,8 +54,8 @@ pub use decoder::{
     TH_DECCTL_SET_GRANPOS, TH_DECCTL_SET_MBMODE as TH_DECCTL_SET_TELEMETRY_MBMODE,
     TH_DECCTL_SET_MV as TH_DECCTL_SET_TELEMETRY_MV, TH_DECCTL_SET_PPLEVEL,
     TH_DECCTL_SET_QI as TH_DECCTL_SET_TELEMETRY_QI, TH_DECCTL_SET_STRIPE_CB, th_decode_alloc,
-    th_decode_ctl, th_decode_free, th_decode_packetin, th_decode_ycbcr_out, th_granule_frame,
-    th_granule_time,
+    th_decode_ctl, th_decode_free, th_decode_packetin, th_decode_ycbcr_out, th_decode_ycbcr_ref,
+    th_granule_frame, th_granule_time,
 };
 pub use encoder::{
     EncoderContext, TH_ENCCTL_GET_SPLEVEL, TH_ENCCTL_GET_SPLEVEL_MAX, TH_ENCCTL_SET_DUP_COUNT,

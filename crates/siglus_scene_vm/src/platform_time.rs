@@ -9,8 +9,98 @@ pub use std::time::Duration;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use web_time::Instant;
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    not(feature = "virtual-clock")
+))]
 pub use std::time::Instant;
+
+#[cfg(feature = "virtual-clock")]
+pub use virtual_clock::{Instant, advance_virtual_clock};
+
+/// A monotonic clock that only moves when told to, with the parts of
+/// `std::time::Instant`'s API the engine uses: VM replays then run the same
+/// on every machine and at any speed.
+#[cfg(feature = "virtual-clock")]
+mod virtual_clock {
+    use std::ops::{Add, AddAssign, Sub, SubAssign};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// Nanoseconds since the virtual epoch; starts at one day so that
+    /// subtracting small durations from `now()` stays valid.
+    static NOW_NS: AtomicU64 = AtomicU64::new(86_400_000_000_000);
+
+    pub fn advance_virtual_clock(by: Duration) {
+        NOW_NS.fetch_add(by.as_nanos() as u64, Ordering::SeqCst);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Instant(u64);
+
+    impl Instant {
+        pub fn now() -> Self {
+            Self(NOW_NS.load(Ordering::SeqCst))
+        }
+
+        pub fn elapsed(&self) -> Duration {
+            Self::now().saturating_duration_since(*self)
+        }
+
+        pub fn duration_since(&self, earlier: Self) -> Duration {
+            self.saturating_duration_since(earlier)
+        }
+
+        pub fn saturating_duration_since(&self, earlier: Self) -> Duration {
+            Duration::from_nanos(self.0.saturating_sub(earlier.0))
+        }
+
+        pub fn checked_duration_since(&self, earlier: Self) -> Option<Duration> {
+            self.0.checked_sub(earlier.0).map(Duration::from_nanos)
+        }
+
+        pub fn checked_add(&self, d: Duration) -> Option<Self> {
+            self.0.checked_add(d.as_nanos() as u64).map(Self)
+        }
+
+        pub fn checked_sub(&self, d: Duration) -> Option<Self> {
+            self.0.checked_sub(d.as_nanos() as u64).map(Self)
+        }
+    }
+
+    impl Add<Duration> for Instant {
+        type Output = Self;
+        fn add(self, d: Duration) -> Self {
+            self.checked_add(d).expect("virtual instant overflow")
+        }
+    }
+
+    impl AddAssign<Duration> for Instant {
+        fn add_assign(&mut self, d: Duration) {
+            *self = *self + d;
+        }
+    }
+
+    impl Sub<Duration> for Instant {
+        type Output = Self;
+        fn sub(self, d: Duration) -> Self {
+            self.checked_sub(d).expect("virtual instant underflow")
+        }
+    }
+
+    impl SubAssign<Duration> for Instant {
+        fn sub_assign(&mut self, d: Duration) {
+            *self = *self - d;
+        }
+    }
+
+    impl Sub<Instant> for Instant {
+        type Output = Duration;
+        fn sub(self, other: Instant) -> Duration {
+            self.saturating_duration_since(other)
+        }
+    }
+}
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn unix_time_millis() -> u128 {

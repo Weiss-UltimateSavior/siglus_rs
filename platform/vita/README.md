@@ -37,35 +37,54 @@ display and storage access without loading the engine or game assets.
 
 Cross confirms, Circle cancels, the D-pad navigates, and the front touch panel
 maps to the letterboxed game viewport. The player accepts game logical sizes
-up to 1280×720 and presents at 960×544.
+up to 1920×1080 (GameData) and presents at 960×544.
 
 vita2d keeps its display buffers in CDRAM. Each sprite texture is its own
 memory block: 256 KiB or larger in CDRAM, smaller ones (text, icons) in
 uncached user memory, so they do not each occupy a 256 KiB CDRAM unit. The
-sprite texture cache evicts old entries at 16 MiB; a texture replaced while
-the current frame may still draw it is freed after the GPU finishes.
+sprite texture cache evicts old entries at 80 MiB (a 1080p full-screen layer
+is 8 MiB); a replaced texture is freed four frames later, because Vita3K's
+renderer can still read it after `sceGxmFinish`. vita2d does not initialize
+a new texture's render-target and depth fields, which `vita2d_free_texture`
+frees when non-zero; the player clears them, or a free could release an
+unrelated memory block (the newlib heap included).
+
+Sprites are drawn as textured quads with the normal, add, subtract, multiply
+and screen blend modes; the last four use extra fragment programs built from
+vita2d's own precompiled tint shader (multiply and screen take premultiplied
+textures). Overlay, masks, tone curves, meshes, emotes and position-dependent
+effects fall back to the software compositor. Wipes are drawn as a cross-fade
+of the next screen over the current one: the desktop renderer's mask and
+pattern wipes need shaders vita2d does not have.
 
 The RewriteHF `Scene.pck` used for bring-up is about 11 MiB compressed and
 43 MiB rebuilt. The engine no longer rebuilds it: the decrypted, still
 compressed pack stays in memory and a scene is decompressed when it is first
 used, shared while any stream holds it (`ScenePck::load_lazy`). Fonts are
-resolved once per requested face; the embedded default font is parsed in
-place from the executable instead of being copied (7.5 MiB) on every font
-switch. `siglus_scene_vm/examples/memory_probe.rs` runs a scene headlessly
+resolved once per requested face, and a font file is read once per process
+and shared by every face and name that uses it (GameData requests one 22 MiB
+TTC under many names; each request kept its own copy until the heap ran
+out). The embedded default font is parsed in place from the executable.
+Plain OGG sound effects of 256 KiB or more stream instead of being decoded
+whole (a long ambience loop decoded to 15 MiB). `siglus_scene_vm/examples/memory_probe.rs` runs a scene headlessly
 with a counting allocator to measure live and peak heap use and to trace
 large allocations (`MEMORY_PROBE_BIG=bytes`). On a RewriteHF route it went
 from about 105 MiB live to about 55 MiB with these changes.
 The CPU RGBA frame is allocated only when a complex effect needs it; a
 1280×720 RGBA frame uses about 3.5 MiB. Audio output uses 512 stereo frames
-and a 128 KiB worker stack. The newlib heap is 256 MiB, reserved at startup
-(extended memory mode); with 160 MiB, RewriteHF ran out of memory when a route
-began, while about 180 MiB of user memory stayed unused beside the heap. If an
+and a 128 KiB worker stack. The newlib heap is 320 MiB, reserved at startup
+(extended memory mode). With 256 MiB about 100 MiB of user memory stayed
+unused beside it while GameData's 1080p title menu ran the heap out. If an
 allocation still fails, the player log records its size, the heap figures and
 the last VM status before the abort. Vita movie streams
 keep one presented MPEG/OMV frame and one queued frame. MPEG, OMV, and WMV convert
 directly to no more than 960×544 RGBA pixels; for the RewriteHF 1280×720
 opening this reduces each frame from 3.69 MiB to 2.07 MiB. OMV loop-head
 frame caching is disabled on Vita; indexed seeking handles loop restarts.
+An OMV frame is converted straight from the Theora decoder's planes. The
+decoder keeps three reference frames, as libtheora's does (it had six), and
+no copy of the output frame; a 1920×1440 4:4:4 RGBA OMV frame is 8.6 MiB, and
+GameData's title menu plays four such streams at once.
 Movie streams that a scene has not polled for 120 engine frames release their
 decoder and frame queue. (A wall-clock limit evicted the movie playing when one
 frame stalled, and the restart then sat on its first frame.) A restarted MPEG
@@ -110,10 +129,13 @@ The player links and packages with VitaSDK and `cargo-vita`. The vitaGL build
 ran on Vita3K with RewriteHF: it parsed `Gameexe.dat`, initialized the VM,
 played the Key logo and the roughly 100-second `op00.mpg` opening, and reached
 the title screen once BGM streaming was in place; entering a route then ran the
-160 MiB heap out of memory, which led to the memory work above. The vita2d
-renderer, the lazily loaded scene pack and the font changes have been built but
-not yet run on Vita3K or hardware. Vita3K still reports a missing font package.
-Its SDL audio subsystem did not initialize and its `sceAudioOutOpenPort`
-implementation crashed, so emulator runs used `disable-audio`. No physical Vita
-run or complete RewriteHF playthrough has been verified. The port remains
+160 MiB heap out of memory, which led to the memory work above. With the
+vita2d renderer, RewriteHF's opening, title and the start of the story run at
+55–60 fps on Vita3K. GameData (1920×1080) reaches its title menu and prologue
+with audio on Vita3K; its particle frame actions (`$$fa_particle`, thousands
+of interpreted object operations per frame) still drop the prologue to 17–30
+fps, the VM's object-operation path being about 30 times slower than on a
+desktop CPU. Earlier Vita3K builds crashed in `sceAudioOutOpenPort`; the
+`disable-audio` marker remains for such emulators. No physical Vita run or
+complete playthrough has been verified. The port remains
 experimental; see [ROADMAP.md](ROADMAP.md).

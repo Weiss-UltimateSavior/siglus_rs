@@ -2,6 +2,17 @@
 //!
 //! Code comments are intentionally in English.
 
+/// Whether a debug environment variable is set, read once per call site:
+/// these checks sit on per-object and per-frame paths, where reading the
+/// environment each time (a lock, a scan and an allocation) is measurable
+/// on consoles.
+macro_rules! env_is_set {
+    ($name:literal) => {{
+        static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SET.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+
 pub mod app_path;
 pub mod platform_time;
 

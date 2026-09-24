@@ -5,7 +5,6 @@
 //! nearest-neighbour filtering.
 
 use std::borrow::Cow;
-use std::ffi::CString;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -32,10 +31,9 @@ pub fn run(root: &Path, nls: Option<Nls>) -> i32 {
         }
     };
     if engine == EngineKind::Siglus {
-        let Ok(root) = CString::new(root.to_string_lossy().into_owned()) else {
-            return 1;
-        };
-        return unsafe { siglus_scene_vm::pump_host::siglus_run_entry(root.as_ptr()) };
+        // Like the framebuffer engines below, the window is sized in
+        // physical pixels: no HiDPI scaling for any engine in the app.
+        return siglus_scene_vm::pump_host::run_game(&root.to_string_lossy(), true);
     }
     match run_framebuffer(root, engine, nls) {
         Ok(()) => 0,

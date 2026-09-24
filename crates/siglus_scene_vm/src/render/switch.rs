@@ -28,6 +28,7 @@ unsafe extern "C" {
     fn siglus_vita_gpu_begin(width: u32, height: u32) -> bool;
     fn siglus_vita_gpu_draw(
         key: u32,
+        source_id: u64,
         pixels: *const u8,
         image_width: u32,
         image_height: u32,
@@ -37,6 +38,9 @@ unsafe extern "C" {
         blend: u32,
     ) -> bool;
     fn siglus_vita_gpu_end(wait_vsync: bool);
+    fn siglus_vita_gpu_begin_layer(width: u32, height: u32) -> bool;
+    fn siglus_vita_gpu_end_layer() -> bool;
+    fn siglus_vita_gpu_draw_layer(alpha: f32) -> bool;
 }
 
 #[cfg(target_os = "vita")]
@@ -96,12 +100,18 @@ struct BakeKey {
     image_key: u32,
     pixels: usize,
     effects: [u8; 11],
+    /// Colour multiplied by alpha, for the GPU's multiply and screen modes.
+    premultiply: bool,
 }
 
 #[cfg(target_os = "vita")]
 struct BakedImage {
     image: Arc<RgbaImage>,
     gpu_key: u32,
+    /// Identifies these pixels to the GPU texture cache (the bake key's
+    /// hash): baked images share a texture across effect values, and a new
+    /// bake can reuse a freed one's address.
+    source_id: u64,
     last_frame: u64,
 }
 
@@ -130,7 +140,7 @@ fn sprite_color_effects(sprite: &Sprite) -> [u8; 11] {
 /// bright/dark, colour rate and add), which does not depend on position or
 /// on the sprite's alpha, applied once to a whole image.
 #[cfg(target_os = "vita")]
-fn bake_color_effects(image: &RgbaImage, sprite: &Sprite) -> RgbaImage {
+fn bake_color_effects(image: &RgbaImage, sprite: &Sprite, half: bool) -> RgbaImage {
     let rev = sprite.reverse as f32 / 255.0;
     let mono = sprite.mono as f32 / 255.0;
     let bright = sprite.bright as f32 / 255.0;
@@ -146,33 +156,111 @@ fn bake_color_effects(image: &RgbaImage, sprite: &Sprite) -> RgbaImage {
         sprite.color_add_g as f32 / 255.0,
         sprite.color_add_b as f32 / 255.0,
     ];
-    let mut rgba = image.rgba.clone();
-    for px in rgba.chunks_exact_mut(4) {
-        if px[3] == 0 {
-            continue;
+    let effect = |channel: usize, value: f32, mono_before: f32| -> u8 {
+        let mut c = value * (1.0 - rev) + (1.0 - value) * rev;
+        c = c * (1.0 - mono) + mono_before * mono;
+        c = (c + bright - dark).clamp(0.0, 1.0);
+        c = (c * (1.0 - color_rate) + target[channel] * color_rate + add[channel]).clamp(0.0, 1.0);
+        (c * 255.0).round() as u8
+    };
+    let mut out = if half {
+        half_size(image)
+    } else {
+        image.clone()
+    };
+    if mono == 0.0 {
+        // Without mono every channel maps on its own: the same formula,
+        // evaluated once per value (a 1080p layer took over a second a
+        // frame on PS Vita while its effects animated).
+        let lut: [[u8; 256]; 3] = std::array::from_fn(|channel| {
+            std::array::from_fn(|v| effect(channel, v as f32 / 255.0, 0.0))
+        });
+        for px in out.rgba.chunks_exact_mut(4) {
+            if px[3] != 0 {
+                px[0] = lut[0][px[0] as usize];
+                px[1] = lut[1][px[1] as usize];
+                px[2] = lut[2][px[2] as usize];
+            }
         }
-        let mut color = [
-            px[0] as f32 / 255.0,
-            px[1] as f32 / 255.0,
-            px[2] as f32 / 255.0,
-        ];
-        let mono_before = color[0] * 0.2989 + color[1] * 0.5886 + color[2] * 0.1145;
-        for channel in 0..3 {
-            color[channel] = color[channel] * (1.0 - rev) + (1.0 - color[channel]) * rev;
-            color[channel] = color[channel] * (1.0 - mono) + mono_before * mono;
-            color[channel] = (color[channel] + bright - dark).clamp(0.0, 1.0);
-            color[channel] =
-                (color[channel] * (1.0 - color_rate) + target[channel] * color_rate + add[channel])
-                    .clamp(0.0, 1.0);
-            px[channel] = (color[channel] * 255.0).round() as u8;
+    } else {
+        for px in out.rgba.chunks_exact_mut(4) {
+            if px[3] == 0 {
+                continue;
+            }
+            let color = [
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+            ];
+            let mono_before = color[0] * 0.2989 + color[1] * 0.5886 + color[2] * 0.1145;
+            for channel in 0..3 {
+                px[channel] = effect(channel, color[channel], mono_before);
+            }
+        }
+    }
+    out
+}
+
+/// Images larger than 720p are baked at half size: a 1080p game is drawn
+/// at 960x544 on PS Vita, and the sprite geometry still comes from the
+/// source image.
+#[cfg(target_os = "vita")]
+fn bake_at_half_size(image: &RgbaImage) -> bool {
+    u64::from(image.width) * u64::from(image.height) > 1280 * 720
+}
+
+/// A 2x2 box-filtered copy.
+#[cfg(target_os = "vita")]
+fn half_size(image: &RgbaImage) -> RgbaImage {
+    let (w, h) = (image.width as usize, image.height as usize);
+    let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut rgba = vec![0u8; hw * hh * 4];
+    for y in 0..hh {
+        let (y0, y1) = ((2 * y).min(h - 1), (2 * y + 1).min(h - 1));
+        for x in 0..hw {
+            let (x0, x1) = ((2 * x).min(w - 1), (2 * x + 1).min(w - 1));
+            let out = (y * hw + x) * 4;
+            for c in 0..4 {
+                let sum = u32::from(image.rgba[(y0 * w + x0) * 4 + c])
+                    + u32::from(image.rgba[(y0 * w + x1) * 4 + c])
+                    + u32::from(image.rgba[(y1 * w + x0) * 4 + c])
+                    + u32::from(image.rgba[(y1 * w + x1) * 4 + c]);
+                rgba[out + c] = ((sum + 2) / 4) as u8;
+            }
         }
     }
     RgbaImage {
-        width: image.width,
-        height: image.height,
+        width: hw as u32,
+        height: hh as u32,
         center_x: image.center_x,
         center_y: image.center_y,
         rgba,
+    }
+}
+
+#[cfg(target_os = "vita")]
+fn premultiply_alpha(image: &mut RgbaImage) {
+    for px in image.rgba.chunks_exact_mut(4) {
+        let alpha = u32::from(px[3]);
+        if alpha != 255 {
+            for channel in &mut px[..3] {
+                *channel = ((u32::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// The GPU blend mode (`siglus_vita_gpu_draw`'s index) for a sprite's
+/// blend, if the GPU has one: overlay depends on the destination per pixel.
+#[cfg(target_os = "vita")]
+fn vita_gpu_blend(blend: SpriteBlend) -> Option<u32> {
+    match blend {
+        SpriteBlend::Normal => Some(0),
+        SpriteBlend::Add => Some(1),
+        SpriteBlend::Sub => Some(2),
+        SpriteBlend::Mul => Some(3),
+        SpriteBlend::Screen => Some(4),
+        SpriteBlend::Overlay => None,
     }
 }
 
@@ -290,9 +378,17 @@ impl Renderer {
         self.framebuffer
             .resize(self.width as usize * self.height as usize * 4, 0);
         self.framebuffer.fill(0);
-        for item in frame.debug_flatten() {
-            let sprite = &item.sprite;
-            if !sprite.visible {
+        for (item, fade) in frame.flat_draw_plan() {
+            let faded;
+            let sprite = if fade < 1.0 {
+                let mut copy = item.sprite.clone();
+                copy.alpha = (f32::from(copy.alpha) * fade).round() as u8;
+                faded = copy;
+                &faded
+            } else {
+                &item.sprite
+            };
+            if !sprite.visible || sprite.alpha == 0 {
                 continue;
             }
             if sprite.mesh_kind != 0 && sprite.mesh_file_name.is_some() {
@@ -326,11 +422,17 @@ impl Renderer {
     #[cfg(target_os = "vita")]
     fn try_render_gpu(&mut self, images: &ImageManager, frame: &RenderFrame) -> bool {
         if frame.wipe.is_some() {
-            vita_stats::reason(vita_stats::WIPE);
-            return false;
+            vita_stats::gpu_wipe();
         }
-        let sprites = frame.debug_flatten();
-        for item in &sprites {
+        let (layer, mut draws) = frame.draw_plan();
+        let checked = layer
+            .iter()
+            .copied()
+            .chain(draws.iter().filter_map(|draw| match draw {
+                crate::layer::FrameDraw::Sprite(item, _) => Some(*item),
+                crate::layer::FrameDraw::Layer(_) => None,
+            }));
+        for item in checked {
             let sprite = &item.sprite;
             if !sprite.visible {
                 continue;
@@ -343,7 +445,7 @@ impl Renderer {
                 vita_stats::MASK
             } else if sprite.wipe_src_image_id.is_some() {
                 vita_stats::WIPE
-            } else if !matches!(sprite.blend, SpriteBlend::Normal | SpriteBlend::Add) {
+            } else if vita_gpu_blend(sprite.blend).is_none() {
                 vita_stats::BLEND
             } else if sprite.wipe_fx_mode != 0 || sprite.mask_mode != 0 {
                 // Colour effects are baked into the image (below); these
@@ -355,35 +457,45 @@ impl Renderer {
             vita_stats::reason(reason);
             return false;
         }
+        self.frame_no = self.frame_no.wrapping_add(1);
+        if !layer.is_empty() {
+            if unsafe { siglus_vita_gpu_begin_layer(self.width, self.height) } {
+                for item in &layer {
+                    if !self.gpu_draw_sprite(images, &item.sprite, 1.0) {
+                        vita_stats::reason(vita_stats::BLIT_FAILED);
+                        return false;
+                    }
+                }
+                if !unsafe { siglus_vita_gpu_end_layer() } {
+                    return false;
+                }
+            } else {
+                // No render target: fade the incoming sprites one by one.
+                let at = draws
+                    .iter()
+                    .position(|draw| matches!(draw, crate::layer::FrameDraw::Layer(_)))
+                    .expect("wipe layer draw");
+                let crate::layer::FrameDraw::Layer(alpha) = draws.remove(at) else {
+                    unreachable!()
+                };
+                let faded: Vec<_> = layer
+                    .iter()
+                    .map(|item| crate::layer::FrameDraw::Sprite(item, alpha))
+                    .collect();
+                draws.splice(at..at, faded);
+            }
+        }
         if !unsafe { siglus_vita_gpu_begin(self.width, self.height) } {
             return false;
         }
-        self.frame_no = self.frame_no.wrapping_add(1);
-        for item in &sprites {
-            let sprite = &item.sprite;
-            if !sprite.visible {
-                continue;
-            }
-            let Some(handle) = sprite.image_id.as_ref() else {
-                continue;
-            };
-            let Some(image) = images.get(handle) else {
-                continue;
-            };
-            let blend = u32::from(sprite.blend == SpriteBlend::Add);
-            let needs_bake = sprite.reverse != 0
-                || sprite.mono != 0
-                || sprite.bright != 0
-                || sprite.dark != 0
-                || sprite.color_rate != 0
-                || sprite.color_add_r != 0
-                || sprite.color_add_g != 0
-                || sprite.color_add_b != 0;
-            let drawn = if !needs_bake {
-                self.gpu_blit(sprite, handle.key().0, &image, blend)
-            } else {
-                let (key, baked) = self.baked_image(handle.key().0, &image, sprite);
-                self.gpu_blit(sprite, key, &baked, blend)
+        for draw in draws {
+            let drawn = match draw {
+                crate::layer::FrameDraw::Sprite(item, fade) => {
+                    self.gpu_draw_sprite(images, &item.sprite, fade)
+                }
+                crate::layer::FrameDraw::Layer(alpha) => unsafe {
+                    siglus_vita_gpu_draw_layer(alpha)
+                },
             };
             if !drawn {
                 vita_stats::reason(vita_stats::BLIT_FAILED);
@@ -394,6 +506,51 @@ impl Renderer {
         true
     }
 
+    /// Draws one sprite on the GPU at an extra alpha; false when the GPU
+    /// cannot (the frame then falls back to the software compositor).
+    #[cfg(target_os = "vita")]
+    fn gpu_draw_sprite(&mut self, images: &ImageManager, sprite: &Sprite, fade: f32) -> bool {
+        if !sprite.visible || fade <= 0.0 {
+            return true;
+        }
+        let Some(handle) = sprite.image_id.as_ref() else {
+            return true;
+        };
+        let Some(image) = images.get(handle) else {
+            return true;
+        };
+        let Some(blend) = vita_gpu_blend(sprite.blend) else {
+            return false;
+        };
+        // Multiply and screen take premultiplied colour (see the Vita
+        // player's blend table).
+        let premultiply = matches!(sprite.blend, SpriteBlend::Mul | SpriteBlend::Screen);
+        let has_effects = sprite.reverse != 0
+            || sprite.mono != 0
+            || sprite.bright != 0
+            || sprite.dark != 0
+            || sprite.color_rate != 0
+            || sprite.color_add_r != 0
+            || sprite.color_add_g != 0
+            || sprite.color_add_b != 0;
+        if !has_effects && !premultiply {
+            let source_id = image.rgba.as_ptr() as u64;
+            self.gpu_blit(
+                sprite,
+                handle.key().0,
+                source_id,
+                &image,
+                &image,
+                blend,
+                fade,
+            )
+        } else {
+            let (key, source_id, baked) =
+                self.baked_image(handle.key().0, &image, sprite, has_effects, premultiply);
+            self.gpu_blit(sprite, key, source_id, &image, &baked, blend, fade)
+        }
+    }
+
     #[cfg(target_os = "vita")]
     /// The image with the sprite's colour effects applied, made once per
     /// image and set of effect values.
@@ -402,19 +559,37 @@ impl Renderer {
         image_key: u32,
         image: &Arc<RgbaImage>,
         sprite: &Sprite,
-    ) -> (u32, Arc<RgbaImage>) {
+        effects: bool,
+        premultiply: bool,
+    ) -> (u32, u64, Arc<RgbaImage>) {
         let key = BakeKey {
             image_key,
             pixels: image.rgba.as_ptr() as usize,
-            effects: sprite_color_effects(sprite),
+            effects: if effects {
+                sprite_color_effects(sprite)
+            } else {
+                [0; 11]
+            },
+            premultiply,
         };
         let frame_no = self.frame_no;
         if let Some(entry) = self.baked.get_mut(&key) {
             entry.last_frame = frame_no;
-            return (entry.gpu_key, entry.image.clone());
+            return (entry.gpu_key, entry.source_id, entry.image.clone());
         }
         vita_stats::baked();
-        let baked = Arc::new(bake_color_effects(image, sprite));
+        let half = bake_at_half_size(image);
+        let mut baked = if effects {
+            bake_color_effects(image, sprite, half)
+        } else if half {
+            half_size(image)
+        } else {
+            RgbaImage::clone(image)
+        };
+        if premultiply {
+            premultiply_alpha(&mut baked);
+        }
+        let baked = Arc::new(baked);
         let bytes = baked.rgba.len();
         while self.baked_bytes + bytes > BAKED_BUDGET_BYTES {
             let Some((&oldest, _)) = self
@@ -429,31 +604,57 @@ impl Renderer {
                 self.baked_bytes -= old.image.rgba.len();
             }
         }
-        // GPU texture keys for baked images live above the image-key range.
+        // GPU texture keys for baked images live above the image-key range,
+        // one per effect variant: sprites sharing an image with different
+        // effects in one frame (particles) each keep their own texture.
         let gpu_key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             key.hash(&mut hasher);
             0x8000_0000 | (hasher.finish() as u32 & 0x7fff_ffff)
         };
+        let source_id = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
         self.baked_bytes += bytes;
+        vita_stats::baked_bytes(self.baked_bytes);
         self.baked.insert(
             key,
             BakedImage {
                 image: baked.clone(),
                 gpu_key,
+                source_id,
                 last_frame: frame_no,
             },
         );
-        (gpu_key, baked)
+        (gpu_key, source_id, baked)
     }
 
     #[cfg(target_os = "vita")]
-    fn gpu_blit(&self, sprite: &Sprite, key: u32, image: &RgbaImage, blend: u32) -> bool {
-        if image.width == 0 || image.height == 0 || image.width > 2048 || image.height > 2048 {
+    /// Draws `texture` where `image` (the sprite's source image, whose size
+    /// the geometry uses) goes; the texture may be a smaller baked copy.
+    fn gpu_blit(
+        &self,
+        sprite: &Sprite,
+        key: u32,
+        source_id: u64,
+        image: &RgbaImage,
+        texture: &RgbaImage,
+        blend: u32,
+        fade: f32,
+    ) -> bool {
+        if image.width == 0 || image.height == 0 {
             return false;
         }
-        if image.rgba.len() < image.width as usize * image.height as usize * 4 {
+        if texture.width == 0
+            || texture.height == 0
+            || texture.width > 2048
+            || texture.height > 2048
+            || texture.rgba.len() < texture.width as usize * texture.height as usize * 4
+        {
             return false;
         }
         let (dst_x, dst_y, left, top, right, bottom, u0, v0, u1, v1) = match sprite.fit {
@@ -566,13 +767,14 @@ impl Renderer {
             bottom: self.height as i32,
         });
         let clip = [clip.left, clip.top, clip.right, clip.bottom];
-        let alpha = sprite.alpha as f32 * sprite.tr as f32 / 65_025.0;
+        let alpha = sprite.alpha as f32 * sprite.tr as f32 / 65_025.0 * fade;
         unsafe {
             siglus_vita_gpu_draw(
                 key,
-                image.rgba.as_ptr(),
-                image.width,
-                image.height,
+                source_id,
+                texture.rgba.as_ptr(),
+                texture.width,
+                texture.height,
                 vertices.as_ptr(),
                 clip.as_ptr(),
                 alpha,
@@ -1761,6 +1963,45 @@ pub mod vita_stats {
     static CPU_US: AtomicU64 = AtomicU64::new(0);
     static REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
     static BAKED: AtomicU64 = AtomicU64::new(0);
+    static WIPE_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+    /// Host phases timed per frame: script pump, element tick, render-frame
+    /// build (the renderer itself is `GPU_US`/`CPU_US`).
+    pub const PUMP: usize = 0;
+    pub const TICK: usize = 1;
+    pub const BUILD: usize = 2;
+    const PHASE_NAMES: [&str; 3] = ["pump", "tick", "build"];
+    static PHASE_US: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    static PHASE_MAX_US: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+    /// This frame's times (pump, tick, build, render), for the slow-frame
+    /// log; cleared by `take_frame_detail`.
+    static FRAME_US: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+    pub fn phase(index: usize, start: crate::platform_time::Instant) {
+        let us = start.elapsed().as_micros() as u64;
+        PHASE_US[index].fetch_add(us, Ordering::Relaxed);
+        PHASE_MAX_US[index].fetch_max(us, Ordering::Relaxed);
+        FRAME_US[index].fetch_add(us, Ordering::Relaxed);
+    }
+
+    /// The current frame's phase times, then reset.
+    pub fn take_frame_detail() -> String {
+        let [pump, tick, build, render] =
+            std::array::from_fn(|i| FRAME_US[i].swap(0, Ordering::Relaxed));
+        format!("pump {pump} us, tick {tick} us, build {build} us, render {render} us")
+    }
+    static BAKED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    /// Bytes held by the baked-image cache now.
+    pub(super) fn baked_bytes(bytes: usize) {
+        BAKED_BYTES.store(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// A frame during a wipe (drawn as a cross-fade when the GPU can).
+    pub(super) fn gpu_wipe() {
+        WIPE_FRAMES.fetch_add(1, Ordering::Relaxed);
+    }
 
     pub(super) fn baked() {
         BAKED.fetch_add(1, Ordering::Relaxed);
@@ -1772,6 +2013,7 @@ pub mod vita_stats {
 
     pub(super) fn record(gpu: bool, start: crate::platform_time::Instant) {
         let us = start.elapsed().as_micros() as u64;
+        FRAME_US[3].fetch_add(us, Ordering::Relaxed);
         if gpu {
             GPU_FRAMES.fetch_add(1, Ordering::Relaxed);
             GPU_US.fetch_add(us, Ordering::Relaxed);
@@ -1795,12 +2037,27 @@ pub mod vita_stats {
                 (n > 0).then(|| format!("{name}={n}"))
             })
             .collect();
+        let frames = (gpu + cpu).max(1);
+        let phases: Vec<String> = PHASE_NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                format!(
+                    "{name} avg {} max {}",
+                    PHASE_US[i].swap(0, Ordering::Relaxed) / frames,
+                    PHASE_MAX_US[i].swap(0, Ordering::Relaxed)
+                )
+            })
+            .collect();
         format!(
-            "render gpu-frames={gpu} (avg {} us) cpu-frames={cpu} (avg {} us) cpu-reasons=[{}] effect-bakes={}",
+            "phases [{}] render gpu-frames={gpu} (avg {} us) cpu-frames={cpu} (avg {} us) cpu-reasons=[{}] effect-bakes={} baked-bytes={} wipe-frames={}",
+            phases.join(", "),
             gpu_us.checked_div(gpu).unwrap_or(0),
             cpu_us.checked_div(cpu).unwrap_or(0),
             reasons.join(" "),
-            BAKED.swap(0, Ordering::Relaxed)
+            BAKED.swap(0, Ordering::Relaxed),
+            BAKED_BYTES.load(Ordering::Relaxed),
+            WIPE_FRAMES.swap(0, Ordering::Relaxed)
         )
     }
 }

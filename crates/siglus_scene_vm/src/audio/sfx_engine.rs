@@ -10,6 +10,69 @@ use kira::Volume;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::tween::Tween;
 
+#[cfg(not(target_arch = "wasm32"))]
+type StreamingSoundData = kira::sound::streaming::StreamingSoundData<kira::sound::FromFileError>;
+#[cfg(not(target_arch = "wasm32"))]
+type StreamingSoundHandle =
+    kira::sound::streaming::StreamingSoundHandle<kira::sound::FromFileError>;
+
+/// Plain OGG sounds at least this large (roughly ten seconds or more:
+/// ambience and long loops) are decoded while they play. Decoded in full
+/// they cost ~375 KiB per second as Kira frames, 15 MiB for one of
+/// GameData's loops.
+#[cfg(not(target_arch = "wasm32"))]
+const STREAM_OGG_MIN_BYTES: u64 = 256 * 1024;
+
+/// A playing slot sound: short sounds are decoded up front, long OGG ones
+/// stream.
+#[derive(Debug)]
+enum SlotHandle {
+    Static(StaticSoundHandle),
+    #[cfg(not(target_arch = "wasm32"))]
+    Streaming(StreamingSoundHandle),
+}
+
+impl SlotHandle {
+    fn set_volume(&mut self, volume: Volume, tween: Tween) {
+        match self {
+            Self::Static(handle) => handle.set_volume(volume, tween),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Streaming(handle) => handle.set_volume(volume, tween),
+        }
+    }
+
+    fn pause(&mut self, tween: Tween) {
+        match self {
+            Self::Static(handle) => handle.pause(tween),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Streaming(handle) => handle.pause(tween),
+        }
+    }
+
+    fn resume(&mut self, tween: Tween) {
+        match self {
+            Self::Static(handle) => handle.resume(tween),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Streaming(handle) => handle.resume(tween),
+        }
+    }
+
+    fn stop(&mut self, tween: Tween) {
+        match self {
+            Self::Static(handle) => handle.stop(tween),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Streaming(handle) => handle.stop(tween),
+        }
+    }
+}
+
+/// Sound data for `SfxEngine::start_in_slot`.
+enum SlotSound {
+    Static(StaticSoundData),
+    #[cfg(not(target_arch = "wasm32"))]
+    Streaming(StreamingSoundData),
+}
+
 use crate::audio::bgm::{
     KoeSource, decode_bgm_to_wav_bytes, decode_ovk_entry_by_no_to_wav_bytes, resolve_koe_source,
 };
@@ -29,7 +92,7 @@ fn decode_koe_no_for_project(project_dir: &Path, koe_no: i64) -> Result<Vec<u8>>
                 .wav_bytes
         }
     };
-    if std::env::var_os("SG_AUDIO_TRACE").is_some() {
+    if env_is_set!("SG_AUDIO_TRACE") {
         eprintln!(
             "[SG_AUDIO_TRACE] koe resolved koe_no={} source={:?} wav_ms={:?}",
             koe_no,
@@ -103,7 +166,7 @@ pub(crate) fn wav_duration_ms(wav: &[u8]) -> Option<u64> {
 
 #[derive(Debug)]
 struct Slot {
-    handle: Option<StaticSoundHandle>,
+    handle: Option<SlotHandle>,
     /// Logical end time for non-looping playback. This remains available when
     /// audio output is disabled, so WAIT/CHECK keep script-time semantics.
     until: Option<Instant>,
@@ -293,6 +356,9 @@ pub struct SfxEngine {
     volume_raw: u8,
     track_kind: TrackKind,
     slots: Vec<Slot>,
+    /// `streamed_ogg_duration_ms` results by file.
+    #[cfg(not(target_arch = "wasm32"))]
+    streamed_durations: HashMap<PathBuf, Option<u64>>,
 }
 
 impl SfxEngine {
@@ -308,6 +374,8 @@ impl SfxEngine {
             volume_raw: 255,
             track_kind,
             slots: (0..slot_cnt).map(|_| Slot::default()).collect(),
+            #[cfg(not(target_arch = "wasm32"))]
+            streamed_durations: HashMap::new(),
         }
     }
 
@@ -421,6 +489,23 @@ impl SfxEngine {
             bail!("slot out of range: {slot}");
         }
         let path = self.resolve_path(file_name)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(bytes) = self.streamable_ogg(&path)? {
+            let duration_ms = self.streamed_ogg_duration_ms(&path, &bytes)?;
+            let data = StreamingSoundData::from_cursor(Cursor::new(bytes))
+                .with_context(|| format!("kira: open OGG stream: {}", path.display()))?;
+            self.start_in_slot(
+                audio,
+                slot,
+                file_name,
+                Some(SlotSound::Streaming(data)),
+                duration_ms,
+                loop_flag,
+                fade_in_ms,
+                ready_only,
+            )?;
+            return Ok(path);
+        }
         let wav = self.decode_to_wav(&path)?;
         self.play_decoded_wav_in_slot_with_options(
             audio, slot, file_name, wav, loop_flag, fade_in_ms, ready_only,
@@ -500,18 +585,96 @@ impl SfxEngine {
             bail!("slot out of range: {slot}");
         }
         let duration_ms = wav_duration_ms(&wav).or(Some(2000));
+        let sound = if audio.is_enabled() {
+            Some(SlotSound::Static(
+                StaticSoundData::from_cursor(Cursor::new(wav)).context("kira: decode WAV bytes")?,
+            ))
+        } else {
+            None
+        };
+        self.start_in_slot(
+            audio,
+            slot,
+            display_name,
+            sound,
+            duration_ms,
+            loop_flag,
+            fade_in_ms,
+            ready_only,
+        )
+    }
 
+    /// A streamed OGG's length as the whole-file decode measured it (the
+    /// WAV `decode_to_wav` made): script waits end by it, and the stream's
+    /// own length can be tens of milliseconds longer. Counted once per file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn streamed_ogg_duration_ms(&mut self, path: &Path, bytes: &[u8]) -> Result<Option<u64>> {
+        if let Some(&duration) = self.streamed_durations.get(path) {
+            return Ok(duration);
+        }
+        let (channels, sample_rate, samples) =
+            siglus_assets::vorbis::ogg_vorbis_decoded_len(Cursor::new(bytes))
+                .with_context(|| format!("measure ogg: {}", path.display()))?;
+        // As `pcm16_to_wav_bytes` sizes the WAV and `wav_duration_ms` reads
+        // it back.
+        let data_size = u64::from((samples * 2) as u32);
+        let byte_rate = sample_rate.saturating_mul(u32::from(channels.saturating_mul(2)));
+        let duration = (byte_rate != 0)
+            .then(|| data_size * 1000 / u64::from(byte_rate))
+            .or(Some(2000));
+        self.streamed_durations.insert(path.to_path_buf(), duration);
+        Ok(duration)
+    }
+
+    /// The file's bytes when it is played as a stream (see
+    /// `STREAM_OGG_MIN_BYTES`). Encrypted OWP/OVK and small files are
+    /// decoded whole.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn streamable_ogg(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+        let is_ogg = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("ogg"));
+        if !is_ogg {
+            return Ok(None);
+        }
+        let bytes = crate::resource::read_file_bytes(path)
+            .with_context(|| format!("read ogg: {}", path.display()))?;
+        Ok((bytes.len() as u64 >= STREAM_OGG_MIN_BYTES).then_some(bytes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_in_slot(
+        &mut self,
+        audio: &mut AudioHub,
+        slot: usize,
+        display_name: &str,
+        sound: Option<SlotSound>,
+        duration_ms: Option<u64>,
+        loop_flag: bool,
+        fade_in_ms: i64,
+        ready_only: bool,
+    ) -> Result<()> {
         // C_tnm_player::reinit/release_sound discards the previous slot source.
         self.stop_slot(slot, None)?;
 
         let mut handle = None;
-        if audio.is_enabled() {
-            let mut data =
-                StaticSoundData::from_cursor(Cursor::new(wav)).context("kira: decode WAV bytes")?;
-            if loop_flag {
-                data = data.loop_region(0.0..);
-            }
-            let mut new_handle = audio.play_static(self.track_kind, data)?;
+        if let Some(sound) = sound.filter(|_| audio.is_enabled()) {
+            let mut new_handle = match sound {
+                SlotSound::Static(mut data) => {
+                    if loop_flag {
+                        data = data.loop_region(0.0..);
+                    }
+                    SlotHandle::Static(audio.play_static(self.track_kind, data)?)
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                SlotSound::Streaming(mut data) => {
+                    if loop_flag {
+                        data = data.loop_region(0.0..);
+                    }
+                    SlotHandle::Streaming(audio.play_streaming(self.track_kind, data)?)
+                }
+            };
             let amplitude = self.slots[slot].amplitude();
             if ready_only {
                 new_handle.set_volume(Volume::Amplitude(amplitude), Tween::default());
@@ -1140,7 +1303,15 @@ impl KoeEngine {
             return;
         };
         let koe_no = cache_key.0;
-        match rx.try_recv() {
+        // Virtual-clock replays wait for the decode, so the frame a voice
+        // starts on does not depend on the worker thread's speed.
+        #[cfg(feature = "virtual-clock")]
+        let received = rx
+            .recv()
+            .map_err(|_| std::sync::mpsc::TryRecvError::Disconnected);
+        #[cfg(not(feature = "virtual-clock"))]
+        let received = rx.try_recv();
+        match received {
             Ok(Ok(wav)) => {
                 if self.decode_cache.len() < 24 {
                     self.decode_cache

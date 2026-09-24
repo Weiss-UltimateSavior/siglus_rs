@@ -33,9 +33,9 @@ use crate::runtime::forms::pcmevent as pcmevent_form;
 use crate::runtime::forms::syscom as syscom_form;
 use scene_metadata::SceneMetadata;
 
+use crate::runtime::globals::{HashMap, HashSet};
 use anyhow::{Result, anyhow};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -1504,9 +1504,9 @@ impl CommandContext {
             globals: globals::GlobalState::default(),
             tonecurve,
             excall_state: ExcallCompatState::default(),
-            render_object_keys_scratch: HashSet::new(),
-            mouse_cursor_cache: HashMap::new(),
-            failed_gfx_image_repairs: HashSet::new(),
+            render_object_keys_scratch: HashSet::default(),
+            mouse_cursor_cache: HashMap::default(),
+            failed_gfx_image_repairs: HashSet::default(),
             external_forms: None,
             native_ui_backend: None,
             native_ui: native_ui::NativeUiRuntime::default(),
@@ -3845,7 +3845,7 @@ impl CommandContext {
             leave_msgbk: false,
             save_id: 0,
         });
-        if std::env::var_os("SG_PROC_FLOW_TRACE").is_some() {
+        if env_is_set!("SG_PROC_FLOW_TRACE") {
             eprintln!(
                 "[SG_PROC_FLOW] open_syscom_menu_from_cancel_key scene={:?} line={} pending_proc={:?}",
                 self.current_scene_name, self.current_line_no, self.globals.syscom.pending_proc
@@ -4592,7 +4592,7 @@ impl CommandContext {
             real_delta_ms
         };
         self.update_selbtn_animation(game_delta_ms as i64);
-        let trace = std::env::var_os("SG_CTX_TICK_TRACE").is_some();
+        let trace = env_is_set!("SG_CTX_TICK_TRACE");
         if trace {
             eprintln!(
                 "[SG_CTX_TICK] start game_delta_ms={} real_delta_ms={}",
@@ -4893,7 +4893,7 @@ impl CommandContext {
             return;
         }
 
-        let mut resolved_masks = HashMap::new();
+        let mut resolved_masks = HashMap::default();
         for (mask_name, _, _) in mask_info.iter().flatten() {
             if resolved_masks.contains_key(mask_name) {
                 continue;
@@ -5013,7 +5013,7 @@ impl CommandContext {
     }
 
     fn apply_gan_effects(&mut self, sprites: &mut Vec<RenderSprite>) {
-        let mut index: HashMap<(Option<LayerId>, Option<SpriteId>), usize> = HashMap::new();
+        let mut index: HashMap<(Option<LayerId>, Option<SpriteId>), usize> = HashMap::default();
         for (i, s) in sprites.iter().enumerate() {
             index.insert((s.layer_id, s.sprite_id), i);
         }
@@ -6367,7 +6367,7 @@ impl CommandContext {
         }
 
         let (slider_x, _slider_top, _slider_bottom) = self.msg_back_slider_track();
-        if std::env::var_os("SG_MSGBK_TRACE").is_some() {
+        if env_is_set!("SG_MSGBK_TRACE") {
             eprintln!(
                 "[SG_MSGBK_TRACE][PROJECTION] entries={} separators={} text={} koe={} load={} total_height={} scroll={} slider={} target={} mouse_target={}",
                 layout.entries.len(),
@@ -7869,7 +7869,7 @@ impl CommandContext {
     }
 
     fn sync_global_movie(&mut self) {
-        let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+        let trace = env_is_set!("SG_MOVIE_TRACE");
         let file_name = self.globals.mov.file_name.clone();
 
         if !self.globals.mov.playing || file_name.as_deref().unwrap_or("").is_empty() {
@@ -8484,8 +8484,8 @@ impl CommandContext {
         &self,
         submitted: &[RenderSprite],
     ) -> Vec<DebugActiveTextureEntry> {
-        let mut submitted_keys: HashSet<(LayerId, SpriteId)> = HashSet::new();
-        let mut submitted_images: HashSet<ImageHandle> = HashSet::new();
+        let mut submitted_keys: HashSet<(LayerId, SpriteId)> = HashSet::default();
+        let mut submitted_images: HashSet<ImageHandle> = HashSet::default();
         for rs in submitted {
             if let Some(ref id) = rs.sprite.image_id {
                 submitted_images.insert(id.clone());
@@ -8495,7 +8495,7 @@ impl CommandContext {
             }
         }
 
-        let mut acc: HashMap<ImageHandle, DebugActiveTextureAccum> = HashMap::new();
+        let mut acc: HashMap<ImageHandle, DebugActiveTextureAccum> = HashMap::default();
         let mut form_ids: Vec<u32> = self.globals.stage_forms.keys().copied().collect();
         form_ids.sort_unstable();
         for form_id in form_ids {
@@ -8807,7 +8807,7 @@ fn trace_config_event_frame_prop_write(
 
 fn save_load_render_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SG_SAVELOAD_TRACE").is_some())
+    *ENABLED.get_or_init(|| env_is_set!("SG_SAVELOAD_TRACE"))
 }
 
 fn trace_save_load_render_sprites(ctx: &CommandContext, list: &[RenderSprite]) {
@@ -10363,6 +10363,33 @@ fn fetch_bound_render_sprites_for_hit(
     out
 }
 
+/// The first sprite `fetch_bound_render_sprites_for_hit` would return,
+/// borrowed: parents only read a few of its fields, and cloning every bound
+/// sprite of every parent on each hover update showed in profiles.
+fn first_bound_render_sprite<'a>(
+    layers: &'a LayerManager,
+    gfx: &graphics::GfxRuntime,
+    stage_idx: i64,
+    runtime_slot: usize,
+    obj: &globals::ObjectState,
+) -> Option<&'a Sprite> {
+    let pick = |lid: LayerId, sid: SpriteId| {
+        layers
+            .layer(lid)?
+            .sprite(sid)
+            .filter(|sprite| sprite.image_id.is_some() || sprite.emote_render.is_some())
+    };
+    match &obj.backend {
+        globals::ObjectBackend::Gfx => gfx
+            .object_sprite_binding(stage_idx, runtime_slot as i64)
+            .and_then(|(lid, sid)| pick(lid, sid)),
+        globals::ObjectBackend::None => None,
+        backend => layer_backed_object_sprite_bindings(backend)
+            .into_iter()
+            .find_map(|(lid, sid)| pick(lid, sid)),
+    }
+}
+
 fn button_object_render_info(
     ids: &constants::RuntimeConstants,
     gfx: &graphics::GfxRuntime,
@@ -10657,7 +10684,7 @@ fn button_parent_render_state(
 ) -> ParentRenderState {
     let runtime_slot = object_runtime_slot(obj_idx, obj);
     let info = button_object_render_info(ids, gfx, stage_idx, obj_idx, obj);
-    let bound = fetch_bound_render_sprites_for_hit(layers, gfx, stage_idx, runtime_slot, obj);
+    let first = first_bound_render_sprite(layers, gfx, stage_idx, runtime_slot, obj);
     let mut cur = ParentRenderState {
         world_no: info.world_no,
         pos_x: (info.x + info.x_rep) as f32,
@@ -10686,19 +10713,28 @@ fn button_parent_render_state(
         color_add_b: 0,
         blend: crate::layer::SpriteBlend::Normal,
         dst_clip: info.dst_clip,
-        mask_image_id: bound.first().and_then(|s| s.sprite.mask_image_id.clone()),
-        mask_offset_x: bound.first().map(|s| s.sprite.mask_offset_x).unwrap_or(0),
-        mask_offset_y: bound.first().map(|s| s.sprite.mask_offset_y).unwrap_or(0),
-        tonecurve_image_id: bound
-            .first()
-            .and_then(|s| s.sprite.tonecurve_image_id.clone()),
-        tonecurve_row: bound.first().map(|s| s.sprite.tonecurve_row).unwrap_or(0.0),
-        tonecurve_sat: bound.first().map(|s| s.sprite.tonecurve_sat).unwrap_or(0.0),
+        mask_image_id: first.and_then(|s| s.mask_image_id.clone()),
+        mask_offset_x: first.map(|s| s.mask_offset_x).unwrap_or(0),
+        mask_offset_y: first.map(|s| s.mask_offset_y).unwrap_or(0),
+        tonecurve_image_id: first.and_then(|s| s.tonecurve_image_id.clone()),
+        tonecurve_row: first.map(|s| s.tonecurve_row).unwrap_or(0.0),
+        tonecurve_sat: first.map(|s| s.tonecurve_sat).unwrap_or(0.0),
     };
     if let Some(parent) = parent_state {
         cur = compose_parent_render_state(parent, cur);
     }
     cur
+}
+
+/// Whether an object or a descendant owns a standalone button (as `recurse`
+/// in `hit_test_standalone_action_button_recursive` decides it).
+fn subtree_has_standalone_button_owner(obj: &globals::ObjectState) -> bool {
+    (has_standalone_button_registration(obj) && !obj.base.no_event_hint)
+        || obj
+            .runtime
+            .child_objects
+            .iter()
+            .any(subtree_has_standalone_button_owner)
 }
 
 fn hit_test_standalone_action_button_recursive(
@@ -10779,10 +10815,27 @@ fn hit_test_standalone_action_button_recursive(
                 event_enabled: owner.event_enabled,
             });
         }
+        // Children can only hit through a button owner: an inherited one or
+        // one in their own subtree. Without either, the render state they
+        // would get (about forty property reads per parent, every frame) is
+        // never used.
+        if obj.runtime.child_objects.is_empty()
+            || (effective_owner.is_none()
+                && !obj
+                    .runtime
+                    .child_objects
+                    .iter()
+                    .any(subtree_has_standalone_button_owner))
+        {
+            return if tied { None } else { best };
+        }
         let cur_parent_state =
             button_parent_render_state(layers, gfx, ids, stage_idx, obj_idx, obj, parent_state);
         let parent_sort = object_button_sort_key(ids, gfx, stage_idx, runtime_slot, obj);
         for (child_idx, child) in obj.runtime.child_objects.iter_mut().enumerate() {
+            if effective_owner.is_none() && !subtree_has_standalone_button_owner(child) {
+                continue;
+            }
             if let Some(mut hit) = recurse(
                 images,
                 layers,
@@ -11986,7 +12039,7 @@ fn sync_movie_object_recursive(
     obj: &mut globals::ObjectState,
     _decoded_any: &mut bool,
 ) {
-    let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+    let trace = env_is_set!("SG_MOVIE_TRACE");
     if obj.object_type == 9
         && let Some(file_name) = obj.file_name.clone()
     {
@@ -12263,7 +12316,16 @@ fn sync_movie_object_recursive(
                 obj.movie.last_frame_idx = Some(frame_idx);
                 let frame = polled.frame.clone();
                 install_object_movie_stream_frame(
-                    layers, images, obj, stage_idx, obj_idx, file, frame_idx, frame, polled.source_size, trace,
+                    layers,
+                    images,
+                    obj,
+                    stage_idx,
+                    obj_idx,
+                    file,
+                    frame_idx,
+                    frame,
+                    polled.source_size,
+                    trace,
                 );
             }
             // Keep OBJECT movie video on the same independent media clock as
@@ -14375,7 +14437,17 @@ fn collect_selbtn_sprite_visuals_recursive(
 ) {
     match (&obj.backend, component) {
         (globals::ObjectBackend::Gfx | globals::ObjectBackend::None, _) => {}
-        (globals::ObjectBackend::String { layer_id, shadow_sprite_id, fuchi_sprite_id, sprite_id, glyphs, .. }, 2) => {
+        (
+            globals::ObjectBackend::String {
+                layer_id,
+                shadow_sprite_id,
+                fuchi_sprite_id,
+                sprite_id,
+                glyphs,
+                ..
+            },
+            2,
+        ) => {
             // The original text item owns three sprites per glyph.  Only body
             // sprites switch between normal/hit colours; shadow and fuchi
             // retain their configured colours.
@@ -14444,7 +14516,7 @@ fn collect_selbtn_sprite_visuals_recursive(
 }
 
 fn apply_selbtn_item_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) {
-    let mut map: HashMap<(LayerId, SpriteId), SelBtnSpriteVisual> = HashMap::new();
+    let mut map: HashMap<(LayerId, SpriteId), SelBtnSpriteVisual> = HashMap::default();
     let template_no = ctx.globals.selbtn.template_no.max(0) as usize;
     let hit_color_no = ctx
         .globals
@@ -15241,7 +15313,7 @@ fn build_siglus_object_render_list(
 
 fn trace_codes_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SIGLUS_TRACE_CODES").is_some())
+    *ENABLED.get_or_init(|| env_is_set!("SIGLUS_TRACE_CODES"))
 }
 
 pub fn dispatch_form_code(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Result<bool> {
@@ -15283,7 +15355,7 @@ pub fn dispatch(ctx: &mut CommandContext, cmd: &Command) -> Result<()> {
 }
 
 fn apply_button_visuals(ctx: &mut CommandContext, sprites: &mut [RenderSprite]) {
-    let mut map: HashMap<(LayerId, SpriteId), ButtonVisualState> = HashMap::new();
+    let mut map: HashMap<(LayerId, SpriteId), ButtonVisualState> = HashMap::default();
 
     let mut form_ids: Vec<u32> = ctx.globals.stage_forms.keys().copied().collect();
     form_ids.sort_unstable();
@@ -15513,7 +15585,7 @@ mod button_visual_ownership_tests {
     fn visuals(obj: &globals::ObjectState) -> HashMap<(LayerId, SpriteId), ButtonVisualState> {
         let ctx = CommandContext::new(PathBuf::from("."));
         let stage = globals::StageFormState::default();
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         collect_button_visuals_recursive(&ctx, &stage, 0, 0, obj, &mut map, None);
         map
     }
@@ -16342,7 +16414,7 @@ fn ensure_font_list(syscom: &mut globals::SyscomRuntimeState, project_dir: &Path
         return;
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for dir in [project_dir.join("font"), project_dir.join("fonts")] {
         let Some(dir) = crate::resource::resolve_game_path(&dir).ok().flatten() else {
             continue;
@@ -16642,7 +16714,7 @@ mod render_tree_fidelity_tests {
                 0,
                 None,
                 &mut nodes,
-                &mut std::collections::HashSet::new(),
+                &mut std::collections::HashSet::default(),
                 &mut Vec::new(),
             );
             let mut sprites = Vec::new();

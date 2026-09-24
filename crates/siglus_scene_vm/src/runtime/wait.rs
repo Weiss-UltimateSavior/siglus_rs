@@ -16,7 +16,7 @@ use super::globals::{GlobalState, ObjectState, StageFormState};
 use super::int_event::IntEvent;
 
 fn anim_skip_trace_enabled() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    env_is_set!("SG_DEBUG")
 }
 
 fn anim_skip_trace(msg: impl AsRef<str>) {

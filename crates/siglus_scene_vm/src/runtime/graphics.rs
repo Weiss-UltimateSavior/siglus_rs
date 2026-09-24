@@ -12,13 +12,17 @@ use crate::layer::{
 };
 
 fn sg_cgm_coord_trace_enabled() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    env_is_set!("SG_DEBUG")
 }
 
-fn sg_cgm_coord_trace(msg: impl AsRef<str>) {
-    if sg_cgm_coord_trace_enabled() {
-        eprintln!("[SG_DEBUG][CGM_COORD_TRACE][GFX] {}", msg.as_ref());
-    }
+/// Logs `format!(...)` arguments only when tracing (they are not built
+/// otherwise: object_set_pos runs for moving objects every frame).
+macro_rules! sg_cgm_coord_trace {
+    ($($arg:tt)*) => {
+        if sg_cgm_coord_trace_enabled() {
+            eprintln!("[SG_DEBUG][CGM_COORD_TRACE][GFX] {}", format!($($arg)*));
+        }
+    };
 }
 
 fn cgm_file_interesting(file: Option<&str>) -> bool {
@@ -376,9 +380,11 @@ impl GfxRuntime {
         stage: usize,
         obj_idx: usize,
     ) -> Result<()> {
-        let obj = self.ensure_object_mut(stage, obj_idx).clone();
-
+        // Read in place (this runs for every object property write; a clone
+        // copied its file names each time). The binding is written back last.
+        self.ensure_object_mut(stage, obj_idx);
         let (lid, sid) = self.ensure_bound_sprite(layers, stage, obj_idx)?;
+        let obj = self.object(stage, obj_idx).context("object not found")?;
         let sprite = layers
             .layer_mut(lid)
             .and_then(|l| l.sprite_mut(sid))
@@ -438,9 +444,10 @@ impl GfxRuntime {
             sprite.object_anchor = false;
             sprite.texture_center_x = 0.0;
             sprite.texture_center_y = 0.0;
+            let (file, patno) = (obj.file.clone(), obj.patno);
             let state = self.ensure_object_mut(stage, obj_idx);
-            state.bound_file = obj.file.clone();
-            state.bound_patno = obj.patno;
+            state.bound_file = file;
+            state.bound_patno = patno;
             return Ok(());
         }
 
@@ -484,9 +491,10 @@ impl GfxRuntime {
             },
         };
         set_object_sprite_image(sprite, images, image_id);
+        let (file, patno) = (file.to_string(), obj.patno);
         let state = self.ensure_object_mut(stage, obj_idx);
-        state.bound_file = Some(file.to_string());
-        state.bound_patno = obj.patno;
+        state.bound_file = Some(file);
+        state.bound_patno = patno;
 
         Ok(())
     }
@@ -689,7 +697,7 @@ impl GfxRuntime {
 
         if cgm_file_interesting(Some(file)) || (30..=59).contains(&obj_u) {
             let obj = self.object(stage_u, obj_u);
-            sg_cgm_coord_trace(format!(
+            sg_cgm_coord_trace!(
                 "object_create stage={} obj={} file={} disp={} x={} y={} patno={} reinit={} layer_no={:?} binding={:?}/{:?}",
                 stage,
                 obj_idx,
@@ -702,7 +710,7 @@ impl GfxRuntime {
                 obj.map(|o| o.layer_no),
                 obj.and_then(|o| o.layer_id),
                 obj.and_then(|o| o.sprite_id)
-            ));
+            );
         }
 
         self.sync_object_sprite(images, layers, stage_u, obj_u)
@@ -930,10 +938,16 @@ impl GfxRuntime {
         }
 
         if cgm_file_interesting(Some(file)) || (30..=59).contains(&obj_u) {
-            sg_cgm_coord_trace(format!(
+            sg_cgm_coord_trace!(
                 "object_create_mesh stage={} obj={} file={} disp={} x={} y={} patno={}",
-                stage, obj_idx, file, disp, x, y, patno
-            ));
+                stage,
+                obj_idx,
+                file,
+                disp,
+                x,
+                y,
+                patno
+            );
         }
 
         let (lid, sid) = self.ensure_bound_sprite(layers, stage_u, obj_u)?;
@@ -1063,7 +1077,7 @@ impl GfxRuntime {
         if let Some(obj) = self.object(stage_u, obj_u)
             && (cgm_file_interesting(obj.file.as_deref()) || (30..=59).contains(&obj_u))
         {
-            sg_cgm_coord_trace(format!(
+            sg_cgm_coord_trace!(
                 "object_set_pos stage={} obj={} file={:?} x={} y={} layer_no={} binding={:?}/{:?}",
                 stage,
                 obj_idx,
@@ -1073,7 +1087,7 @@ impl GfxRuntime {
                 obj.layer_no,
                 obj.layer_id,
                 obj.sprite_id
-            ));
+            );
         }
         self.sync_object_sprite(images, layers, stage_u, obj_u)
     }

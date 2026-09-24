@@ -1,14 +1,16 @@
-use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use lewton::audio::{PreviousWindowRight, read_audio_packet_generic};
 use lewton::header::{
-    CommentHeader, SetupHeader, read_header_comment, read_header_ident, read_header_setup,
+    CommentHeader, IdentHeader, SetupHeader, read_header_comment, read_header_ident,
+    read_header_setup,
 };
 use lewton::samples::InterleavedSamples;
 use ogg::reading::PacketReader;
 use theora_rs::{HeaderParser, OggPacket, PixelFmt};
+pub use theora_rs::{ImgPlaneRef, YCbCrRef};
 
 pub const TH_PF_420: i32 = 0;
 pub const TH_PF_422: i32 = 2;
@@ -32,29 +34,33 @@ pub struct VideoInfo {
     pub fmt: i32,
 }
 
-#[derive(Debug, Clone)]
-struct OggPacketMeta {
-    data: Vec<u8>,
-    b_o_s: bool,
-    e_o_s: bool,
-    granulepos: i64,
-    packetno: i64,
-}
+#[derive(Clone)]
+struct SharedBytes(Arc<Vec<u8>>);
 
-#[derive(Debug, Clone, Default)]
-struct LogicalStream {
-    packets: Vec<OggPacketMeta>,
+impl AsRef<[u8]> for SharedBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 pub struct TheoraFile {
     info: VideoInfo,
-    video_frames: Vec<Vec<u8>>,
-    video_cursor: usize,
+    ogg_data: SharedBytes,
+    video_stream: Option<TheoraVideoStream<Cursor<SharedBytes>>>,
     audio_channels: i32,
     audio_sample_rate: i32,
     has_audio_stream: bool,
-    audio_samples: Vec<f32>,
-    audio_cursor: usize,
+    audio_stream: Option<VorbisStream>,
+}
+
+struct VorbisStream {
+    reader: PacketReader<Cursor<SharedBytes>>,
+    serial: u32,
+    ident: IdentHeader,
+    setup: SetupHeader,
+    previous_window: PreviousWindowRight,
+    pending_samples: Vec<f32>,
+    pending_offset: usize,
 }
 
 /// Incremental Theora video decoder over an Ogg reader.
@@ -129,6 +135,16 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
     }
 
     pub fn read_video_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        self.read_video_frame_with(|ycbcr| pack_theorafile_frame(ycbcr))?
+            .transpose()
+    }
+
+    /// Decodes the next frame and passes its planes, as the decoder holds
+    /// them, to `f` (no repacked copy).
+    pub fn read_video_frame_with<T>(
+        &mut self,
+        f: impl FnOnce(&YCbCrRef<'_>) -> T,
+    ) -> Result<Option<T>> {
         while let Some(pkt) = self.reader.read_packet().context("ogg packet read")? {
             if pkt.stream_serial() != self.video_serial {
                 continue;
@@ -151,8 +167,8 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
             self.decoder.frame_available = false;
             theora_rs::th_decode_packetin(&mut self.decoder, &op)?;
             if self.decoder.has_decoded_frame() {
-                let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
-                return Ok(Some(pack_theorafile_frame(&ycbcr)?));
+                let ycbcr = theora_rs::th_decode_ycbcr_ref(&self.decoder)?;
+                return Ok(Some(f(&ycbcr)));
             }
         }
         Ok(None)
@@ -263,7 +279,7 @@ impl<R: Read + Seek> TheoraVideoStream<R> {
 
             if data_packet_no == target_packet_no {
                 if self.decoder.has_decoded_frame() {
-                    let ycbcr = theora_rs::th_decode_ycbcr_out(&self.decoder)?;
+                    let ycbcr = theora_rs::th_decode_ycbcr_ref(&self.decoder)?;
                     return Ok(Some(pack_theorafile_frame(&ycbcr)?));
                 }
                 return Ok(None);
@@ -306,53 +322,44 @@ fn video_info_from_theora_info(info: &theora_rs::Info) -> VideoInfo {
 }
 
 pub fn decode_first_video_frame_from_memory(data: Vec<u8>) -> Result<(VideoInfo, Vec<u8>)> {
-    let streams = read_ogg_streams(data).context("parse ogg packets")?;
-    let video_serial = find_stream_by_magic(&streams, b"theora", 0x80)
-        .ok_or_else(|| anyhow!("no video stream in ogg"))?;
-    decode_theora_first_frame(
-        streams
-            .get(&video_serial)
-            .ok_or_else(|| anyhow!("selected Theora stream missing"))?,
-    )
-    .context("decode first theora frame")
+    // A preview needs one frame. Parsing every Ogg packet first retains the
+    // entire compressed movie, including its audio stream, before decoding.
+    let mut stream =
+        TheoraVideoStream::open(Cursor::new(data)).context("open Theora preview stream")?;
+    let info = stream.info();
+    let frame = stream
+        .read_video_frame()
+        .context("decode first theora frame")?
+        .ok_or_else(|| anyhow!("no decoded Theora frame in stream"))?;
+    Ok((info, frame))
 }
 
 impl TheoraFile {
     pub fn open_from_memory(data: Vec<u8>) -> Result<Self> {
-        let streams = read_ogg_streams(data).context("parse ogg packets")?;
-        let video_serial = find_stream_by_magic(&streams, b"theora", 0x80)
-            .ok_or_else(|| anyhow!("no video stream in ogg"))?;
-        let audio_serial = find_stream_by_magic(&streams, b"vorbis", 0x01);
-
-        let (info, video_frames) = decode_theora_stream(
-            streams
-                .get(&video_serial)
-                .ok_or_else(|| anyhow!("selected Theora stream missing"))?,
-        )
-        .context("decode theora stream")?;
-
-        let (has_audio_stream, audio_channels, audio_sample_rate, audio_samples) =
-            if let Some(serial) = audio_serial {
-                let (channels, sample_rate, samples) = decode_vorbis_stream(
-                    streams
-                        .get(&serial)
-                        .ok_or_else(|| anyhow!("selected Vorbis stream missing"))?,
+        let ogg_data = SharedBytes(Arc::new(data));
+        let video_stream =
+            TheoraVideoStream::open(Cursor::new(ogg_data.clone())).context("open Theora stream")?;
+        let info = video_stream.info();
+        let audio_stream = VorbisStream::open(Cursor::new(ogg_data.clone()))?;
+        let (has_audio_stream, audio_channels, audio_sample_rate) = audio_stream
+            .as_ref()
+            .map(|stream| {
+                (
+                    true,
+                    stream.ident.audio_channels as i32,
+                    stream.ident.audio_sample_rate as i32,
                 )
-                .context("decode vorbis stream")?;
-                (true, channels, sample_rate, samples)
-            } else {
-                (false, 0, 0, Vec::new())
-            };
+            })
+            .unwrap_or((false, 0, 0));
 
         Ok(Self {
             info,
-            video_frames,
-            video_cursor: 0,
+            ogg_data,
+            video_stream: Some(video_stream),
             audio_channels,
             audio_sample_rate,
             has_audio_stream,
-            audio_samples,
-            audio_cursor: 0,
+            audio_stream,
         })
     }
 
@@ -372,165 +379,120 @@ impl TheoraFile {
     }
 
     pub fn reset(&mut self) {
-        self.video_cursor = 0;
-        self.audio_cursor = 0;
+        // Reopen on the next read so reset remains infallible. The stream was
+        // already validated when this file was opened.
+        self.video_stream = None;
+        self.audio_stream = None;
     }
 
     pub fn read_video_frame(&mut self, out: &mut [u8]) -> Result<bool> {
-        let Some(frame) = self.video_frames.get(self.video_cursor) else {
-            return Ok(false);
-        };
-        if out.len() < frame.len() {
-            bail!(
-                "video output buffer too small: need {} bytes, got {} bytes",
-                frame.len(),
-                out.len()
+        if self.video_stream.is_none() {
+            self.video_stream = Some(
+                TheoraVideoStream::open(Cursor::new(self.ogg_data.clone()))
+                    .context("reopen Theora stream after reset")?,
             );
         }
-        out[..frame.len()].copy_from_slice(frame);
-        self.video_cursor += 1;
-        Ok(true)
+        let stream = self.video_stream.as_mut().expect("stream reopened above");
+        match stream.read_video_frame_with(|planes| copy_decoded_planes_into(out, planes))? {
+            Some(result) => result.map(|()| true),
+            None => Ok(false),
+        }
     }
 
     pub fn read_audio_samples(&mut self, out: &mut [f32]) -> Result<usize> {
-        if out.is_empty() || self.audio_cursor >= self.audio_samples.len() {
+        if out.is_empty() || !self.has_audio_stream {
             return Ok(0);
         }
-        let remaining = self.audio_samples.len() - self.audio_cursor;
-        let count = remaining.min(out.len());
-        out[..count]
-            .copy_from_slice(&self.audio_samples[self.audio_cursor..self.audio_cursor + count]);
-        self.audio_cursor += count;
-        Ok(count)
-    }
-}
-
-fn read_ogg_streams(data: Vec<u8>) -> Result<BTreeMap<u32, LogicalStream>> {
-    let mut reader = PacketReader::new(Cursor::new(data));
-    let mut streams = BTreeMap::<u32, LogicalStream>::new();
-    let mut packetno_by_serial = BTreeMap::<u32, i64>::new();
-
-    while let Some(pkt) = reader.read_packet().context("ogg packet read")? {
-        let serial = pkt.stream_serial();
-        let b_o_s = pkt.first_in_stream();
-        let e_o_s = pkt.last_in_stream();
-        let granulepos = pkt.absgp_page() as i64;
-        let data = pkt.data;
-        let packetno = packetno_by_serial.entry(serial).or_insert(0);
-        let stream = streams.entry(serial).or_default();
-        stream.packets.push(OggPacketMeta {
-            data,
-            b_o_s,
-            e_o_s,
-            granulepos,
-            packetno: *packetno,
-        });
-        *packetno += 1;
-    }
-
-    Ok(streams)
-}
-
-fn find_stream_by_magic(
-    streams: &BTreeMap<u32, LogicalStream>,
-    magic: &[u8; 6],
-    marker: u8,
-) -> Option<u32> {
-    streams.iter().find_map(|(&serial, stream)| {
-        let first = stream.packets.first()?;
-        if first.b_o_s
-            && first.data.len() >= 7
-            && first.data[0] == marker
-            && &first.data[1..7] == magic
-        {
-            Some(serial)
-        } else {
-            None
+        if self.audio_stream.is_none() {
+            self.audio_stream = VorbisStream::open(Cursor::new(self.ogg_data.clone()))?;
         }
-    })
+        self.audio_stream
+            .as_mut()
+            .expect("audio stream reopened above")
+            .read_samples(out)
+    }
 }
 
-fn decode_theora_first_frame(stream: &LogicalStream) -> Result<(VideoInfo, Vec<u8>)> {
-    let mut parser = HeaderParser::new();
-    let mut decoder = None;
-    let mut first_frame = None;
-
-    for pkt in &stream.packets {
-        let op = OggPacket {
-            packet: pkt.data.clone(),
-            b_o_s: pkt.b_o_s,
-            e_o_s: pkt.e_o_s,
-            granulepos: pkt.granulepos,
-            packetno: pkt.packetno,
-        };
-
-        if decoder.is_none() {
-            let _ = parser.push(&op)?;
-            if parser.is_ready() {
-                decoder = Some(parser.decoder()?);
+impl VorbisStream {
+    fn open(source: Cursor<SharedBytes>) -> Result<Option<Self>> {
+        let mut reader = PacketReader::new(source);
+        let mut audio_serial = None;
+        let mut headers = Vec::with_capacity(3);
+        while let Some(packet) = reader.read_packet().context("ogg packet read")? {
+            let serial = packet.stream_serial();
+            if audio_serial.is_none()
+                && packet.first_in_stream()
+                && packet.data.len() >= 7
+                && packet.data[0] == 0x01
+                && &packet.data[1..7] == b"vorbis"
+            {
+                audio_serial = Some(serial);
             }
-            continue;
-        }
-
-        let dec = decoder.as_mut().expect("decoder allocated after headers");
-        theora_rs::th_decode_packetin(dec, &op)?;
-        if dec.has_decoded_frame() {
-            let ycbcr = theora_rs::th_decode_ycbcr_out(dec)?;
-            first_frame = Some(pack_theorafile_frame(&ycbcr)?);
-            break;
-        }
-    }
-
-    if !parser.is_ready() {
-        bail!("stream ended before all Theora headers were parsed");
-    }
-
-    let info = video_info_from_theora_info(&parser.info);
-
-    let frame = first_frame.ok_or_else(|| anyhow!("no decoded Theora frame in stream"))?;
-    Ok((info, frame))
-}
-
-fn decode_theora_stream(stream: &LogicalStream) -> Result<(VideoInfo, Vec<Vec<u8>>)> {
-    let mut parser = HeaderParser::new();
-    let mut decoder = None;
-    let mut frames = Vec::<Vec<u8>>::new();
-
-    for pkt in &stream.packets {
-        let op = OggPacket {
-            packet: pkt.data.clone(),
-            b_o_s: pkt.b_o_s,
-            e_o_s: pkt.e_o_s,
-            granulepos: pkt.granulepos,
-            packetno: pkt.packetno,
-        };
-
-        if decoder.is_none() {
-            let _ = parser.push(&op)?;
-            if parser.is_ready() {
-                decoder = Some(parser.decoder()?);
+            if Some(serial) != audio_serial {
+                continue;
             }
-            continue;
+            headers.push(packet.data);
+            if headers.len() == 3 {
+                let ident = read_header_ident(&headers[0]).context("read vorbis ident header")?;
+                let _comment: CommentHeader =
+                    read_header_comment(&headers[1]).context("read vorbis comment header")?;
+                let setup = read_header_setup(
+                    &headers[2],
+                    ident.audio_channels,
+                    (ident.blocksize_0, ident.blocksize_1),
+                )
+                .context("read vorbis setup header")?;
+                return Ok(Some(Self {
+                    reader,
+                    serial,
+                    ident,
+                    setup,
+                    previous_window: PreviousWindowRight::new(),
+                    pending_samples: Vec::new(),
+                    pending_offset: 0,
+                }));
+            }
         }
-
-        let dec = decoder.as_mut().expect("decoder allocated after headers");
-        theora_rs::th_decode_packetin(dec, &op)?;
-        if dec.has_decoded_frame() {
-            let ycbcr = theora_rs::th_decode_ycbcr_out(dec)?;
-            frames.push(pack_theorafile_frame(&ycbcr)?);
+        if audio_serial.is_some() {
+            bail!("vorbis stream does not contain enough header packets");
         }
+        Ok(None)
     }
 
-    if !parser.is_ready() {
-        bail!("stream ended before all Theora headers were parsed");
+    fn read_samples(&mut self, out: &mut [f32]) -> Result<usize> {
+        let mut written = 0;
+        while written < out.len() {
+            if self.pending_offset < self.pending_samples.len() {
+                let available = self.pending_samples.len() - self.pending_offset;
+                let count = available.min(out.len() - written);
+                out[written..written + count].copy_from_slice(
+                    &self.pending_samples[self.pending_offset..self.pending_offset + count],
+                );
+                self.pending_offset += count;
+                written += count;
+                continue;
+            }
+            let Some(packet) = self.reader.read_packet().context("ogg packet read")? else {
+                break;
+            };
+            if packet.stream_serial() != self.serial {
+                continue;
+            }
+            let decoded: InterleavedSamples<f32> = read_audio_packet_generic(
+                &self.ident,
+                &self.setup,
+                &packet.data,
+                &mut self.previous_window,
+            )
+            .context("decode vorbis audio packet")?;
+            self.pending_samples = decoded.samples;
+            self.pending_offset = 0;
+        }
+        Ok(written)
     }
-
-    let info = video_info_from_theora_info(&parser.info);
-
-    Ok((info, frames))
 }
 
-fn pack_theorafile_frame(ycbcr: &theora_rs::YCbCrBuffer) -> Result<Vec<u8>> {
+fn pack_theorafile_frame(ycbcr: &theora_rs::YCbCrRef<'_>) -> Result<Vec<u8>> {
     // Match tona3's C_omv_player_impl::video_write() input semantics. The
     // original code reads directly from th_decode_ycbcr_out() using each
     // plane's stride and the OMV header's own display width/height. It does
@@ -554,7 +516,78 @@ fn pack_theorafile_frame(ycbcr: &theora_rs::YCbCrBuffer) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn copy_decoded_plane_tight(dst: &mut Vec<u8>, plane: &theora_rs::ImgPlane) -> Result<()> {
+fn copy_decoded_planes_into(dst: &mut [u8], planes: &YCbCrRef<'_>) -> Result<()> {
+    let mut written = 0usize;
+    for plane in planes {
+        let width = usize::try_from(plane.width)
+            .map_err(|_| anyhow!("negative decoded plane width: {}", plane.width))?;
+        let height = usize::try_from(plane.height)
+            .map_err(|_| anyhow!("negative decoded plane height: {}", plane.height))?;
+        let len = width
+            .checked_mul(height)
+            .ok_or_else(|| anyhow!("decoded plane size overflow"))?;
+        let end = written
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("decoded frame size overflow"))?;
+        let dst_len = dst.len();
+        let output = dst.get_mut(written..end).ok_or_else(|| {
+            anyhow!(
+                "video output buffer too small: need {} bytes, got {} bytes",
+                end,
+                dst_len
+            )
+        })?;
+        copy_decoded_plane_into(output, plane, width, height)?;
+        written = end;
+    }
+    Ok(())
+}
+
+fn copy_decoded_plane_into(
+    dst: &mut [u8],
+    plane: &theora_rs::ImgPlaneRef<'_>,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    let base = isize::try_from(plane.data_offset)
+        .map_err(|_| anyhow!("decoded plane offset does not fit isize"))?;
+    let stride = plane.stride as isize;
+    if stride == width as isize {
+        let start =
+            usize::try_from(base).map_err(|_| anyhow!("decoded plane starts before buffer"))?;
+        let end = start
+            .checked_add(dst.len())
+            .ok_or_else(|| anyhow!("decoded plane end overflow"))?;
+        let pixels = plane
+            .data
+            .get(start..end)
+            .ok_or_else(|| anyhow!("decoded plane copy out of range"))?;
+        dst.copy_from_slice(pixels);
+        return Ok(());
+    }
+    for row in 0..height {
+        let row_offset = (row as isize)
+            .checked_mul(stride)
+            .and_then(|offset| base.checked_add(offset))
+            .ok_or_else(|| anyhow!("decoded plane row offset overflow"))?;
+        let start = usize::try_from(row_offset)
+            .map_err(|_| anyhow!("decoded plane row starts before buffer"))?;
+        let end = start
+            .checked_add(width)
+            .ok_or_else(|| anyhow!("decoded plane row end overflow"))?;
+        let src = plane
+            .data
+            .get(start..end)
+            .ok_or_else(|| anyhow!("decoded plane copy out of range"))?;
+        dst[row * width..(row + 1) * width].copy_from_slice(src);
+    }
+    Ok(())
+}
+
+fn copy_decoded_plane_tight(dst: &mut Vec<u8>, plane: &theora_rs::ImgPlaneRef<'_>) -> Result<()> {
     let width = usize::try_from(plane.width)
         .map_err(|_| anyhow!("negative decoded plane width: {}", plane.width))?;
     let height = usize::try_from(plane.height)
@@ -566,7 +599,25 @@ fn copy_decoded_plane_tight(dst: &mut Vec<u8>, plane: &theora_rs::ImgPlane) -> R
     let base = isize::try_from(plane.data_offset)
         .map_err(|_| anyhow!("decoded plane offset does not fit isize"))?;
     let stride = plane.stride as isize;
-    dst.reserve(width.saturating_mul(height));
+    let plane_len = width
+        .checked_mul(height)
+        .ok_or_else(|| anyhow!("decoded plane size overflow"))?;
+    // Coded planes without row padding are common. Copying one contiguous
+    // span avoids a slice check and memcpy call for every decoded row.
+    if stride == width as isize {
+        let start =
+            usize::try_from(base).map_err(|_| anyhow!("decoded plane starts before buffer"))?;
+        let end = start
+            .checked_add(plane_len)
+            .ok_or_else(|| anyhow!("decoded plane end overflow"))?;
+        let pixels = plane
+            .data
+            .get(start..end)
+            .ok_or_else(|| anyhow!("decoded plane copy out of range"))?;
+        dst.extend_from_slice(pixels);
+        return Ok(());
+    }
+    dst.reserve(plane_len);
 
     for row in 0..height {
         let row_i = isize::try_from(row).map_err(|_| anyhow!("decoded plane row overflow"))?;
@@ -608,37 +659,6 @@ fn copy_decoded_plane_tight(dst: &mut Vec<u8>, plane: &theora_rs::ImgPlane) -> R
     Ok(())
 }
 
-fn decode_vorbis_stream(stream: &LogicalStream) -> Result<(i32, i32, Vec<f32>)> {
-    if stream.packets.len() < 3 {
-        bail!("vorbis stream does not contain enough header packets");
-    }
-
-    let ident = read_header_ident(&stream.packets[0].data).context("read vorbis ident header")?;
-    let _comment: CommentHeader =
-        read_header_comment(&stream.packets[1].data).context("read vorbis comment header")?;
-    let setup: SetupHeader = read_header_setup(
-        &stream.packets[2].data,
-        ident.audio_channels,
-        (ident.blocksize_0, ident.blocksize_1),
-    )
-    .context("read vorbis setup header")?;
-
-    let mut pwr = PreviousWindowRight::new();
-    let mut samples = Vec::<f32>::new();
-    for pkt in &stream.packets[3..] {
-        let decoded: InterleavedSamples<f32> =
-            read_audio_packet_generic(&ident, &setup, &pkt.data, &mut pwr)
-                .context("decode vorbis audio packet")?;
-        samples.extend_from_slice(&decoded.samples);
-    }
-
-    Ok((
-        ident.audio_channels as i32,
-        ident.audio_sample_rate as i32,
-        samples,
-    ))
-}
-
 #[cfg(test)]
 mod omv_plane_parity_tests {
     use super::{copy_decoded_plane_tight, pack_theorafile_frame};
@@ -659,7 +679,7 @@ mod omv_plane_parity_tests {
             data_offset: 0,
         };
         let mut out = Vec::new();
-        copy_decoded_plane_tight(&mut out, &plane).unwrap();
+        copy_decoded_plane_tight(&mut out, &plane.as_ref()).unwrap();
         assert_eq!(out, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 
@@ -673,7 +693,7 @@ mod omv_plane_parity_tests {
             data_offset: 4,
         };
         let mut out = Vec::new();
-        copy_decoded_plane_tight(&mut out, &plane).unwrap();
+        copy_decoded_plane_tight(&mut out, &plane.as_ref()).unwrap();
         assert_eq!(out, vec![1, 2, 3, 4, 5, 6]);
     }
 
@@ -686,7 +706,10 @@ mod omv_plane_parity_tests {
             data: vec![base, base + 1, 0, base + 2, base + 3, 0],
             data_offset: 0,
         };
-        let packed = pack_theorafile_frame(&[mk(1), mk(10), mk(20)]).unwrap();
+        let planes = [mk(1), mk(10), mk(20)];
+        let packed =
+            pack_theorafile_frame(&[planes[0].as_ref(), planes[1].as_ref(), planes[2].as_ref()])
+                .unwrap();
         assert_eq!(packed, vec![1, 2, 3, 4, 10, 11, 12, 13, 20, 21, 22, 23]);
     }
 }

@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+/// The runtime's tables (objects, stage lists, properties) are keyed by
+/// small integers and looked up many times per object operation; SipHash
+/// was about a tenth of the VM's frame time on consoles.
+pub type HashMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxBuildHasher>;
+pub type HashSet<K> = std::collections::HashSet<K, rustc_hash::FxBuildHasher>;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -261,7 +265,7 @@ impl Default for ScriptRuntimeState {
             cursor_disp_off: false,
             cursor_move_by_key_disable: false,
             cursor_runtime_visible: true,
-            key_disable: HashSet::new(),
+            key_disable: HashSet::default(),
             mwnd_anime_off_flag: false,
             mwnd_anime_on_flag: false,
             mwnd_disp_off_flag: false,
@@ -350,7 +354,7 @@ impl Default for SystemRuntimeState {
             debug_flag: false,
             language_code: std::env::var("SIGLUS_LANGUAGE").unwrap_or_else(|_| "JP".to_string()),
             debug_logs: Vec::new(),
-            dummy_checks: HashSet::new(),
+            dummy_checks: HashSet::default(),
             bench_dialogs: Vec::new(),
             messagebox_history: Vec::new(),
             messagebox_response_queue: Vec::new(),
@@ -701,7 +705,7 @@ impl Default for SyscomRuntimeState {
             font_list: Vec::new(),
             mwnd_btn_disable_all: false,
             mwnd_btn_touch_disable: false,
-            mwnd_btn_disable: HashMap::new(),
+            mwnd_btn_disable: HashMap::default(),
             read_skip: ToggleFeatureState {
                 onoff: false,
                 enable: true,
@@ -826,10 +830,10 @@ impl Default for SyscomRuntimeState {
             last_menu_call: 0,
             system_extra_int_value: 0,
             system_extra_str_value: String::new(),
-            config_int: HashMap::new(),
-            config_str: HashMap::new(),
+            config_int: HashMap::default(),
+            config_str: HashMap::default(),
             original_config: OriginalConfigRuntimeState::default(),
-            chrkoe_look_flags: HashMap::new(),
+            chrkoe_look_flags: HashMap::default(),
             capture_buffer: None,
             capture_size: None,
             return_scene_once: None,
@@ -1097,7 +1101,9 @@ pub struct GlobalState {
     pub pending_button_actions: Vec<PendingButtonAction>,
 
     /// Stage UI subsystem state keyed by the stage form ID.
-    pub stage_forms: HashMap<u32, StageFormState>,
+    /// Boxed: `with_stage_state` takes a state out of the map around each
+    /// stage operation, which moved the whole struct twice per op.
+    pub stage_forms: HashMap<u32, Box<StageFormState>>,
     /// Currently focused stage group selection (form_id, stage_idx, group_idx).
     pub focused_stage_group: Option<(u32, i64, usize)>,
     /// Currently focused message-window selection (form_id, stage_idx, mwnd_idx).
@@ -1193,33 +1199,33 @@ pub struct GlobalState {
 impl Default for GlobalState {
     fn default() -> Self {
         Self {
-            int_lists: HashMap::new(),
-            str_lists: HashMap::new(),
-            counter_lists: HashMap::new(),
-            pcm_event_lists: HashMap::new(),
+            int_lists: HashMap::default(),
+            str_lists: HashMap::default(),
+            counter_lists: HashMap::default(),
+            pcm_event_lists: HashMap::default(),
             pcmch_persistent: Vec::new(),
             sound_routing: SoundRoutingState::default(),
-            read_flags: HashMap::new(),
-            int_event_roots: HashMap::new(),
-            int_event_lists: HashMap::new(),
-            int_props: HashMap::new(),
-            str_props: HashMap::new(),
+            read_flags: HashMap::default(),
+            int_event_roots: HashMap::default(),
+            int_event_lists: HashMap::default(),
+            int_props: HashMap::default(),
+            str_props: HashMap::default(),
             cg_table_off: false,
             database_off: false,
             g00buf: Vec::new(),
             g00buf_names: Vec::new(),
             rng_state: 0,
-            mask_lists: HashMap::new(),
-            editbox_lists: HashMap::new(),
+            mask_lists: HashMap::default(),
+            editbox_lists: HashMap::default(),
             focused_editbox: None,
             editbox_clipboard: String::new(),
             change_display_mode_proc_cnt: 0,
 
-            frame_actions: HashMap::new(),
-            frame_action_lists: HashMap::new(),
+            frame_actions: HashMap::default(),
+            frame_action_lists: HashMap::default(),
             pending_frame_action_finishes: Vec::new(),
             pending_button_actions: Vec::new(),
-            stage_forms: HashMap::new(),
+            stage_forms: HashMap::default(),
             focused_stage_group: None,
             focused_stage_mwnd: None,
             current_mwnd_element: vec![
@@ -1251,8 +1257,8 @@ impl Default for GlobalState {
             current_stage_object: None,
             current_object_chain: None,
 
-            screen_forms: HashMap::new(),
-            msgbk_forms: HashMap::new(),
+            screen_forms: HashMap::default(),
+            msgbk_forms: HashMap::default(),
 
             script: ScriptRuntimeState::default(),
             system: SystemRuntimeState::default(),
@@ -1270,12 +1276,12 @@ impl Default for GlobalState {
             append_dir: String::new(),
             append_name: String::new(),
 
-            bgm_table_listened: HashMap::new(),
+            bgm_table_listened: HashMap::default(),
             bgm_table_flags: Vec::new(),
             bgm_table_all_flag: false,
 
             wipe: None,
-            lights: HashMap::new(),
+            lights: HashMap::default(),
             fog_global: FogGlobalState::default(),
             render_frame: 0,
         }
@@ -1850,8 +1856,8 @@ impl MaskState {
             name: None,
             x_event: IntEvent::new(0),
             y_event: IntEvent::new(0),
-            extra_int: HashMap::new(),
-            script_events: HashMap::new(),
+            extra_int: HashMap::default(),
+            script_events: HashMap::default(),
         }
     }
 
@@ -2825,9 +2831,9 @@ impl WorldState {
             wipe_copy: 0,
             wipe_erase: 0,
             camera_eye_xz_eve: WorldRotateEvent::new(),
-            script_events: HashMap::new(),
-            extra_int: HashMap::new(),
-            extra_str: HashMap::new(),
+            script_events: HashMap::default(),
+            extra_int: HashMap::default(),
+            extra_str: HashMap::default(),
         };
         out.reinit();
         out
@@ -3090,6 +3096,383 @@ pub enum ObjectBackend {
 }
 
 pub const OBJECT_NESTED_SLOT_KEY: i32 = i32::MIN + 1;
+
+/// An `ObjectBaseState` integer field, named for the op tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseIntField {
+    Alpha,
+    AlphaBlend,
+    AlphaTest,
+    Blend,
+    ClickDisable,
+    ClipUse,
+    Culling,
+    Disp,
+    FogUse,
+    Layer,
+    LightNo,
+    MaskNo,
+    Order,
+    SrcClipUse,
+    TonecurveNo,
+    WipeCopy,
+    WipeErase,
+    World,
+}
+
+impl ObjectBaseState {
+    fn int_field(&self, field: BaseIntField) -> i64 {
+        match field {
+            BaseIntField::Alpha => self.alpha,
+            BaseIntField::AlphaBlend => self.alpha_blend,
+            BaseIntField::AlphaTest => self.alpha_test,
+            BaseIntField::Blend => self.blend,
+            BaseIntField::ClickDisable => self.click_disable,
+            BaseIntField::ClipUse => self.clip_use,
+            BaseIntField::Culling => self.culling,
+            BaseIntField::Disp => self.disp,
+            BaseIntField::FogUse => self.fog_use,
+            BaseIntField::Layer => self.layer,
+            BaseIntField::LightNo => self.light_no,
+            BaseIntField::MaskNo => self.mask_no,
+            BaseIntField::Order => self.order,
+            BaseIntField::SrcClipUse => self.src_clip_use,
+            BaseIntField::TonecurveNo => self.tonecurve_no,
+            BaseIntField::WipeCopy => self.wipe_copy,
+            BaseIntField::WipeErase => self.wipe_erase,
+            BaseIntField::World => self.world,
+        }
+    }
+}
+
+/// Where an OBJECT integer property's value lives (`ObjectState::fixed_int_prop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedIntProp {
+    Base(BaseIntField),
+    /// The total value of the property's event.
+    EventTotal(ObjectEventTarget),
+}
+
+/// `ObjectOpTables::fixed_int_props`' entries, in the order of the
+/// comparison chain they replace (first match wins).
+fn fixed_int_prop_pairs(
+    ids: &crate::runtime::constants::RuntimeConstants,
+) -> Vec<(i32, FixedIntProp)> {
+    vec![
+        (ids.obj_disp, FixedIntProp::Base(BaseIntField::Disp)),
+        (
+            ids.obj_wipe_copy,
+            FixedIntProp::Base(BaseIntField::WipeCopy),
+        ),
+        (
+            ids.obj_wipe_erase,
+            FixedIntProp::Base(BaseIntField::WipeErase),
+        ),
+        (
+            ids.obj_click_disable,
+            FixedIntProp::Base(BaseIntField::ClickDisable),
+        ),
+        (
+            ids.obj_patno,
+            FixedIntProp::EventTotal(ObjectEventTarget::Patno),
+        ),
+        (ids.obj_world, FixedIntProp::Base(BaseIntField::World)),
+        (ids.obj_order, FixedIntProp::Base(BaseIntField::Order)),
+        (ids.obj_layer, FixedIntProp::Base(BaseIntField::Layer)),
+        (ids.obj_x, FixedIntProp::EventTotal(ObjectEventTarget::X)),
+        (ids.obj_y, FixedIntProp::EventTotal(ObjectEventTarget::Y)),
+        (ids.obj_z, FixedIntProp::EventTotal(ObjectEventTarget::Z)),
+        (
+            ids.obj_center_x,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterX),
+        ),
+        (
+            ids.obj_center_y,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterY),
+        ),
+        (
+            ids.obj_center_z,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterZ),
+        ),
+        (
+            ids.obj_center_rep_x,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterRepX),
+        ),
+        (
+            ids.obj_center_rep_y,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterRepY),
+        ),
+        (
+            ids.obj_center_rep_z,
+            FixedIntProp::EventTotal(ObjectEventTarget::CenterRepZ),
+        ),
+        (
+            ids.obj_scale_x,
+            FixedIntProp::EventTotal(ObjectEventTarget::ScaleX),
+        ),
+        (
+            ids.obj_scale_y,
+            FixedIntProp::EventTotal(ObjectEventTarget::ScaleY),
+        ),
+        (
+            ids.obj_scale_z,
+            FixedIntProp::EventTotal(ObjectEventTarget::ScaleZ),
+        ),
+        (
+            ids.obj_rotate_x,
+            FixedIntProp::EventTotal(ObjectEventTarget::RotateX),
+        ),
+        (
+            ids.obj_rotate_y,
+            FixedIntProp::EventTotal(ObjectEventTarget::RotateY),
+        ),
+        (
+            ids.obj_rotate_z,
+            FixedIntProp::EventTotal(ObjectEventTarget::RotateZ),
+        ),
+        (ids.obj_clip_use, FixedIntProp::Base(BaseIntField::ClipUse)),
+        (
+            ids.obj_clip_left,
+            FixedIntProp::EventTotal(ObjectEventTarget::ClipLeft),
+        ),
+        (
+            ids.obj_clip_top,
+            FixedIntProp::EventTotal(ObjectEventTarget::ClipTop),
+        ),
+        (
+            ids.obj_clip_right,
+            FixedIntProp::EventTotal(ObjectEventTarget::ClipRight),
+        ),
+        (
+            ids.obj_clip_bottom,
+            FixedIntProp::EventTotal(ObjectEventTarget::ClipBottom),
+        ),
+        (
+            ids.obj_src_clip_use,
+            FixedIntProp::Base(BaseIntField::SrcClipUse),
+        ),
+        (
+            ids.obj_src_clip_left,
+            FixedIntProp::EventTotal(ObjectEventTarget::SrcClipLeft),
+        ),
+        (
+            ids.obj_src_clip_top,
+            FixedIntProp::EventTotal(ObjectEventTarget::SrcClipTop),
+        ),
+        (
+            ids.obj_src_clip_right,
+            FixedIntProp::EventTotal(ObjectEventTarget::SrcClipRight),
+        ),
+        (
+            ids.obj_src_clip_bottom,
+            FixedIntProp::EventTotal(ObjectEventTarget::SrcClipBottom),
+        ),
+        (ids.obj_alpha, FixedIntProp::Base(BaseIntField::Alpha)),
+        (ids.obj_tr, FixedIntProp::EventTotal(ObjectEventTarget::Tr)),
+        (
+            ids.obj_mono,
+            FixedIntProp::EventTotal(ObjectEventTarget::Mono),
+        ),
+        (
+            ids.obj_reverse,
+            FixedIntProp::EventTotal(ObjectEventTarget::Reverse),
+        ),
+        (
+            ids.obj_bright,
+            FixedIntProp::EventTotal(ObjectEventTarget::Bright),
+        ),
+        (
+            ids.obj_dark,
+            FixedIntProp::EventTotal(ObjectEventTarget::Dark),
+        ),
+        (
+            ids.obj_color_r,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorR),
+        ),
+        (
+            ids.obj_color_g,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorG),
+        ),
+        (
+            ids.obj_color_b,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorB),
+        ),
+        (
+            ids.obj_color_rate,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorRate),
+        ),
+        (
+            ids.obj_color_add_r,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorAddR),
+        ),
+        (
+            ids.obj_color_add_g,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorAddG),
+        ),
+        (
+            ids.obj_color_add_b,
+            FixedIntProp::EventTotal(ObjectEventTarget::ColorAddB),
+        ),
+        (ids.obj_mask_no, FixedIntProp::Base(BaseIntField::MaskNo)),
+        (
+            ids.obj_tonecurve_no,
+            FixedIntProp::Base(BaseIntField::TonecurveNo),
+        ),
+        (ids.obj_light_no, FixedIntProp::Base(BaseIntField::LightNo)),
+        (ids.obj_fog_use, FixedIntProp::Base(BaseIntField::FogUse)),
+        (ids.obj_culling, FixedIntProp::Base(BaseIntField::Culling)),
+        (
+            ids.obj_alpha_test,
+            FixedIntProp::Base(BaseIntField::AlphaTest),
+        ),
+        (
+            ids.obj_alpha_blend,
+            FixedIntProp::Base(BaseIntField::AlphaBlend),
+        ),
+        (ids.obj_blend, FixedIntProp::Base(BaseIntField::Blend)),
+    ]
+}
+
+/// Which object event an OBJECT property op drives, looked up by op code.
+/// These ran as chains of about fifty comparisons on every object property
+/// read and write (a tenth of the VM's frame time in particle scripts).
+#[derive(Debug, Default)]
+pub struct ObjectOpTables {
+    /// `*_EVE` ops: the event itself.
+    events: HashMap<i32, ObjectEventTarget>,
+    /// Plain property ops whose value an event also holds.
+    props: HashMap<i32, ObjectEventTarget>,
+    /// Integer properties read directly (`ObjectState::fixed_int_prop`).
+    fixed_int_props: HashMap<i32, FixedIntProp>,
+}
+
+impl ObjectOpTables {
+    pub fn new(ids: &crate::runtime::constants::RuntimeConstants) -> Self {
+        // First match wins, as in the comparison chains these replace; a
+        // zero id is unused.
+        fn table(pairs: &[(i32, ObjectEventTarget)]) -> HashMap<i32, ObjectEventTarget> {
+            let mut map = HashMap::default();
+            for &(id, target) in pairs {
+                if id != 0 {
+                    map.entry(id).or_insert(target);
+                }
+            }
+            map
+        }
+        let mut fixed_int_props = HashMap::default();
+        for (index, (id, prop)) in fixed_int_prop_pairs(ids).into_iter().enumerate() {
+            // The chain compared DISP without a zero check.
+            if id != 0 || index == 0 {
+                fixed_int_props.entry(id).or_insert(prop);
+            }
+        }
+        Self {
+            fixed_int_props,
+            events: table(&[
+                (ids.obj_x_eve, ObjectEventTarget::X),
+                (ids.obj_y_eve, ObjectEventTarget::Y),
+                (ids.obj_x_rep_eve, ObjectEventTarget::XRep),
+                (ids.obj_y_rep_eve, ObjectEventTarget::YRep),
+                (ids.obj_z_rep_eve, ObjectEventTarget::ZRep),
+                (ids.obj_tr_eve, ObjectEventTarget::Tr),
+                (ids.obj_tr_rep_eve, ObjectEventTarget::TrRep),
+                (ids.obj_patno_eve, ObjectEventTarget::Patno),
+                (ids.obj_z_eve, ObjectEventTarget::Z),
+                (ids.obj_center_x_eve, ObjectEventTarget::CenterX),
+                (ids.obj_center_y_eve, ObjectEventTarget::CenterY),
+                (ids.obj_center_z_eve, ObjectEventTarget::CenterZ),
+                (ids.obj_center_rep_x_eve, ObjectEventTarget::CenterRepX),
+                (ids.obj_center_rep_y_eve, ObjectEventTarget::CenterRepY),
+                (ids.obj_center_rep_z_eve, ObjectEventTarget::CenterRepZ),
+                (ids.obj_scale_x_eve, ObjectEventTarget::ScaleX),
+                (ids.obj_scale_y_eve, ObjectEventTarget::ScaleY),
+                (ids.obj_scale_z_eve, ObjectEventTarget::ScaleZ),
+                (ids.obj_rotate_x_eve, ObjectEventTarget::RotateX),
+                (ids.obj_rotate_y_eve, ObjectEventTarget::RotateY),
+                (ids.obj_rotate_z_eve, ObjectEventTarget::RotateZ),
+                (ids.obj_clip_left_eve, ObjectEventTarget::ClipLeft),
+                (ids.obj_clip_top_eve, ObjectEventTarget::ClipTop),
+                (ids.obj_clip_right_eve, ObjectEventTarget::ClipRight),
+                (ids.obj_clip_bottom_eve, ObjectEventTarget::ClipBottom),
+                (ids.obj_src_clip_left_eve, ObjectEventTarget::SrcClipLeft),
+                (ids.obj_src_clip_top_eve, ObjectEventTarget::SrcClipTop),
+                (ids.obj_src_clip_right_eve, ObjectEventTarget::SrcClipRight),
+                (
+                    ids.obj_src_clip_bottom_eve,
+                    ObjectEventTarget::SrcClipBottom,
+                ),
+                (ids.obj_mono_eve, ObjectEventTarget::Mono),
+                (ids.obj_reverse_eve, ObjectEventTarget::Reverse),
+                (ids.obj_bright_eve, ObjectEventTarget::Bright),
+                (ids.obj_dark_eve, ObjectEventTarget::Dark),
+                (ids.obj_color_rate_eve, ObjectEventTarget::ColorRate),
+                (ids.obj_color_add_r_eve, ObjectEventTarget::ColorAddR),
+                (ids.obj_color_add_g_eve, ObjectEventTarget::ColorAddG),
+                (ids.obj_color_add_b_eve, ObjectEventTarget::ColorAddB),
+                (ids.obj_color_r_eve, ObjectEventTarget::ColorR),
+                (ids.obj_color_g_eve, ObjectEventTarget::ColorG),
+                (ids.obj_color_b_eve, ObjectEventTarget::ColorB),
+            ]),
+            props: table(&[
+                (ids.obj_patno, ObjectEventTarget::Patno),
+                (ids.obj_x, ObjectEventTarget::X),
+                (ids.obj_y, ObjectEventTarget::Y),
+                (ids.obj_z, ObjectEventTarget::Z),
+                (ids.obj_center_x, ObjectEventTarget::CenterX),
+                (ids.obj_center_y, ObjectEventTarget::CenterY),
+                (ids.obj_center_z, ObjectEventTarget::CenterZ),
+                (ids.obj_center_rep_x, ObjectEventTarget::CenterRepX),
+                (ids.obj_center_rep_y, ObjectEventTarget::CenterRepY),
+                (ids.obj_center_rep_z, ObjectEventTarget::CenterRepZ),
+                (ids.obj_scale_x, ObjectEventTarget::ScaleX),
+                (ids.obj_scale_y, ObjectEventTarget::ScaleY),
+                (ids.obj_scale_z, ObjectEventTarget::ScaleZ),
+                (ids.obj_rotate_x, ObjectEventTarget::RotateX),
+                (ids.obj_rotate_y, ObjectEventTarget::RotateY),
+                (ids.obj_rotate_z, ObjectEventTarget::RotateZ),
+                (ids.obj_clip_left, ObjectEventTarget::ClipLeft),
+                (ids.obj_clip_top, ObjectEventTarget::ClipTop),
+                (ids.obj_clip_right, ObjectEventTarget::ClipRight),
+                (ids.obj_clip_bottom, ObjectEventTarget::ClipBottom),
+                (ids.obj_src_clip_left, ObjectEventTarget::SrcClipLeft),
+                (ids.obj_src_clip_top, ObjectEventTarget::SrcClipTop),
+                (ids.obj_src_clip_right, ObjectEventTarget::SrcClipRight),
+                (ids.obj_src_clip_bottom, ObjectEventTarget::SrcClipBottom),
+                (ids.obj_tr, ObjectEventTarget::Tr),
+                (ids.obj_mono, ObjectEventTarget::Mono),
+                (ids.obj_reverse, ObjectEventTarget::Reverse),
+                (ids.obj_bright, ObjectEventTarget::Bright),
+                (ids.obj_dark, ObjectEventTarget::Dark),
+                (ids.obj_color_r, ObjectEventTarget::ColorR),
+                (ids.obj_color_g, ObjectEventTarget::ColorG),
+                (ids.obj_color_b, ObjectEventTarget::ColorB),
+                (ids.obj_color_rate, ObjectEventTarget::ColorRate),
+                (ids.obj_color_add_r, ObjectEventTarget::ColorAddR),
+                (ids.obj_color_add_g, ObjectEventTarget::ColorAddG),
+                (ids.obj_color_add_b, ObjectEventTarget::ColorAddB),
+            ]),
+        }
+    }
+
+    pub fn fixed_int_prop(&self, op: i32) -> Option<FixedIntProp> {
+        self.fixed_int_props.get(&op).copied()
+    }
+
+    pub fn event_target(&self, op: i32) -> ObjectEventTarget {
+        self.events
+            .get(&op)
+            .copied()
+            .unwrap_or(ObjectEventTarget::Unknown)
+    }
+
+    /// The event backing a property op, else the event op's own target.
+    pub fn prop_target(&self, op: i32) -> ObjectEventTarget {
+        match self.props.get(&op) {
+            Some(&target) => target,
+            None => self.event_target(op),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectEventTarget {
@@ -4370,81 +4753,7 @@ impl ObjectState {
         op: i32,
         value: i64,
     ) {
-        let target = if ids.obj_patno != 0 && op == ids.obj_patno {
-            ObjectEventTarget::Patno
-        } else if ids.obj_x != 0 && op == ids.obj_x {
-            ObjectEventTarget::X
-        } else if ids.obj_y != 0 && op == ids.obj_y {
-            ObjectEventTarget::Y
-        } else if ids.obj_z != 0 && op == ids.obj_z {
-            ObjectEventTarget::Z
-        } else if ids.obj_center_x != 0 && op == ids.obj_center_x {
-            ObjectEventTarget::CenterX
-        } else if ids.obj_center_y != 0 && op == ids.obj_center_y {
-            ObjectEventTarget::CenterY
-        } else if ids.obj_center_z != 0 && op == ids.obj_center_z {
-            ObjectEventTarget::CenterZ
-        } else if ids.obj_center_rep_x != 0 && op == ids.obj_center_rep_x {
-            ObjectEventTarget::CenterRepX
-        } else if ids.obj_center_rep_y != 0 && op == ids.obj_center_rep_y {
-            ObjectEventTarget::CenterRepY
-        } else if ids.obj_center_rep_z != 0 && op == ids.obj_center_rep_z {
-            ObjectEventTarget::CenterRepZ
-        } else if ids.obj_scale_x != 0 && op == ids.obj_scale_x {
-            ObjectEventTarget::ScaleX
-        } else if ids.obj_scale_y != 0 && op == ids.obj_scale_y {
-            ObjectEventTarget::ScaleY
-        } else if ids.obj_scale_z != 0 && op == ids.obj_scale_z {
-            ObjectEventTarget::ScaleZ
-        } else if ids.obj_rotate_x != 0 && op == ids.obj_rotate_x {
-            ObjectEventTarget::RotateX
-        } else if ids.obj_rotate_y != 0 && op == ids.obj_rotate_y {
-            ObjectEventTarget::RotateY
-        } else if ids.obj_rotate_z != 0 && op == ids.obj_rotate_z {
-            ObjectEventTarget::RotateZ
-        } else if ids.obj_clip_left != 0 && op == ids.obj_clip_left {
-            ObjectEventTarget::ClipLeft
-        } else if ids.obj_clip_top != 0 && op == ids.obj_clip_top {
-            ObjectEventTarget::ClipTop
-        } else if ids.obj_clip_right != 0 && op == ids.obj_clip_right {
-            ObjectEventTarget::ClipRight
-        } else if ids.obj_clip_bottom != 0 && op == ids.obj_clip_bottom {
-            ObjectEventTarget::ClipBottom
-        } else if ids.obj_src_clip_left != 0 && op == ids.obj_src_clip_left {
-            ObjectEventTarget::SrcClipLeft
-        } else if ids.obj_src_clip_top != 0 && op == ids.obj_src_clip_top {
-            ObjectEventTarget::SrcClipTop
-        } else if ids.obj_src_clip_right != 0 && op == ids.obj_src_clip_right {
-            ObjectEventTarget::SrcClipRight
-        } else if ids.obj_src_clip_bottom != 0 && op == ids.obj_src_clip_bottom {
-            ObjectEventTarget::SrcClipBottom
-        } else if ids.obj_tr != 0 && op == ids.obj_tr {
-            ObjectEventTarget::Tr
-        } else if ids.obj_mono != 0 && op == ids.obj_mono {
-            ObjectEventTarget::Mono
-        } else if ids.obj_reverse != 0 && op == ids.obj_reverse {
-            ObjectEventTarget::Reverse
-        } else if ids.obj_bright != 0 && op == ids.obj_bright {
-            ObjectEventTarget::Bright
-        } else if ids.obj_dark != 0 && op == ids.obj_dark {
-            ObjectEventTarget::Dark
-        } else if ids.obj_color_r != 0 && op == ids.obj_color_r {
-            ObjectEventTarget::ColorR
-        } else if ids.obj_color_g != 0 && op == ids.obj_color_g {
-            ObjectEventTarget::ColorG
-        } else if ids.obj_color_b != 0 && op == ids.obj_color_b {
-            ObjectEventTarget::ColorB
-        } else if ids.obj_color_rate != 0 && op == ids.obj_color_rate {
-            ObjectEventTarget::ColorRate
-        } else if ids.obj_color_add_r != 0 && op == ids.obj_color_add_r {
-            ObjectEventTarget::ColorAddR
-        } else if ids.obj_color_add_g != 0 && op == ids.obj_color_add_g {
-            ObjectEventTarget::ColorAddG
-        } else if ids.obj_color_add_b != 0 && op == ids.obj_color_add_b {
-            ObjectEventTarget::ColorAddB
-        } else {
-            self.event_target(ids, op)
-        };
+        let target = ids.object_op_tables().prop_target(op);
 
         let Some(ev) = self.runtime.prop_events.get_mut(target) else {
             return;
@@ -5181,81 +5490,14 @@ impl ObjectState {
         ids: &crate::runtime::constants::RuntimeConstants,
         op: i32,
     ) -> Option<i64> {
-        macro_rules! get_base_if {
-            ($id:expr, $field:ident) => {
-                if $id != 0 && op == $id {
-                    return Some(self.base.$field);
-                }
-            };
+        match ids.object_op_tables().fixed_int_prop(op)? {
+            FixedIntProp::Base(field) => Some(self.base.int_field(field)),
+            FixedIntProp::EventTotal(target) => self
+                .runtime
+                .prop_events
+                .get(target)
+                .map(|ev| ev.get_total_value() as i64),
         }
-        macro_rules! get_event_total_if {
-            ($id:expr, $target:expr) => {
-                if $id != 0 && op == $id {
-                    return self
-                        .runtime
-                        .prop_events
-                        .get($target)
-                        .map(|ev| ev.get_total_value() as i64);
-                }
-            };
-        }
-        if op == ids.obj_disp {
-            return Some(self.base.disp);
-        }
-        get_base_if!(ids.obj_wipe_copy, wipe_copy);
-        get_base_if!(ids.obj_wipe_erase, wipe_erase);
-        get_base_if!(ids.obj_click_disable, click_disable);
-        get_event_total_if!(ids.obj_patno, ObjectEventTarget::Patno);
-        get_base_if!(ids.obj_world, world);
-        get_base_if!(ids.obj_order, order);
-        get_base_if!(ids.obj_layer, layer);
-        get_event_total_if!(ids.obj_x, ObjectEventTarget::X);
-        get_event_total_if!(ids.obj_y, ObjectEventTarget::Y);
-        get_event_total_if!(ids.obj_z, ObjectEventTarget::Z);
-        get_event_total_if!(ids.obj_center_x, ObjectEventTarget::CenterX);
-        get_event_total_if!(ids.obj_center_y, ObjectEventTarget::CenterY);
-        get_event_total_if!(ids.obj_center_z, ObjectEventTarget::CenterZ);
-        get_event_total_if!(ids.obj_center_rep_x, ObjectEventTarget::CenterRepX);
-        get_event_total_if!(ids.obj_center_rep_y, ObjectEventTarget::CenterRepY);
-        get_event_total_if!(ids.obj_center_rep_z, ObjectEventTarget::CenterRepZ);
-        get_event_total_if!(ids.obj_scale_x, ObjectEventTarget::ScaleX);
-        get_event_total_if!(ids.obj_scale_y, ObjectEventTarget::ScaleY);
-        get_event_total_if!(ids.obj_scale_z, ObjectEventTarget::ScaleZ);
-        get_event_total_if!(ids.obj_rotate_x, ObjectEventTarget::RotateX);
-        get_event_total_if!(ids.obj_rotate_y, ObjectEventTarget::RotateY);
-        get_event_total_if!(ids.obj_rotate_z, ObjectEventTarget::RotateZ);
-        get_base_if!(ids.obj_clip_use, clip_use);
-        get_event_total_if!(ids.obj_clip_left, ObjectEventTarget::ClipLeft);
-        get_event_total_if!(ids.obj_clip_top, ObjectEventTarget::ClipTop);
-        get_event_total_if!(ids.obj_clip_right, ObjectEventTarget::ClipRight);
-        get_event_total_if!(ids.obj_clip_bottom, ObjectEventTarget::ClipBottom);
-        get_base_if!(ids.obj_src_clip_use, src_clip_use);
-        get_event_total_if!(ids.obj_src_clip_left, ObjectEventTarget::SrcClipLeft);
-        get_event_total_if!(ids.obj_src_clip_top, ObjectEventTarget::SrcClipTop);
-        get_event_total_if!(ids.obj_src_clip_right, ObjectEventTarget::SrcClipRight);
-        get_event_total_if!(ids.obj_src_clip_bottom, ObjectEventTarget::SrcClipBottom);
-        get_base_if!(ids.obj_alpha, alpha);
-        get_event_total_if!(ids.obj_tr, ObjectEventTarget::Tr);
-        get_event_total_if!(ids.obj_mono, ObjectEventTarget::Mono);
-        get_event_total_if!(ids.obj_reverse, ObjectEventTarget::Reverse);
-        get_event_total_if!(ids.obj_bright, ObjectEventTarget::Bright);
-        get_event_total_if!(ids.obj_dark, ObjectEventTarget::Dark);
-        get_event_total_if!(ids.obj_color_r, ObjectEventTarget::ColorR);
-        get_event_total_if!(ids.obj_color_g, ObjectEventTarget::ColorG);
-        get_event_total_if!(ids.obj_color_b, ObjectEventTarget::ColorB);
-        get_event_total_if!(ids.obj_color_rate, ObjectEventTarget::ColorRate);
-        get_event_total_if!(ids.obj_color_add_r, ObjectEventTarget::ColorAddR);
-        get_event_total_if!(ids.obj_color_add_g, ObjectEventTarget::ColorAddG);
-        get_event_total_if!(ids.obj_color_add_b, ObjectEventTarget::ColorAddB);
-        get_base_if!(ids.obj_mask_no, mask_no);
-        get_base_if!(ids.obj_tonecurve_no, tonecurve_no);
-        get_base_if!(ids.obj_light_no, light_no);
-        get_base_if!(ids.obj_fog_use, fog_use);
-        get_base_if!(ids.obj_culling, culling);
-        get_base_if!(ids.obj_alpha_test, alpha_test);
-        get_base_if!(ids.obj_alpha_blend, alpha_blend);
-        get_base_if!(ids.obj_blend, blend);
-        None
     }
 
     pub fn set_mesh_animation_state(&mut self, next: crate::mesh3d::MeshAnimationState) {
@@ -5511,89 +5753,7 @@ impl ObjectState {
         ids: &super::constants::RuntimeConstants,
         op: i32,
     ) -> ObjectEventTarget {
-        if ids.obj_x_eve != 0 && op == ids.obj_x_eve {
-            ObjectEventTarget::X
-        } else if ids.obj_y_eve != 0 && op == ids.obj_y_eve {
-            ObjectEventTarget::Y
-        } else if ids.obj_x_rep_eve != 0 && op == ids.obj_x_rep_eve {
-            ObjectEventTarget::XRep
-        } else if ids.obj_y_rep_eve != 0 && op == ids.obj_y_rep_eve {
-            ObjectEventTarget::YRep
-        } else if ids.obj_z_rep_eve != 0 && op == ids.obj_z_rep_eve {
-            ObjectEventTarget::ZRep
-        } else if ids.obj_tr_eve != 0 && op == ids.obj_tr_eve {
-            ObjectEventTarget::Tr
-        } else if ids.obj_tr_rep_eve != 0 && op == ids.obj_tr_rep_eve {
-            ObjectEventTarget::TrRep
-        } else if ids.obj_patno_eve != 0 && op == ids.obj_patno_eve {
-            ObjectEventTarget::Patno
-        } else if ids.obj_z_eve != 0 && op == ids.obj_z_eve {
-            ObjectEventTarget::Z
-        } else if ids.obj_center_x_eve != 0 && op == ids.obj_center_x_eve {
-            ObjectEventTarget::CenterX
-        } else if ids.obj_center_y_eve != 0 && op == ids.obj_center_y_eve {
-            ObjectEventTarget::CenterY
-        } else if ids.obj_center_z_eve != 0 && op == ids.obj_center_z_eve {
-            ObjectEventTarget::CenterZ
-        } else if ids.obj_center_rep_x_eve != 0 && op == ids.obj_center_rep_x_eve {
-            ObjectEventTarget::CenterRepX
-        } else if ids.obj_center_rep_y_eve != 0 && op == ids.obj_center_rep_y_eve {
-            ObjectEventTarget::CenterRepY
-        } else if ids.obj_center_rep_z_eve != 0 && op == ids.obj_center_rep_z_eve {
-            ObjectEventTarget::CenterRepZ
-        } else if ids.obj_scale_x_eve != 0 && op == ids.obj_scale_x_eve {
-            ObjectEventTarget::ScaleX
-        } else if ids.obj_scale_y_eve != 0 && op == ids.obj_scale_y_eve {
-            ObjectEventTarget::ScaleY
-        } else if ids.obj_scale_z_eve != 0 && op == ids.obj_scale_z_eve {
-            ObjectEventTarget::ScaleZ
-        } else if ids.obj_rotate_x_eve != 0 && op == ids.obj_rotate_x_eve {
-            ObjectEventTarget::RotateX
-        } else if ids.obj_rotate_y_eve != 0 && op == ids.obj_rotate_y_eve {
-            ObjectEventTarget::RotateY
-        } else if ids.obj_rotate_z_eve != 0 && op == ids.obj_rotate_z_eve {
-            ObjectEventTarget::RotateZ
-        } else if ids.obj_clip_left_eve != 0 && op == ids.obj_clip_left_eve {
-            ObjectEventTarget::ClipLeft
-        } else if ids.obj_clip_top_eve != 0 && op == ids.obj_clip_top_eve {
-            ObjectEventTarget::ClipTop
-        } else if ids.obj_clip_right_eve != 0 && op == ids.obj_clip_right_eve {
-            ObjectEventTarget::ClipRight
-        } else if ids.obj_clip_bottom_eve != 0 && op == ids.obj_clip_bottom_eve {
-            ObjectEventTarget::ClipBottom
-        } else if ids.obj_src_clip_left_eve != 0 && op == ids.obj_src_clip_left_eve {
-            ObjectEventTarget::SrcClipLeft
-        } else if ids.obj_src_clip_top_eve != 0 && op == ids.obj_src_clip_top_eve {
-            ObjectEventTarget::SrcClipTop
-        } else if ids.obj_src_clip_right_eve != 0 && op == ids.obj_src_clip_right_eve {
-            ObjectEventTarget::SrcClipRight
-        } else if ids.obj_src_clip_bottom_eve != 0 && op == ids.obj_src_clip_bottom_eve {
-            ObjectEventTarget::SrcClipBottom
-        } else if ids.obj_mono_eve != 0 && op == ids.obj_mono_eve {
-            ObjectEventTarget::Mono
-        } else if ids.obj_reverse_eve != 0 && op == ids.obj_reverse_eve {
-            ObjectEventTarget::Reverse
-        } else if ids.obj_bright_eve != 0 && op == ids.obj_bright_eve {
-            ObjectEventTarget::Bright
-        } else if ids.obj_dark_eve != 0 && op == ids.obj_dark_eve {
-            ObjectEventTarget::Dark
-        } else if ids.obj_color_rate_eve != 0 && op == ids.obj_color_rate_eve {
-            ObjectEventTarget::ColorRate
-        } else if ids.obj_color_add_r_eve != 0 && op == ids.obj_color_add_r_eve {
-            ObjectEventTarget::ColorAddR
-        } else if ids.obj_color_add_g_eve != 0 && op == ids.obj_color_add_g_eve {
-            ObjectEventTarget::ColorAddG
-        } else if ids.obj_color_add_b_eve != 0 && op == ids.obj_color_add_b_eve {
-            ObjectEventTarget::ColorAddB
-        } else if ids.obj_color_r_eve != 0 && op == ids.obj_color_r_eve {
-            ObjectEventTarget::ColorR
-        } else if ids.obj_color_g_eve != 0 && op == ids.obj_color_g_eve {
-            ObjectEventTarget::ColorG
-        } else if ids.obj_color_b_eve != 0 && op == ids.obj_color_b_eve {
-            ObjectEventTarget::ColorB
-        } else {
-            ObjectEventTarget::Unknown
-        }
+        ids.object_op_tables().event_target(op)
     }
 }
 
@@ -5679,8 +5839,8 @@ impl Default for GroupState {
             order: 0,
             layer: 0,
             cancel_priority: 0,
-            props: HashMap::new(),
-            aux_str_props: HashMap::new(),
+            props: HashMap::default(),
+            aux_str_props: HashMap::default(),
         };
         state.reinit();
         state
@@ -7151,7 +7311,7 @@ impl StageFormState {
             for (idx, m) in list.iter_mut().enumerate() {
                 let old_open = m.open;
                 m.open = false;
-                if std::env::var_os("SG_DEBUG").is_some() {
+                if env_is_set!("SG_DEBUG") {
                     eprintln!(
                         "[SG_DEBUG][MWND_STATE_TRACE] scene=<runtime> scene_no=- line=- reason=STAGE_CLOSE_ALL_MWND stage={} mwnd={} old_open={} new_open={} buttons={} faces={} objects={} waku={} filter={} pos={:?} size={:?} open_anim=({}, {}) close_anim=({}, {}) selection={} msg_len={} name_len={}",
                         stage_idx,
@@ -7615,7 +7775,9 @@ mod wipe_stage_tick_tests {
         let mut world = WorldState::new(0);
         world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
         stage.world_lists.insert(NEXT_STAGE, vec![world]);
-        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+        globals
+            .stage_forms
+            .insert(TEST_STAGE_FORM_ID, Box::new(stage));
 
         globals.tick_frame(10, 10, &[], None);
         assert_eq!(next_world_event_time(&globals), 0);
@@ -7652,7 +7814,9 @@ mod wipe_stage_tick_tests {
         let mut world = WorldState::new(0);
         world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
         stage.world_lists.insert(NEXT_STAGE, vec![world]);
-        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+        globals
+            .stage_forms
+            .insert(TEST_STAGE_FORM_ID, Box::new(stage));
         globals.start_wipe(WipeState::new(
             TEST_STAGE_FORM_ID,
             None,
@@ -7685,7 +7849,9 @@ mod wipe_stage_tick_tests {
         let mut world = WorldState::new(0);
         world.camera_eye_x.set_event(100, 1_000, 0, 0, 0);
         stage.world_lists.insert(NEXT_STAGE, vec![world]);
-        globals.stage_forms.insert(TEST_STAGE_FORM_ID, stage);
+        globals
+            .stage_forms
+            .insert(TEST_STAGE_FORM_ID, Box::new(stage));
         globals.start_wipe(WipeState::new(
             TEST_STAGE_FORM_ID,
             None,
@@ -7723,7 +7889,9 @@ mod wipe_stage_tick_tests {
         normal_stage
             .world_lists
             .insert(FRONT_STAGE, vec![normal_world]);
-        globals.stage_forms.insert(TEST_STAGE_FORM_ID, normal_stage);
+        globals
+            .stage_forms
+            .insert(TEST_STAGE_FORM_ID, Box::new(normal_stage));
 
         let mut excall_stage = StageFormState::default();
         let mut excall_world = WorldState::new(0);
@@ -7733,7 +7901,7 @@ mod wipe_stage_tick_tests {
             .insert(FRONT_STAGE, vec![excall_world]);
         globals
             .stage_forms
-            .insert(EXCALL_STAGE_FORM_ID, excall_stage);
+            .insert(EXCALL_STAGE_FORM_ID, Box::new(excall_stage));
 
         globals.script.time_stop_flag = true;
         globals.tick_frame(

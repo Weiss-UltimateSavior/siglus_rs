@@ -27,7 +27,8 @@ use siglus_assets::scene_pck::{ScenePck, ScenePckDecodeOptions};
 // path.
 macro_rules! vm_trace {
     ($vm:expr, $pc:expr, $msg:expr $(,)?) => {{
-        if $vm.vm_trace_matches() {
+        // The flag is tested inline: this runs for every opcode and push.
+        if $vm.vm_trace_config.enabled && $vm.vm_trace_matches() {
             $vm.vm_trace_emit($pc, $msg);
         }
     }};
@@ -154,7 +155,7 @@ struct VmTraceConfig {
 
 impl VmTraceConfig {
     fn from_env() -> Self {
-        let enabled = std::env::var_os("SIGLUS_TRACE_VM").is_some();
+        let enabled = env_is_set!("SIGLUS_TRACE_VM");
         let scene = std::env::var("SIGLUS_TRACE_VM_SCENE")
             .ok()
             .filter(|value| !value.is_empty());
@@ -172,7 +173,7 @@ impl VmTraceConfig {
             enabled,
             scene,
             pc_range,
-            commands_enabled: std::env::var_os("SIGLUS_TRACE_VM_COMMANDS").is_some(),
+            commands_enabled: env_is_set!("SIGLUS_TRACE_VM_COMMANDS"),
         }
     }
 }
@@ -202,20 +203,20 @@ impl VmRuntimeOptions {
                 .unwrap_or(0)
         }
 
-        let sg_debug = std::env::var_os("SG_DEBUG").is_some();
+        let sg_debug = env_is_set!("SG_DEBUG");
         Self {
             inline_user_cmd_max_steps: env_u64("SIGLUS_INLINE_USER_CMD_MAX_STEPS"),
             frame_action_max_steps: env_u64("SIGLUS_FRAME_ACTION_MAX_STEPS"),
-            trace_unknown_forms: std::env::var_os("SIGLUS_TRACE_UNKNOWN_FORMS").is_some(),
-            proc_flow_trace: std::env::var_os("SG_PROC_FLOW_TRACE").is_some(),
+            trace_unknown_forms: env_is_set!("SIGLUS_TRACE_UNKNOWN_FORMS"),
+            proc_flow_trace: env_is_set!("SG_PROC_FLOW_TRACE"),
             sg_debug,
-            syscom_proc_trace: sg_debug || std::env::var_os("SG_SYSCOM_PROC_TRACE").is_some(),
-            tick_trace: std::env::var_os("SG_TICK_TRACE").is_some(),
-            frame_action_trace: std::env::var_os("SG_FRAME_ACTION_TRACE").is_some(),
-            title_chain_trace: std::env::var_os("SG_TITLE_CHAIN_TRACE").is_some(),
-            save_load_trace: std::env::var_os("SG_SAVELOAD_TRACE").is_some(),
-            trace_call_return_pc: std::env::var_os("SIGLUS_TRACE_CALL_RETURN_PC").is_some(),
-            trace_frame_action_call: std::env::var_os("SIGLUS_TRACE_FRAME_ACTION_CALL").is_some(),
+            syscom_proc_trace: sg_debug || env_is_set!("SG_SYSCOM_PROC_TRACE"),
+            tick_trace: env_is_set!("SG_TICK_TRACE"),
+            frame_action_trace: env_is_set!("SG_FRAME_ACTION_TRACE"),
+            title_chain_trace: env_is_set!("SG_TITLE_CHAIN_TRACE"),
+            save_load_trace: env_is_set!("SG_SAVELOAD_TRACE"),
+            trace_call_return_pc: env_is_set!("SIGLUS_TRACE_CALL_RETURN_PC"),
+            trace_frame_action_call: env_is_set!("SIGLUS_TRACE_FRAME_ACTION_CALL"),
         }
     }
 }
@@ -5342,6 +5343,45 @@ impl<'a> SceneVm<'a> {
         }
     }
 
+    /// Reads a CALL_PROP without copying it: references continue into the
+    /// composed element, plain ints are pushed. False for the other forms
+    /// (`push_call_prop_result` handles them). Frame-action scripts read
+    /// these props thousands of times a frame.
+    fn push_call_prop_fast(&mut self, frame: usize, prop_idx: usize, sub: &[i32]) -> Result<bool> {
+        let prop = &self.call_stack[frame].user_props[prop_idx];
+        if let Some(composed) = self.compose_call_prop_tail(prop, sub) {
+            self.exec_property(composed)?;
+            return Ok(true);
+        }
+        use crate::runtime::forms::codes::{
+            FM_INT, FM_INTLIST, FM_INTLISTREF, FM_INTREF, FM_STR, FM_STRLIST, FM_STRLISTREF,
+            FM_STRREF,
+        };
+        let plain = sub.is_empty() || (sub.len() == 1 && self.call_array_marker(sub[0]));
+        match (prop.form, &prop.value) {
+            (FM_INT, CallPropValue::Int(n)) if plain => {
+                let n = *n;
+                self.push_int(n);
+            }
+            (FM_STR, CallPropValue::Str(text)) if plain => {
+                let text = text.clone();
+                self.push_str(text);
+            }
+            // The catch-all arm of `push_call_prop_result`: objects and other
+            // element-valued props push their element.
+            (
+                FM_INT | FM_STR | FM_INTLIST | FM_STRLIST | FM_INTREF | FM_STRREF | FM_INTLISTREF
+                | FM_STRLISTREF,
+                _,
+            ) => return Ok(false),
+            _ => {
+                let element = prop.element.clone();
+                self.push_element(element);
+            }
+        }
+        Ok(true)
+    }
+
     fn compose_call_prop_tail(&self, prop: &CallProp, sub: &[i32]) -> Option<Vec<i32>> {
         // A lone ELM_ARRAY after a reference is the compiler/runtime marker used
         // while dereferencing the property itself, not an indexed access.  The
@@ -6288,12 +6328,11 @@ impl<'a> SceneVm<'a> {
         let prop_idx = self
             .find_call_prop_index_in_frame(current_idx, call_prop_id)
             .ok_or_else(|| anyhow!("missing CALL_PROP id={} for {:?}", call_prop_id, elm))?;
-        let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
         let sub = &tail[1..];
-        if let Some(composed) = self.compose_call_prop_tail(&prop, sub) {
-            self.exec_property(composed)?;
+        if self.push_call_prop_fast(current_idx, prop_idx, sub)? {
             return Ok(true);
         }
+        let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
         self.push_call_prop_result(&prop, sub, elm)?;
         Ok(true)
     }
@@ -7603,16 +7642,15 @@ impl<'a> SceneVm<'a> {
                 .ok_or_else(|| {
                     anyhow!("missing direct CALL_PROP id={} for {:?}", call_prop_id, elm)
                 })?;
-            let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
-            if let Some(composed) = self.compose_call_prop_tail(&prop, &elm[1..]) {
-                self.exec_property(composed)?;
+            if self.push_call_prop_fast(current_idx, prop_idx, &elm[1..])? {
                 vm_trace!(
                     self,
                     None,
-                    format!("exec_property direct CALL_PROP composed elm={:?}", elm),
+                    format!("exec_property direct CALL_PROP fast elm={:?}", elm),
                 );
                 return Ok(());
             }
+            let prop = self.call_stack[current_idx].user_props[prop_idx].clone();
             self.push_call_prop_result(&prop, &elm[1..], &elm)?;
             vm_trace!(
                 self,
@@ -11466,8 +11504,8 @@ impl<'a> SceneVm<'a> {
                     name: if name.is_empty() { None } else { Some(name) },
                     x_event,
                     y_event,
-                    extra_int: std::collections::HashMap::new(),
-                    script_events: std::collections::HashMap::new(),
+                    extra_int: Default::default(),
+                    script_events: Default::default(),
                 })
             })?
         };
@@ -11515,7 +11553,7 @@ impl<'a> SceneVm<'a> {
         self.ctx
             .globals
             .stage_forms
-            .insert(normal_stage_form_id, st);
+            .insert(normal_stage_form_id, Box::new(st));
         if !back_btn_select.choices.is_empty() {
             runtime::forms::global::prepare_saved_stage_btnselitems(
                 &mut self.ctx,

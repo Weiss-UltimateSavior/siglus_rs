@@ -38,6 +38,31 @@ pub struct ImgPlane {
 
 pub type YCbCrBuffer = [ImgPlane; 3];
 
+/// An `ImgPlane` borrowed from the decoder: row `y` starts at
+/// `data_offset + y * stride` (the stride may be negative).
+#[derive(Debug, Clone, Copy)]
+pub struct ImgPlaneRef<'a> {
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+    pub data: &'a [u8],
+    pub data_offset: usize,
+}
+
+pub type YCbCrRef<'a> = [ImgPlaneRef<'a>; 3];
+
+impl ImgPlane {
+    pub fn as_ref(&self) -> ImgPlaneRef<'_> {
+        ImgPlaneRef {
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+            data: &self.data,
+            data_offset: self.data_offset,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
     pub version_major: u8,

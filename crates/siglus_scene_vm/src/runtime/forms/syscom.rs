@@ -42,7 +42,7 @@ fn p_bool(params: &[Value], idx: usize) -> bool {
 }
 
 fn sg_debug_enabled_local() -> bool {
-    std::env::var_os("SG_DEBUG").is_some()
+    env_is_set!("SG_DEBUG")
 }
 
 fn set_syscom_pending_proc(ctx: &mut CommandContext, kind: SyscomPendingProcKind) {
@@ -677,7 +677,7 @@ pub(crate) fn append_current_save_message(ctx: &mut CommandContext, msg: &str) {
 }
 
 fn save_load_trace_enabled() -> bool {
-    std::env::var_os("SG_SAVELOAD_TRACE").is_some()
+    env_is_set!("SG_SAVELOAD_TRACE")
 }
 
 fn trace_save_load_event(
@@ -1916,7 +1916,7 @@ pub fn load_global_save(ctx: &mut CommandContext) -> Result<()> {
             m.resize_with(count, String::new);
         }
         namae_global.resize_with(26 + 26 * 26, String::new);
-        ctx.globals.syscom.chrkoe_look_flags = chrkoe_look_flags;
+        ctx.globals.syscom.chrkoe_look_flags = chrkoe_look_flags.into_iter().collect();
 
         ctx.globals.syscom.total_play_time = total_play_time;
         ctx.globals

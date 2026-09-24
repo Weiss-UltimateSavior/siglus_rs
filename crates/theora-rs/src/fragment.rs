@@ -1,11 +1,26 @@
 fn clamp255(v: i32) -> u8 {
-    if v < 0 {
-        0
-    } else if v > 255 {
-        255
-    } else {
-        v as u8
-    }
+    v.clamp(0, 255) as u8
+}
+
+// The reconstruction loops work on whole 8-pixel rows taken once per row:
+// indexing each pixel of the frame checked bounds per pixel and kept the
+// compiler from using vector instructions (most of a 1080p OMV's decode).
+
+#[inline(always)]
+fn row(frame: &[u8], off: isize) -> &[u8; 8] {
+    let at = off as usize;
+    frame[at..at + 8].try_into().expect("8-pixel row")
+}
+
+#[inline(always)]
+fn row_mut(frame: &mut [u8], off: isize) -> &mut [u8; 8] {
+    let at = off as usize;
+    (&mut frame[at..at + 8]).try_into().expect("8-pixel row")
+}
+
+#[inline(always)]
+fn residue_row(residue: &[i16; 64], i: usize) -> &[i16; 8] {
+    residue[i * 8..i * 8 + 8].try_into().expect("8 residues")
 }
 
 fn idx(base: isize, x: isize, ystride: isize) -> usize {
@@ -51,9 +66,10 @@ pub fn oc_frag_recon_intra_c(
 ) {
     let mut dst = dst_off;
     for i in 0..8 {
-        let d = dst as usize;
+        let r = residue_row(residue, i);
+        let d = row_mut(dst_frame, dst);
         for j in 0..8 {
-            dst_frame[d + j] = clamp255(residue[i * 8 + j] as i32 + 128);
+            d[j] = clamp255(r[j] as i32 + 128);
         }
         dst += ystride;
     }
@@ -70,10 +86,11 @@ pub fn oc_frag_recon_inter_c(
     let mut dst = dst_off;
     let mut src = src_off;
     for i in 0..8 {
-        let d = dst as usize;
-        let s = src as usize;
+        let r = residue_row(residue, i);
+        let s = row(src_frame, src);
+        let d = row_mut(dst_frame, dst);
         for j in 0..8 {
-            dst_frame[d + j] = clamp255(residue[i * 8 + j] as i32 + src_frame[s + j] as i32);
+            d[j] = clamp255(r[j] as i32 + s[j] as i32);
         }
         dst += ystride;
         src += ystride;
@@ -94,12 +111,13 @@ pub fn oc_frag_recon_inter2_c(
     let mut src1 = src1_off;
     let mut src2 = src2_off;
     for i in 0..8 {
-        let d = dst as usize;
-        let s1 = src1 as usize;
-        let s2 = src2 as usize;
+        let r = residue_row(residue, i);
+        let s1 = row(src1_frame, src1);
+        let s2 = row(src2_frame, src2);
+        let d = row_mut(dst_frame, dst);
         for j in 0..8 {
-            let pred = ((src1_frame[s1 + j] as i32) + (src2_frame[s2 + j] as i32)) >> 1;
-            dst_frame[d + j] = clamp255(residue[i * 8 + j] as i32 + pred);
+            let pred = (s1[j] as i32 + s2[j] as i32) >> 1;
+            d[j] = clamp255(r[j] as i32 + pred);
         }
         dst += ystride;
         src1 += ystride;

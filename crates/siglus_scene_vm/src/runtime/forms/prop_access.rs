@@ -1,5 +1,5 @@
+use crate::runtime::globals::HashMap;
 use crate::runtime::{CommandContext, Value};
-use std::collections::HashMap;
 
 pub const FM_VOID: i64 = 0;
 pub const FM_INT: i64 = 10;

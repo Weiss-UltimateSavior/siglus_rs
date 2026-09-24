@@ -61,7 +61,15 @@ impl Default for AudioHub {
 
 impl AudioHub {
     pub fn new() -> Self {
-        match AudioManager::<PlatformBackend>::new(AudioManagerSettings::default()) {
+        // Replays on the virtual clock run silent: waits on a playing sound
+        // would otherwise end by the device's real playback time.
+        let manager = if cfg!(feature = "virtual-clock") {
+            Err(anyhow!("virtual clock: audio off"))
+        } else {
+            AudioManager::<PlatformBackend>::new(AudioManagerSettings::default())
+                .map_err(|e| anyhow!("{e}"))
+        };
+        match manager {
             Ok(mut manager) => {
                 let bgm = manager.add_sub_track(TrackBuilder::default()).ok();
                 let se = manager.add_sub_track(TrackBuilder::default()).ok();

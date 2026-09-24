@@ -52,7 +52,7 @@ fn install_android_panic_hook() {
 #[inline]
 fn sg_input_trace() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("SG_INPUT_DEBUG").is_some())
+    *ON.get_or_init(|| env_is_set!("SG_INPUT_DEBUG"))
 }
 
 #[unsafe(no_mangle)]

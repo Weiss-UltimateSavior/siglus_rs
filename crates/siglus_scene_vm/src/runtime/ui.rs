@@ -3,9 +3,9 @@
 use crate::image_manager::ImageHandle;
 use crate::layer::{LayerId, Sprite, SpriteFit, SpriteId, SpriteSizeMode};
 use crate::platform_time::{Duration, Instant};
+use crate::runtime::globals::HashMap;
 use crate::runtime::globals::{EditBoxListState, ScriptRuntimeState, SyscomRuntimeState};
 use crate::text_render::{FontCache, PositionedTextGlyph, TextSpriteLayer, TextStyle};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]

@@ -1,4 +1,4 @@
-use crate::codec::{Info, YCbCrBuffer};
+use crate::codec::{Info, YCbCrBuffer, YCbCrRef};
 use crate::decinfo::SetupInfo;
 use crate::decint::DecContext;
 use crate::decode as decode_impl;
@@ -42,7 +42,10 @@ impl DecoderContext {
     pub fn try_new(info: Info, setup: SetupInfo) -> Result<Self> {
         let mut raw = DecContext::default();
         validate_info(&info)?;
-        oc_state_init(&mut raw.state, &info, 6)?;
+        // Three frames (golden, previous, current) as in libtheora's
+        // decoder; the other three reference roles are the encoder's. Each
+        // frame of a 1920x1440 4:4:4 OMV is ~8.6 MiB.
+        oc_state_init(&mut raw.state, &info, 3)?;
         raw.info = info.clone();
         raw.setup = Some(setup.clone());
         raw.qinfo = setup.qinfo.clone();
@@ -101,6 +104,9 @@ impl DecoderContext {
                 }
                 self.pp_level = level;
                 self.raw.pp_level = level;
+                if level > 0 {
+                    decode_impl::ensure_pp_frame_buf(&mut self.raw);
+                }
                 Ok(())
             }
             TH_DECCTL_SET_GRANPOS => {
@@ -150,8 +156,12 @@ impl DecoderContext {
         self.packet_state = self.packet_state.saturating_add(1);
         self.packets_seen = self.packets_seen.saturating_add(1);
         self.raw.granulepos = self.granulepos;
-        let frame = decode_impl::th_decode_ycbcr_out(&self.raw)?;
-        self.last_frame = Some(frame);
+        // The decoded frame stays in the decoder's reference buffers until
+        // the next packet; `ycbcr_ref` reads it there. (A copy per packet
+        // cost a whole frame of memory traffic and one frame kept per
+        // stream.)
+        decode_impl::th_decode_ycbcr_ref(&self.raw)?;
+        self.last_frame = None;
         self.frame_available = true;
         Ok(())
     }
@@ -166,8 +176,20 @@ impl DecoderContext {
         decode_impl::th_decode_ycbcr_out(&self.raw)
     }
 
+    /// The last decoded frame, borrowed from the decoder (valid until the
+    /// next packet).
+    pub fn ycbcr_ref(&self) -> Result<YCbCrRef<'_>> {
+        if let Some(frame) = &self.last_frame {
+            return Ok([frame[0].as_ref(), frame[1].as_ref(), frame[2].as_ref()]);
+        }
+        if self.packets_seen == 0 {
+            return Err(TheoraError::BadPacket);
+        }
+        decode_impl::th_decode_ycbcr_ref(&self.raw)
+    }
+
     pub fn has_decoded_frame(&self) -> bool {
-        self.frame_available && self.last_frame.is_some()
+        self.frame_available && (self.last_frame.is_some() || self.packets_seen > 0)
     }
 
     pub fn granule_frame(&self, gp: i64) -> i64 {
@@ -200,7 +222,10 @@ impl DecoderContext {
                 self.raw.state.ref_frame_bufs[rfi][2].data.fill(0x80);
             }
             self.raw.state.ref_frame_idx[rfi] = -1;
-            oc_state_borders_fill(&mut self.raw.state, rfi);
+            // Only the decoder's three frames are allocated.
+            if !self.raw.state.ref_frame_bufs[rfi][0].data.is_empty() {
+                oc_state_borders_fill(&mut self.raw.state, rfi);
+            }
         }
         self.raw.pp_frame_buf = [Default::default(), Default::default(), Default::default()];
     }
@@ -303,6 +328,11 @@ pub fn th_decode_packetin(dec: &mut DecoderContext, op: &OggPacket) -> Result<()
 
 pub fn th_decode_ycbcr_out(dec: &DecoderContext) -> Result<YCbCrBuffer> {
     dec.ycbcr_out()
+}
+
+/// `th_decode_ycbcr_out` without copying the planes.
+pub fn th_decode_ycbcr_ref(dec: &DecoderContext) -> Result<YCbCrRef<'_>> {
+    dec.ycbcr_ref()
 }
 
 pub fn oc_dec_init_dummy_frame(dec: &mut DecoderContext) {

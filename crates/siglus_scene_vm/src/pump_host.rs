@@ -40,11 +40,15 @@ struct PumpApp {
     exit_requested: bool,
     native_messagebox_callback: Option<SiglusNativeMessageBoxCallback>,
     native_messagebox_user_data: *mut c_void,
+    /// Size the window and map input in physical pixels, ignoring the
+    /// display's HiDPI scale (the launcher app does this for every engine).
+    physical_pixels: bool,
 }
 
 impl PumpApp {
     fn new(config: SiglusHostConfig) -> Self {
         Self {
+            physical_pixels: false,
             config,
             window: None,
             window_id: None,
@@ -56,6 +60,14 @@ impl PumpApp {
         }
     }
 
+    /// The window's scale factor, or 1 in physical-pixel mode.
+    fn scale_factor(&self) -> f64 {
+        if self.physical_pixels {
+            return 1.0;
+        }
+        self.window.map_or(1.0, |w| w.scale_factor())
+    }
+
     fn ensure_created(&mut self, elwt: &dyn ActiveEventLoop) {
         if self.window.is_some() || self.init_error.is_some() {
             return;
@@ -63,11 +75,13 @@ impl PumpApp {
         let width = self.config.width.unwrap_or(1280).max(1);
         let height = self.config.height.unwrap_or(720).max(1);
         let title = resolve_game_name_from_project_dir(&self.config.project_dir);
-        let window = match elwt.create_window(
-            WindowAttributes::default()
-                .with_title(title)
-                .with_surface_size(LogicalSize::new(width as f64, height as f64)),
-        ) {
+        let attributes = WindowAttributes::default().with_title(title);
+        let attributes = if self.physical_pixels {
+            attributes.with_surface_size(winit::dpi::PhysicalSize::new(width, height))
+        } else {
+            attributes.with_surface_size(LogicalSize::new(width as f64, height as f64))
+        };
+        let window = match elwt.create_window(attributes) {
             Ok(w) => w,
             Err(e) => {
                 self.init_error = Some(format!("create window: {e:?}"));
@@ -99,6 +113,11 @@ impl PumpApp {
             self.native_messagebox_callback,
             self.native_messagebox_user_data,
         );
+        if self.physical_pixels {
+            // The renderer starts from the window's own scale factor.
+            let size = window.surface_size();
+            host.resize(size.width.max(1), size.height.max(1), 1.0);
+        }
         self.window_id = Some(window.id());
         self.window = Some(window);
         self.host = Some(host);
@@ -106,6 +125,8 @@ impl PumpApp {
     }
 
     fn handle_window_event(&mut self, event: WindowEvent, elwt: &dyn ActiveEventLoop) {
+        let scale = self.scale_factor();
+        let physical_pixels = self.physical_pixels;
         let Some(host) = self.host.as_mut() else {
             return;
         };
@@ -115,11 +136,7 @@ impl PumpApp {
                 elwt.exit();
             }
             WindowEvent::SurfaceResized(size) => {
-                let sf = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0);
+                let sf = scale as f32;
                 host.resize(size.width.max(1), size.height.max(1), sf);
             }
             WindowEvent::KeyboardInput {
@@ -168,12 +185,8 @@ impl PumpApp {
                 primary: true,
                 ..
             } => {
-                let (x, y) = if let Some(w) = self.window.as_ref() {
-                    let p = position.to_logical::<f64>(w.scale_factor());
-                    (p.x, p.y)
-                } else {
-                    (position.x, position.y)
-                };
+                let p = position.to_logical::<f64>(scale);
+                let (x, y) = (p.x, p.y);
                 host.mouse_move(x, y);
             }
             WindowEvent::PointerButton {
@@ -186,8 +199,7 @@ impl PumpApp {
                 let Some(button) = button.mouse_button() else {
                     return;
                 };
-                let point = position
-                    .to_logical::<f64>(self.window.map(|w| w.scale_factor()).unwrap_or(1.0));
+                let point = position.to_logical::<f64>(scale);
                 host.mouse_move(point.x, point.y);
                 if let Some(b) = map_mouse_button(button) {
                     match (state, b) {
@@ -214,7 +226,7 @@ impl PumpApp {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(window) = self.window.as_ref() {
-                    apply_ime_window_state(*window, host);
+                    apply_ime_window_state(*window, host, physical_pixels);
                 }
                 let status = parse_bool_exit(host.step(16), "siglus_pump_step/redraw");
                 if status != 0 {
@@ -256,13 +268,20 @@ impl ApplicationHandler for PumpApp {
     }
 }
 
-fn apply_ime_window_state(window: &dyn Window, host: &mut SiglusHost) {
+fn apply_ime_window_state(window: &dyn Window, host: &mut SiglusHost, physical_pixels: bool) {
     if let Some((x, y, width, height)) = host.vm_mut().ctx.focused_editbox_ime_area() {
-        crate::ime::enable_ime(
-            window,
-            LogicalPosition::new(x.max(0) as f64, y.max(0) as f64).into(),
-            LogicalSize::new(width.max(1) as f64, height.max(1) as f64).into(),
-        );
+        let (position, size) = if physical_pixels {
+            (
+                winit::dpi::PhysicalPosition::new(x.max(0), y.max(0)).into(),
+                winit::dpi::PhysicalSize::new(width.max(1) as u32, height.max(1) as u32).into(),
+            )
+        } else {
+            (
+                LogicalPosition::new(x.max(0) as f64, y.max(0) as f64).into(),
+                LogicalSize::new(width.max(1) as f64, height.max(1) as f64).into(),
+            )
+        };
+        crate::ime::enable_ime(window, position, size);
     } else {
         crate::ime::disable_ime(window);
     }
@@ -604,6 +623,13 @@ pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 
             return 1;
         }
     };
+    run_game(&game_root, false)
+}
+
+/// Runs a game in its own window until it ends. With `physical_pixels`, the
+/// window is sized in physical pixels and input is mapped without the
+/// display's HiDPI scale (what the launcher app uses for every engine).
+pub fn run_game(game_root: &str, physical_pixels: bool) -> i32 {
     let mut event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
@@ -614,6 +640,7 @@ pub unsafe extern "C" fn siglus_run_entry(game_root_utf8: *const c_char) -> i32 
     event_loop.set_control_flow(ControlFlow::Poll);
     let config = SiglusHostConfig::new(PathBuf::from(game_root));
     let mut app = PumpApp::new(config);
+    app.physical_pixels = physical_pixels;
     match event_loop.run_app_on_demand(&mut app) {
         Ok(()) => {
             if let Some(e) = app.init_error {

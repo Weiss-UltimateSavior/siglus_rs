@@ -1130,12 +1130,6 @@ pub fn oc_dec_pipeline_init(ctx: &mut DecContext) {
     } else {
         OC_PP_LEVEL_DISABLED
     };
-    if ctx.pipe.pp_level == OC_PP_LEVEL_DISABLED {
-        let self_idx = ctx.state.ref_frame_idx[OC_FRAME_SELF as usize];
-        if self_idx >= 0 {
-            ctx.pp_frame_buf = ctx.state.ref_frame_bufs[self_idx as usize].clone();
-        }
-    }
     ctx.pipe.dct_coeffs[..64].fill(0);
 }
 
@@ -1147,11 +1141,23 @@ fn pp_is_disabled(ctx: &DecContext) -> bool {
     ctx.pipe.pp_level == OC_PP_LEVEL_DISABLED || ctx.pp_level <= OC_PP_LEVEL_DISABLED
 }
 
+/// With post-processing off the output is the current reference frame
+/// itself (`th_decode_ycbcr_out`), so no copy is kept: copying it after
+/// every packet doubled a stream's frame memory and traffic.
 fn sync_pp_from_self(ctx: &mut DecContext) {
-    let self_idx = ctx.state.ref_frame_idx[OC_FRAME_SELF as usize];
-    if self_idx >= 0 {
-        ctx.pp_frame_buf = ctx.state.ref_frame_bufs[self_idx as usize].clone();
+    if !ctx.pp_frame_buf[0].data.is_empty() {
+        ctx.pp_frame_buf = Default::default();
     }
+}
+
+/// Post-processing (enabled through `TH_DECCTL_SET_PPLEVEL`) filters into
+/// its own buffer, starting from the current frame.
+pub fn ensure_pp_frame_buf(ctx: &mut DecContext) {
+    if !ctx.pp_frame_buf[0].data.is_empty() {
+        return;
+    }
+    let self_idx = ctx.state.ref_frame_idx[OC_FRAME_SELF as usize].max(0) as usize;
+    ctx.pp_frame_buf = ctx.state.ref_frame_bufs[self_idx].clone();
 }
 
 fn oc_dec_init_dummy_frame(ctx: &mut DecContext) {
@@ -1186,7 +1192,9 @@ fn oc_dec_init_dummy_frame(ctx: &mut DecContext) {
         let actual_fill_len = fill_len.min(plane.data.len());
         plane.data[..actual_fill_len].fill(0x80);
     }
-    ctx.pp_frame_buf = ctx.state.ref_frame_bufs[0].clone();
+    if ctx.pp_level > OC_PP_LEVEL_DISABLED {
+        ctx.pp_frame_buf = ctx.state.ref_frame_bufs[0].clone();
+    }
 }
 
 pub fn oc_dec_dc_unpredict_mcu_plane_c(ctx: &mut DecContext, pli: usize) {
@@ -1384,41 +1392,46 @@ pub fn oc_dec_frags_recon_mcu_plane(ctx: &mut DecContext, pli: usize) -> Result<
         let ystride = ctx.state.ref_ystride[pli] as isize;
         let uncoded_end = ctx.pipe.uncoded_fragis_off[pli];
         let uncoded_start = uncoded_end.saturating_sub(nuncoded);
-        let fragis: Vec<usize> = ctx.state.uncoded_fragis[uncoded_start..uncoded_end]
-            .iter()
-            .map(|&fragi| {
-                assert!(
-                    fragi >= 0,
-                    "uncoded fragment list contains an invalid fragment index"
-                );
-                fragi as usize
-            })
-            .collect();
+        // Uncoded fragments keep the previous frame's pixels. (These lists
+        // were copied into fresh vectors, the offsets for every fragment of
+        // the frame, on each MCU row: most of a 1080p frame's decode time.)
+        let fragis = &ctx.state.uncoded_fragis[uncoded_start..uncoded_end];
+        assert!(
+            fragis.iter().all(|&fragi| fragi >= 0),
+            "uncoded fragment list contains an invalid fragment index"
+        );
         let plane_base = ctx.state.ref_frame_bufs[self_slot][pli].data_offset as isize;
-        let frag_buf_offs: Vec<isize> = ctx
-            .state
-            .frag_buf_offs
-            .iter()
-            .map(|&off| plane_base + off)
-            .collect();
+        let frag_buf_offs = &ctx.state.frag_buf_offs;
         if prev_slot < self_slot {
             let (left, right) = ctx.state.ref_frame_bufs.split_at_mut(self_slot);
             let src = &left[prev_slot][pli].data;
             let dst = &mut right[0][pli].data;
-            oc_frag_copy_list_c(dst, src, ystride, &fragis, &frag_buf_offs);
+            copy_uncoded_frags(dst, src, ystride, fragis, frag_buf_offs, plane_base);
         } else if prev_slot > self_slot {
             let (left, right) = ctx.state.ref_frame_bufs.split_at_mut(prev_slot);
             let dst = &mut left[self_slot][pli].data;
             let src = &right[0][pli].data;
-            oc_frag_copy_list_c(dst, src, ystride, &fragis, &frag_buf_offs);
-        } else {
-            let src = ctx.state.ref_frame_bufs[prev_slot][pli].data.clone();
-            let dst = &mut ctx.state.ref_frame_bufs[self_slot][pli].data;
-            oc_frag_copy_list_c(dst, &src, ystride, &fragis, &frag_buf_offs);
+            copy_uncoded_frags(dst, src, ystride, fragis, frag_buf_offs, plane_base);
         }
+        // With PREV and SELF the same frame the copy would leave it as it is.
         ctx.pipe.uncoded_fragis_off[pli] = uncoded_start;
     }
     Ok(())
+}
+
+/// `oc_frag_copy_list_c` with the plane's base offset added per fragment.
+fn copy_uncoded_frags(
+    dst: &mut [u8],
+    src: &[u8],
+    ystride: isize,
+    fragis: &[isize],
+    frag_buf_offs: &[isize],
+    plane_base: isize,
+) {
+    for &fragi in fragis {
+        let off = plane_base + frag_buf_offs[fragi as usize];
+        crate::fragment::oc_frag_copy_c(dst, off, src, off, ystride);
+    }
 }
 
 #[inline]
@@ -2129,6 +2142,20 @@ pub fn th_decode_packetin(
         assign_frame_role(ctx, OC_FRAME_PREV as usize, self_slot);
     }
     Ok(ctx.state.frame_type == OC_INTRA_FRAME)
+}
+
+/// `th_decode_ycbcr_out` borrowing the planes.
+pub fn th_decode_ycbcr_ref(ctx: &DecContext) -> Result<crate::codec::YCbCrRef<'_>> {
+    if !pp_is_disabled(ctx) && !ctx.pp_frame_buf[0].data.is_empty() {
+        return Ok(crate::internal::oc_ycbcr_buffer_flip_ref(&ctx.pp_frame_buf));
+    }
+    let self_idx = ctx.state.ref_frame_idx[OC_FRAME_SELF as usize];
+    if self_idx < 0 {
+        return Err(TheoraError::BadPacket);
+    }
+    Ok(crate::internal::oc_ycbcr_buffer_flip_ref(
+        &ctx.state.ref_frame_bufs[self_idx as usize],
+    ))
 }
 
 pub fn th_decode_ycbcr_out(ctx: &DecContext) -> Result<YCbCrBuffer> {

@@ -61,8 +61,12 @@ const OMV_STREAM_FRAME_KEEP: usize = 16;
 const OMV_STREAM_FRAME_KEEP: usize = 6;
 #[cfg(target_os = "vita")]
 const OMV_STREAM_FRAME_KEEP: usize = 1;
-#[cfg(not(target_os = "vita"))]
+#[cfg(not(any(target_os = "vita", feature = "virtual-clock")))]
 const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 4;
+/// Virtual-clock replays decode no frame ahead, so the frame on screen does
+/// not depend on how fast the decoder thread ran.
+#[cfg(all(not(target_os = "vita"), feature = "virtual-clock"))]
+const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 0;
 #[cfg(target_os = "vita")]
 const OMV_STREAM_DECODE_LEAD_FRAMES: usize = 1;
 #[cfg(not(any(target_os = "horizon", target_os = "vita")))]
@@ -88,6 +92,26 @@ const WMV_STREAM_FRAME_KEEP: usize = 2;
 const WMV_STREAM_DECODE_LEAD_MS: usize = 750;
 #[cfg(target_os = "vita")]
 const WMV_STREAM_DECODE_LEAD_MS: usize = 150;
+
+/// Movie decoding runs below the game thread on PS Vita: with several
+/// 1080p OMV streams (GameData's title menu) the decoders took cores the
+/// script and renderer needed, and a late movie frame costs less than a
+/// late game frame.
+fn lower_worker_thread_priority() {
+    #[cfg(target_os = "vita")]
+    unsafe {
+        unsafe extern "C" {
+            fn sceKernelGetThreadId() -> i32;
+            fn sceKernelGetThreadCurrentPriority() -> i32;
+            fn sceKernelChangeThreadPriority(thid: i32, priority: i32) -> i32;
+        }
+        let current = sceKernelGetThreadCurrentPriority();
+        if current > 0 {
+            // User priorities run from 64 (most urgent) to 191.
+            sceKernelChangeThreadPriority(sceKernelGetThreadId(), (current + 16).min(191));
+        }
+    }
+}
 
 fn movie_output_dimensions(width: u32, height: u32) -> (u32, u32) {
     #[cfg(target_os = "vita")]
@@ -735,6 +759,7 @@ impl MovieManager {
                 let (tx, rx) = mpsc::channel();
                 let worker_path = path.clone();
                 thread::spawn(move || {
+                    lower_worker_thread_priority();
                     let result =
                         decode_asset_for_path(&worker_path).map_err(|e| format!("{:#}", e));
                     let _ = tx.send(result);
@@ -981,6 +1006,7 @@ impl MovieManager {
             let worker_cancel = cancel.clone();
             let worker_path = path.to_path_buf();
             thread::spawn(move || {
+                lower_worker_thread_priority();
                 let result = decode_mpeg2_audio_for_path(&worker_path, worker_cancel.as_ref())
                     .map_err(|err| format!("{:#}", err));
                 let _ = tx.send(result);
@@ -1171,6 +1197,7 @@ impl MovieManager {
             let worker_cancel = cancel.clone();
             let worker_path = path.to_path_buf();
             thread::spawn(move || {
+                lower_worker_thread_priority();
                 let result = decode_wmv_audio_for_path(&worker_path, worker_cancel.as_ref())
                     .map_err(|err| format!("{:#}", err));
                 let _ = tx.send(result);
@@ -1205,6 +1232,12 @@ impl MovieManager {
         if !self.omv_streams.contains_key(&path) {
             let state = spawn_omv_stream_state(path.clone())?;
             self.omv_streams.insert(path.clone(), state);
+        }
+        #[cfg(feature = "virtual-clock")]
+        if let Some(state) = self.omv_streams.get_mut(&path) {
+            settle_omv_stream(&path, state, None, |state| {
+                state.fps.is_some() || state.frame_times.is_some()
+            })?;
         }
 
         let effective_timer_ms = self
@@ -1272,6 +1305,12 @@ impl MovieManager {
             false,
             !cfg!(target_os = "vita"),
         )?;
+        #[cfg(feature = "virtual-clock")]
+        if let Some(desired) = desired_before_drain {
+            settle_omv_stream(&path, state, desired_before_drain, |state| {
+                state.frames.back().is_some_and(|(idx, _)| *idx >= desired)
+            })?;
+        }
 
         let has_loop_head = loop_flag && !state.loop_head_frames.is_empty();
         if state.frames.is_empty() && !has_loop_head {
@@ -1625,6 +1664,7 @@ fn spawn_mpeg2_stream_state(
     let worker_request_frames = request_frames.clone();
     let video_path = path.clone();
     thread::spawn(move || {
+        lower_worker_thread_priority();
         let result = stream_mpeg2_video_worker(
             video_path.as_path(),
             tx.clone(),
@@ -2259,6 +2299,7 @@ fn spawn_wmv_stream_state(
     let worker_request_ms = request_ms.clone();
     let worker_path = path.clone();
     thread::spawn(move || {
+        lower_worker_thread_priority();
         let result = stream_wmv_video_worker(worker_path.as_path(), tx.clone(), worker_request_ms);
         if let Err(err) = result {
             let _ = tx.send(Err(format!("{:#}", err)));
@@ -2306,7 +2347,7 @@ fn stream_wmv_video_worker(
         return Ok(());
     }
 
-    let trace = std::env::var_os("SG_MOVIE_TRACE").is_some();
+    let trace = env_is_set!("SG_MOVIE_TRACE");
     if trace {
         eprintln!(
             "[SG_MOVIE_TRACE][WMV] decoder.open path={} size={}x{}",
@@ -2535,6 +2576,7 @@ fn spawn_omv_stream_state(path: PathBuf) -> Result<OmvStreamState> {
     let request_frame = Arc::new(AtomicUsize::new(0));
     let worker_request_frame = request_frame.clone();
     thread::spawn(move || {
+        lower_worker_thread_priority();
         let result = stream_omv_video_worker(path.as_path(), tx.clone(), worker_request_frame);
         if let Err(err) = result {
             let _ = tx.send(Err(format!("{:#}", err)));
@@ -2723,7 +2765,17 @@ fn stream_omv_video_worker(
             if request_frame.load(Ordering::Acquire) == usize::MAX {
                 return Ok(());
             }
-            let Some(buf) = video_tf.read_video_frame()? else {
+            let Some(frame) = video_tf.read_video_frame_with(|ycbcr| {
+                omv_rgba_frame(
+                    &DecoderOmvPlanes(ycbcr),
+                    vinfo,
+                    display_h,
+                    theora_type,
+                    width,
+                    height,
+                )
+            })?
+            else {
                 if !eof_reported {
                     if tx.send(Ok(OmvStreamEvent::Done)).is_err() {
                         return Ok(());
@@ -2732,16 +2784,13 @@ fn stream_omv_video_worker(
                 }
                 break;
             };
-            if !send_omv_video_frame(
-                &tx,
-                next_frame_idx,
-                &buf,
-                vinfo,
-                display_h,
-                theora_type,
-                width,
-                height,
-            )? {
+            if tx
+                .send(Ok(OmvStreamEvent::Video {
+                    frame_idx: next_frame_idx,
+                    frame,
+                }))
+                .is_err()
+            {
                 return Ok(());
             }
             next_frame_idx = next_frame_idx.saturating_add(1);
@@ -2790,9 +2839,32 @@ fn send_omv_video_frame(
     width: u32,
     height: u32,
 ) -> Result<bool> {
+    let (uv_w, _uv_h, y_plane_len, u_plane_len, _v_plane_len) =
+        omv_plane_layout(vinfo.frame_width, vinfo.frame_height, vinfo.fmt);
+    let planes = PackedOmvPlanes {
+        data: buf,
+        offsets: [0, y_plane_len, y_plane_len.saturating_add(u_plane_len)],
+        widths: [vinfo.frame_width.max(1) as usize, uv_w, uv_w],
+    };
+    let frame = omv_rgba_frame(&planes, vinfo, display_h, theora_type, width, height);
+    Ok(tx
+        .send(Ok(OmvStreamEvent::Video { frame_idx, frame }))
+        .is_ok())
+}
+
+/// One OMV frame converted for display (downscaled on consoles, see
+/// `movie_output_dimensions`).
+fn omv_rgba_frame(
+    planes: &impl OmvPlanes,
+    vinfo: siglus_omv_decoder::VideoInfo,
+    display_h: i32,
+    theora_type: u32,
+    width: u32,
+    height: u32,
+) -> Arc<RgbaImage> {
     let (output_width, output_height) = movie_output_dimensions(width, height);
-    let rgba = convert_omv_frame_to_size(
-        buf,
+    let rgba = convert_omv_planes_to_size(
+        planes,
         vinfo.frame_width,
         vinfo.frame_height,
         vinfo.fmt,
@@ -2802,16 +2874,13 @@ fn send_omv_video_frame(
         output_width as usize,
         output_height as usize,
     );
-    let frame = Arc::new(RgbaImage {
+    Arc::new(RgbaImage {
         width: output_width,
         height: output_height,
         center_x: 0,
         center_y: 0,
         rgba,
-    });
-    Ok(tx
-        .send(Ok(OmvStreamEvent::Video { frame_idx, frame }))
-        .is_ok())
+    })
 }
 
 fn select_stream_frame(
@@ -2895,6 +2964,34 @@ fn cache_omv_loop_head_frame(state: &mut OmvStreamState, frame_idx: usize, frame
     state.loop_head_bytes = state.loop_head_bytes.saturating_add(frame_bytes);
     state.loop_head_frames.push_back((frame_idx, frame.clone()));
 }
+
+/// Virtual-clock replays only: waits (on the real clock) until the decoder
+/// thread has delivered what a fast machine would have by now, so the frame
+/// shown does not depend on thread timing.
+#[cfg(feature = "virtual-clock")]
+fn settle_omv_stream(
+    path: &Path,
+    state: &mut OmvStreamState,
+    target_frame_idx: Option<usize>,
+    ready: impl Fn(&OmvStreamState) -> bool,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(5);
+    while !ready(state) && !state.done && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        drain_omv_stream_state(path, state, target_frame_idx, false, true)?;
+    }
+    OMV_SETTLE_NS.fetch_add(
+        start.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    Ok(())
+}
+
+/// Real time spent in `settle_omv_stream` (replays leave it out of the VM's
+/// time).
+#[cfg(feature = "virtual-clock")]
+pub static OMV_SETTLE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn drain_omv_stream_state(
     path: &Path,
@@ -4842,9 +4939,7 @@ fn build_mpeg2_audio_timeline(
         samples.extend_from_slice(&converted);
     }
 
-    if (std::env::var_os("SG_MOVIE_TRACE").is_some() || std::env::var_os("SG_DEBUG").is_some())
-        && discontinuity_count > 0
-    {
+    if (env_is_set!("SG_MOVIE_TRACE") || env_is_set!("SG_DEBUG")) && discontinuity_count > 0 {
         eprintln!(
             "[SG_DEBUG][MOV] audio_pts.contiguous path={} anchors_over_tolerance={} max_drift_frames={} max_drift_ms={}",
             path.display(),
@@ -5130,28 +5225,169 @@ fn convert_omv_frame_to_size(
     // theora_size as the visible rectangle. `data` is the same set of full
     // decoded planes repacked tightly, so frame_width/frame_height are the
     // source strides here and display_width/display_height are the output size.
+    let (uv_w, _uv_h, y_plane_len, u_plane_len, _v_plane_len) =
+        omv_plane_layout(frame_width, frame_height, fmt);
+    let planes = PackedOmvPlanes {
+        data,
+        offsets: [0, y_plane_len, y_plane_len.saturating_add(u_plane_len)],
+        widths: [frame_width.max(1) as usize, uv_w, uv_w],
+    };
+    convert_omv_planes_to_size(
+        &planes,
+        frame_width,
+        frame_height,
+        fmt,
+        display_width,
+        display_height,
+        theora_type,
+        output_width,
+        output_height,
+    )
+}
+
+/// Decoded OMV planes (Y/B, U/G, V/R) for `convert_omv_planes_to_size`.
+trait OmvPlanes {
+    /// Plane `pli`'s sample at (`x`, `y`), or `default` outside it.
+    fn sample(&self, pli: usize, x: usize, y: usize, default: u8) -> u8;
+
+    /// Row `y` of plane `pli` as `len` bytes, when byte `x` of it is
+    /// `sample(pli, x, y, _)` for every `x < len` (None otherwise).
+    fn row(&self, pli: usize, y: usize, len: usize) -> Option<&[u8]>;
+}
+
+/// The planes repacked tightly one after another (worker messages).
+struct PackedOmvPlanes<'a> {
+    data: &'a [u8],
+    offsets: [usize; 3],
+    widths: [usize; 3],
+}
+
+impl OmvPlanes for PackedOmvPlanes<'_> {
+    fn sample(&self, pli: usize, x: usize, y: usize, default: u8) -> u8 {
+        get_plane_sample(
+            self.data,
+            self.offsets[pli],
+            self.widths[pli],
+            x,
+            y,
+            default,
+        )
+    }
+
+    fn row(&self, pli: usize, y: usize, len: usize) -> Option<&[u8]> {
+        let width = self.widths[pli];
+        if width == 0 {
+            return None;
+        }
+        let start = self.offsets[pli].checked_add(y.checked_mul(width)?)?;
+        self.data.get(start..start.checked_add(len)?)
+    }
+}
+
+/// The planes as the Theora decoder holds them (no repacked copy: at
+/// 1920x1440 4:4:4 that was 8 MiB per frame per stream).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+struct DecoderOmvPlanes<'a>(&'a siglus_omv_decoder::YCbCrRef<'a>);
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl OmvPlanes for DecoderOmvPlanes<'_> {
+    fn sample(&self, pli: usize, x: usize, y: usize, default: u8) -> u8 {
+        let plane = &self.0[pli];
+        let (width, height) = (plane.width.max(0) as usize, plane.height.max(0) as usize);
+        if x >= width || y >= height {
+            return default;
+        }
+        let index = plane.data_offset as isize + y as isize * plane.stride as isize + x as isize;
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| plane.data.get(index))
+            .copied()
+            .unwrap_or(default)
+    }
+
+    fn row(&self, pli: usize, y: usize, len: usize) -> Option<&[u8]> {
+        let plane = &self.0[pli];
+        if len > plane.width.max(0) as usize || y >= plane.height.max(0) as usize {
+            return None;
+        }
+        let start = plane.data_offset as isize + y as isize * plane.stride as isize;
+        let start = usize::try_from(start).ok()?;
+        plane.data.get(start..start.checked_add(len)?)
+    }
+}
+
+fn bilinear_omv_sample(
+    planes: &impl OmvPlanes,
+    pli: usize,
+    x: (usize, usize, u32),
+    y: (usize, usize, u32),
+    default: u8,
+) -> u8 {
+    let (x0, x1, fx) = x;
+    let (y0, y1, fy) = y;
+    let p00 = u64::from(planes.sample(pli, x0, y0, default));
+    let p10 = u64::from(planes.sample(pli, x1, y0, default));
+    let p01 = u64::from(planes.sample(pli, x0, y1, default));
+    let p11 = u64::from(planes.sample(pli, x1, y1, default));
+    const ONE: u64 = 1 << 16;
+    let fx = u64::from(fx);
+    let fy = u64::from(fy);
+    let top = p00 * (ONE - fx) + p10 * fx;
+    let bottom = p01 * (ONE - fx) + p11 * fx;
+    ((top * (ONE - fy) + bottom * fy + (1 << 31)) >> 32) as u8
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_omv_planes_to_size(
+    planes: &impl OmvPlanes,
+    frame_width: i32,
+    frame_height: i32,
+    fmt: i32,
+    display_width: i32,
+    display_height: i32,
+    theora_type: u32,
+    output_width: usize,
+    output_height: usize,
+) -> Vec<u8> {
     let sw = frame_width.max(1) as usize;
     let sh = frame_height.max(1) as usize;
     let dw = display_width.max(1) as usize;
     let dh = display_height.max(1) as usize;
-
-    let (uv_w, uv_h, y_plane_len, u_plane_len, _v_plane_len) =
-        omv_plane_layout(frame_width, frame_height, fmt);
-    let y_off = 0usize;
-    let u_off = y_off.saturating_add(y_plane_len);
-    let v_off = u_off.saturating_add(u_plane_len);
+    let (uv_w, uv_h) = yuv_plane_size(frame_width, frame_height, fmt);
 
     let mut rgba = vec![0u8; output_width.saturating_mul(output_height).saturating_mul(4)];
+    // Source column of each output column, and how much of a row they
+    // span: rows are then read as slices (per-pixel sampling with a division
+    // and bounds checks took longer than decoding a 1080p frame).
+    let source_x: Vec<usize> = (0..output_width)
+        .map(|out_x| out_x * dw / output_width)
+        .collect();
+    let row_len = source_x.last().map_or(0, |&x| x + 1);
 
     match (theora_type, fmt) {
         (siglus_assets::omv::OMV_THEORA_TYPE_RGB, _) => {
             for out_y in 0..output_height {
                 let y = out_y * dh / output_height;
+                if let (Some(b_row), Some(g_row), Some(r_row)) = (
+                    planes.row(0, y, row_len),
+                    planes.row(1, y, row_len),
+                    planes.row(2, y, row_len),
+                ) {
+                    let out_row =
+                        &mut rgba[out_y * output_width * 4..(out_y + 1) * output_width * 4];
+                    for (px, &x) in out_row.chunks_exact_mut(4).zip(&source_x) {
+                        px[0] = r_row[x];
+                        px[1] = g_row[x];
+                        px[2] = b_row[x];
+                        px[3] = 0xff;
+                    }
+                    continue;
+                }
                 for out_x in 0..output_width {
                     let x = out_x * dw / output_width;
-                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
-                    let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
-                    let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
+                    let b = planes.sample(0, x, y, 0);
+                    let g = planes.sample(1, x, y, 0);
+                    let r = planes.sample(2, x, y, 0);
                     let out = (out_y * output_width + out_x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
@@ -5168,20 +5404,36 @@ fn convert_omv_frame_to_size(
             let alpha_h_2 = alpha_h * 2;
             for out_y in 0..output_height {
                 let y = out_y * dh / output_height;
-                let (a_off, local_y, a_width) = if y < alpha_h {
-                    (y_off, y, sw)
+                let (a_pli, local_y) = if y < alpha_h {
+                    (0, y)
                 } else if y < alpha_h_2 {
-                    (u_off, y - alpha_h, uv_w)
+                    (1, y - alpha_h)
                 } else {
-                    (v_off, y - alpha_h_2, uv_w)
+                    (2, y - alpha_h_2)
                 };
                 let alpha_y = dh.saturating_add(local_y);
+                if let (Some(b_row), Some(g_row), Some(r_row), Some(a_row)) = (
+                    planes.row(0, y, row_len),
+                    planes.row(1, y, row_len),
+                    planes.row(2, y, row_len),
+                    planes.row(a_pli, alpha_y, row_len),
+                ) {
+                    let out_row =
+                        &mut rgba[out_y * output_width * 4..(out_y + 1) * output_width * 4];
+                    for (px, &x) in out_row.chunks_exact_mut(4).zip(&source_x) {
+                        px[0] = r_row[x];
+                        px[1] = g_row[x];
+                        px[2] = b_row[x];
+                        px[3] = a_row[x];
+                    }
+                    continue;
+                }
                 for out_x in 0..output_width {
                     let x = out_x * dw / output_width;
-                    let b = get_plane_sample(data, y_off, sw, x, y, 0);
-                    let g = get_plane_sample(data, u_off, uv_w, x, y, 0);
-                    let r = get_plane_sample(data, v_off, uv_w, x, y, 0);
-                    let a = get_plane_sample(data, a_off, a_width, x, alpha_y, 0xff);
+                    let b = planes.sample(0, x, y, 0);
+                    let g = planes.sample(1, x, y, 0);
+                    let r = planes.sample(2, x, y, 0);
+                    let a = planes.sample(a_pli, x, alpha_y, 0xff);
                     let out = (out_y * output_width + out_x) * 4;
                     rgba[out] = r;
                     rgba[out + 1] = g;
@@ -5198,9 +5450,9 @@ fn convert_omv_frame_to_size(
                 let y = out_y * dh / output_height;
                 for out_x in 0..output_width {
                     let x = out_x * dw / output_width;
-                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
-                    let u = get_plane_sample(data, u_off, uv_w, x, y, 128) as f32 - 128.0;
-                    let v = get_plane_sample(data, v_off, uv_w, x, y, 128) as f32 - 128.0;
+                    let yv = planes.sample(0, x, y, 0) as f32;
+                    let u = planes.sample(1, x, y, 128) as f32 - 128.0;
+                    let v = planes.sample(2, x, y, 128) as f32 - 128.0;
                     let out = (out_y * output_width + out_x) * 4;
                     rgba[out] = clamp_f(yv + 1.40200 * v);
                     rgba[out + 1] = clamp_f(yv - 0.34414 * u - 0.71414 * v);
@@ -5226,14 +5478,10 @@ fn convert_omv_frame_to_size(
                 let y_coord = chroma_y[y];
                 for out_x in 0..output_width {
                     let x = out_x * dw / output_width;
-                    let yv = get_plane_sample(data, y_off, sw, x, y, 0) as f32;
+                    let yv = planes.sample(0, x, y, 0) as f32;
                     let x_coord = chroma_x[x];
-                    let u = get_bilinear_plane_sample(data, u_off, uv_w, x_coord, y_coord, 128)
-                        as f32
-                        - 128.0;
-                    let v = get_bilinear_plane_sample(data, v_off, uv_w, x_coord, y_coord, 128)
-                        as f32
-                        - 128.0;
+                    let u = bilinear_omv_sample(planes, 1, x_coord, y_coord, 128) as f32 - 128.0;
+                    let v = bilinear_omv_sample(planes, 2, x_coord, y_coord, 128) as f32 - 128.0;
 
                     let out = (out_y * output_width + out_x) * 4;
                     rgba[out] = clamp_f(yv + 1.40200 * v);
@@ -5396,6 +5644,76 @@ mod omv_conversion_parity_tests {
                 16, 6, 255,
             ]
         );
+    }
+
+    /// Converting from the decoder's planes gives the same pixels as the
+    /// repacked copy, full size and downscaled (real OMVs, when present).
+    #[test]
+    fn decoder_planes_convert_like_packed_planes() {
+        use super::{DecoderOmvPlanes, convert_omv_frame_to_size, convert_omv_planes_to_size};
+        let files = [
+            "/Users/xmoe/Documents/GameData/mov/ef_wind_dust01.omv",
+            "/Users/xmoe/Documents/GameData/mov/ef_wind04.omv",
+            "/Users/xmoe/Documents/GameData/mov/ef_fog01.omv",
+            "/Users/xmoe/Documents/RewriteHF/mov/ny_hf_waterscreen.omv",
+        ];
+        for file in files {
+            let path = std::path::Path::new(file);
+            if !path.is_file() {
+                continue;
+            }
+            let omv = siglus_assets::omv::OmvFile::open(path).unwrap();
+            let open = || {
+                siglus_omv_decoder::TheoraVideoStream::open(
+                    omv.open_embedded_ogg_reader(path).unwrap(),
+                )
+                .unwrap()
+            };
+            let (mut packed_stream, mut direct_stream) = (open(), open());
+            let vinfo = packed_stream.info();
+            let width = omv.header.display_width as i32;
+            let height = omv.header.display_height as i32;
+            let theora_type = omv.header.theora_type;
+            let sizes = [
+                (width as usize, height as usize),
+                (width as usize / 2, height as usize / 2),
+            ];
+            for frame in 0..40 {
+                let packed = packed_stream.read_video_frame().unwrap().unwrap();
+                let direct = direct_stream
+                    .read_video_frame_with(|ycbcr| {
+                        sizes.map(|(w, h)| {
+                            convert_omv_planes_to_size(
+                                &DecoderOmvPlanes(ycbcr),
+                                vinfo.frame_width,
+                                vinfo.frame_height,
+                                vinfo.fmt,
+                                width,
+                                height,
+                                theora_type,
+                                w,
+                                h,
+                            )
+                        })
+                    })
+                    .unwrap()
+                    .unwrap();
+                for (i, (w, h)) in sizes.into_iter().enumerate() {
+                    let expected = convert_omv_frame_to_size(
+                        &packed,
+                        vinfo.frame_width,
+                        vinfo.frame_height,
+                        vinfo.fmt,
+                        width,
+                        height,
+                        theora_type,
+                        w,
+                        h,
+                    );
+                    assert!(direct[i] == expected, "{file} frame {frame} at {w}x{h}");
+                }
+            }
+        }
     }
 
     #[test]

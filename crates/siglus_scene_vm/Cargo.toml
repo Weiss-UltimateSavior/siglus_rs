@@ -7,7 +7,14 @@ license.workspace = true
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
 
+[features]
+# Replaces the monotonic clock with one advanced by hand
+# (`platform_time::advance_virtual_clock`), for deterministic replays of the
+# VM (examples/vm_replay.rs). Never enable it in a player.
+virtual-clock = []
+
 [dependencies]
+rustc-hash = "2"
 anyhow.workspace = true
 clap.workspace = true
 bytemuck.workspace = true
@@ -75,3 +82,7 @@ getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "vm_replay"
+required-features = ["virtual-clock"]

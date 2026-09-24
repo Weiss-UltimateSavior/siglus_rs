@@ -8,16 +8,18 @@ fn main() {
 #[cfg(target_os = "vita")]
 mod gpu;
 
-// newlib's default heap is too small for RewriteHF's rebuilt 43 MiB scene
-// pack plus decoded images, transition captures and video frames. The heap
-// is reserved whole at startup; in extended memory mode (cargo-vita sets
-// ATTRIBUTE2=12) about 180 MiB of user memory stayed free beside a 160 MiB
-// heap after vitaGL started, and 160 MiB ran out when a RewriteHF route
-// began. 256 MiB leaves ~85 MiB for vitaGL, thread stacks and the system.
+// newlib's default heap is too small for decoded images, transition
+// captures and video. The heap is reserved whole at startup, in extended
+// memory mode (cargo-vita sets ATTRIBUTE2=12). With a 256 MiB heap about
+// 100 MiB of user memory stayed free all game long beside vita2d (large
+// textures live in CDRAM), while GameData's 1080p title menu (four
+// 1920-wide OMV decoders, ~70 MiB of images, a 22 MiB font) ran the heap
+// out. 320 MiB leaves ~38 MiB for thread stacks, small textures and the
+// system.
 #[cfg(target_os = "vita")]
 #[used]
 #[unsafe(export_name = "_newlib_heap_size_user")]
-pub static NEWLIB_HEAP_SIZE_USER: u32 = 256 * 1024 * 1024;
+pub static NEWLIB_HEAP_SIZE_USER: u32 = 320 * 1024 * 1024;
 
 #[cfg(target_os = "vita")]
 mod vita {
@@ -50,7 +52,9 @@ mod vita {
     // The Kira backend still needs to advance when Vita3K has no usable
     // audio device. One video tick is 768 stereo samples at 48 kHz.
     const SILENT_AUDIO_FRAMES: usize = 768;
-    const MAX_LOGICAL_PIXELS: u64 = 1280 * 720;
+    /// 1080p games (GameData) fit: sprites are GPU quads and only wipes use
+    /// the full-size software framebuffer (8 MiB at 1920x1080).
+    const MAX_LOGICAL_PIXELS: u64 = 1920 * 1080;
     const ROOT: &str = "ux0:data/siglus_rs";
 
     #[repr(C)]
@@ -423,6 +427,14 @@ mod vita {
             let us = step_start.elapsed().as_micros() as u64;
             step_us += us;
             step_max_us = step_max_us.max(us);
+            let frame_detail = siglus_scene_vm::render::vita_stats::take_frame_detail();
+            let gpu_detail = super::gpu::take_frame_detail();
+            if us > 150_000 {
+                log(&format!(
+                    "slow frame {frame}: step {us} us ({frame_detail}; {gpu_detail}) scene={:?}",
+                    host.vm_mut().current_scene_name()
+                ));
+            }
             if finished {
                 break;
             }
@@ -454,12 +466,7 @@ mod vita {
                 step_us = 0;
                 step_max_us = 0;
             }
-            if frame % 120 == 0 && frame % 600 != 0 {
-                let status = format!("frame {frame}: {}", host.debug_status_summary());
-                log(&status);
-                note_status(status);
-            }
-            if frame % 600 == 0 {
+            if frame % 120 == 0 {
                 log_memory(&format!("frame {frame}"));
                 log_engine_memory(&mut host, &format!("frame {frame}"));
                 let status = format!("frame {frame}: {}", host.debug_status_summary());

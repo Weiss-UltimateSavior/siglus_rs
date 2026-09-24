@@ -19,9 +19,12 @@ use vitasdk_sys::{
 const SCREEN_W: i32 = 960;
 const SCREEN_H: i32 = 544;
 /// A 1280x720 scene with a few full-screen layers needs more than 16 MiB in
-/// one frame; when the textures of one frame do not fit, it falls back to
-/// the (slow) software compositor. CDRAM had ~75 MiB free in RewriteHF.
-const GPU_TEXTURE_BUDGET: usize = 48 * 1024 * 1024;
+/// one frame, a 1920x1080 one 8 MiB per full-screen layer; when the
+/// textures of one frame do not fit, it falls back to the (slow) software
+/// compositor. CDRAM has ~110 MiB free after vita2d starts; small textures
+/// live in ordinary memory (`CDRAM_MIN_TEXTURE_BYTES`) and a failed CDRAM
+/// allocation falls back to it too.
+const GPU_TEXTURE_BUDGET: usize = 80 * 1024 * 1024;
 /// vita2d's per-frame pool for vertices (ours and its own clip/clear
 /// rectangles). Its default is 1 MiB; running out makes it write through
 /// null pointers.
@@ -86,6 +89,168 @@ unsafe extern "C" {
         count: usize,
         color: u32,
     );
+    fn vita2d_get_shader_patcher() -> *mut c_void;
+    fn vita2d_start_drawing_advanced(target: *mut Vita2dTexture, flags: u32);
+    fn vita2d_create_empty_texture_rendertarget(
+        w: u32,
+        h: u32,
+        format: SceGxmTextureFormat,
+    ) -> *mut Vita2dTexture;
+    fn vita2d_pool_reset();
+    /// The fragment program `vita2d_draw_array_textured` binds; vita2d's
+    /// blend-mode switch rewrites it from its own table.
+    static mut _vita2d_textureTintFragmentProgram: *const c_void;
+    static texture_tint_f_gxp_start: u8;
+    static texture_v_gxp_start: u8;
+    fn sceGxmShaderPatcherRegisterProgram(
+        patcher: *mut c_void,
+        program: *const c_void,
+        id: *mut *mut c_void,
+    ) -> i32;
+    fn sceGxmShaderPatcherUnregisterProgram(patcher: *mut c_void, id: *mut c_void) -> i32;
+    fn sceGxmShaderPatcherCreateFragmentProgram(
+        patcher: *mut c_void,
+        id: *mut c_void,
+        output_format: u32,
+        multisample: u32,
+        blend: *const [u8; 4],
+        vertex_program: *const c_void,
+        out: *mut *const c_void,
+    ) -> i32;
+    fn sceGxmShaderPatcherReleaseFragmentProgram(
+        patcher: *mut c_void,
+        program: *const c_void,
+    ) -> i32;
+}
+
+/// Blend modes from the renderer (`SpriteBlend`): the index passed to
+/// `siglus_vita_gpu_draw`.
+const BLEND_NORMAL: u32 = 0;
+const BLEND_MUL: u32 = 3;
+const BLEND_SCREEN: u32 = 4;
+/// Normal blending inside the wipe layer (see `BLEND_INFOS`).
+const BLEND_LAYER_NORMAL: u32 = 5;
+/// A premultiplied image over the destination (the wipe layer itself).
+const BLEND_PREMULTIPLIED_OVER: u32 = 6;
+const BLEND_MODES: usize = 7;
+/// `SceGxmSceneFlags`: the layer's scene is finished before the display
+/// scene reads it.
+const SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY: u32 = 1;
+const SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY: u32 = 2;
+
+/// `SceGxmBlendInfo` bytes (colour mask, colour/alpha function, colour
+/// src/dst factor, alpha src/dst factor; low nibble first) for modes 1..=4,
+/// matching the software compositor. vita2d's own add mode is `ONE, ONE`,
+/// which ignores the texture's alpha (an alpha-shaped additive movie showed
+/// as a bright rectangle).
+/// - Add: d + s*a (`ADD`, `SRC_ALPHA`, `ONE`).
+/// - Sub: d - s*a (`REVERSE_SUBTRACT`, `SRC_ALPHA`, `ONE`).
+/// - Mul: d * (1 - a + s*a) = (s*a)*d + d*(1 - a): premultiplied source,
+///   `DST_COLOR`, `ONE_MINUS_SRC_ALPHA`.
+/// - Screen: 1 - (1 - d)(1 - s*a) = (s*a)*(1 - d) + d: premultiplied
+///   source, `ONE_MINUS_DST_COLOR`, `ONE`.
+/// - Layer normal: colour as vita2d's normal mode, alpha `ONE,
+///   ONE_MINUS_SRC_ALPHA`. The wipe layer starts transparent, so its colour
+///   ends up premultiplied and its alpha must be the real coverage (vita2d
+///   writes a*a + d*(1 - a)).
+/// - Premultiplied over: `ONE, ONE_MINUS_SRC_ALPHA`, for drawing the layer.
+const BLEND_INFOS: [[u8; 4]; BLEND_MODES - 1] = [
+    [0x0f, 0x11, 0x14, 0x11],
+    [0x0f, 0x13, 0x14, 0x11],
+    [0x0f, 0x11, 0x56, 0x11],
+    [0x0f, 0x11, 0x17, 0x11],
+    [0x0f, 0x11, 0x54, 0x51],
+    [0x0f, 0x11, 0x51, 0x51],
+];
+const SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4: u32 = 1;
+const SCE_GXM_MULTISAMPLE_NONE: u32 = 0;
+
+/// Modes whose texture is premultiplied by the renderer; the draw's alpha
+/// then scales all four channels.
+fn blend_is_premultiplied(blend: u32) -> bool {
+    matches!(blend, BLEND_MUL | BLEND_SCREEN)
+}
+
+/// vita2d's tinted-texture shader registered once more, with one fragment
+/// program per blend mode in `BLEND_INFOS`.
+struct BlendPrograms {
+    id: *mut c_void,
+    programs: [*const c_void; BLEND_MODES - 1],
+}
+
+fn create_blend_programs() -> Option<BlendPrograms> {
+    unsafe {
+        let patcher = vita2d_get_shader_patcher();
+        if patcher.is_null() {
+            return None;
+        }
+        let mut id = std::ptr::null_mut();
+        let code = sceGxmShaderPatcherRegisterProgram(
+            patcher,
+            (&raw const texture_tint_f_gxp_start).cast(),
+            &mut id,
+        );
+        if code < 0 {
+            super::vita::log(&format!("gpu: blend program register failed: {code:#x}"));
+            return None;
+        }
+        let mut out = BlendPrograms {
+            id,
+            programs: [std::ptr::null(); BLEND_MODES - 1],
+        };
+        for (slot, info) in out.programs.iter_mut().zip(&BLEND_INFOS) {
+            let code = sceGxmShaderPatcherCreateFragmentProgram(
+                patcher,
+                id,
+                SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
+                SCE_GXM_MULTISAMPLE_NONE,
+                info,
+                (&raw const texture_v_gxp_start).cast(),
+                slot,
+            );
+            if code < 0 || slot.is_null() {
+                super::vita::log(&format!("gpu: blend program create failed: {code:#x}"));
+                *slot = std::ptr::null();
+                release_blend_programs(out);
+                return None;
+            }
+        }
+        Some(out)
+    }
+}
+
+fn release_blend_programs(blend: BlendPrograms) {
+    unsafe {
+        let patcher = vita2d_get_shader_patcher();
+        for program in blend.programs {
+            if !program.is_null() {
+                sceGxmShaderPatcherReleaseFragmentProgram(patcher, program);
+            }
+        }
+        sceGxmShaderPatcherUnregisterProgram(patcher, blend.id);
+    }
+}
+
+/// Switches the blend mode of the following textured draws. Without our
+/// programs only normal and vita2d's add mode exist.
+fn set_blend(state: &State, blend: u32) -> bool {
+    let blend = if state.in_layer && blend == BLEND_NORMAL {
+        BLEND_LAYER_NORMAL
+    } else {
+        blend
+    };
+    unsafe {
+        match (&state.blend_programs, blend) {
+            // Restores vita2d's normal programs.
+            (_, BLEND_NORMAL) => vita2d_set_blend_mode_add(0),
+            (Some(programs), 1..=6) => {
+                _vita2d_textureTintFragmentProgram = programs.programs[blend as usize - 1]
+            }
+            (None, 1) => vita2d_set_blend_mode_add(1),
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// A vertex from the renderer: logical-screen position and 0..1 texture
@@ -101,7 +266,9 @@ pub struct GpuVertex {
 
 struct Texture {
     handle: *mut Vita2dTexture,
-    source_ptr: usize,
+    /// Identifies the pixels last uploaded (`siglus_vita_gpu_draw`'s
+    /// `source_id`).
+    source_id: u64,
     width: u32,
     height: u32,
     bytes: usize,
@@ -129,9 +296,18 @@ struct State {
     clip: Option<[i32; 4]>,
     /// Draws skipped because vita2d's pool ran low (logged once a frame).
     pool_exhausted: bool,
-    /// Additive blending on (`SpriteBlend::Add`: destination + source *
-    /// alpha, as the software compositor does).
-    additive: bool,
+    /// The blend mode set for this frame's draws (`BLEND_*`).
+    blend: u32,
+    /// Fragment programs for the non-normal blend modes (None: only
+    /// vita2d's normal and `ONE, ONE` add modes).
+    blend_programs: Option<BlendPrograms>,
+    /// Screen-sized render target for a wipe's incoming screen, drawn over
+    /// the outgoing one at the wipe's progress (created on first use).
+    layer: *mut Vita2dTexture,
+    /// Drawing into `layer` (its own GXM scene).
+    in_layer: bool,
+    /// `layer` was drawn this frame: the display scene waits for it.
+    layer_ready: bool,
 }
 
 // The raw texture handles are only touched from the main thread; the mutex
@@ -144,6 +320,22 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 static UPLOAD_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static UPLOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// This frame's GPU wait and texture uploads (slow-frame log).
+static FRAME_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FRAME_UPLOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FRAME_UPLOAD_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current frame's GPU wait and uploads, then reset.
+pub fn take_frame_detail() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    format!(
+        "gpu wait {} us, uploads {} ({} bytes)",
+        FRAME_WAIT_US.swap(0, Relaxed),
+        FRAME_UPLOADS.swap(0, Relaxed),
+        FRAME_UPLOAD_BYTES.swap(0, Relaxed)
+    )
+}
 
 pub fn take_upload_summary() -> String {
     use std::sync::atomic::Ordering::Relaxed;
@@ -178,7 +370,11 @@ impl GpuDisplay {
             pending_free: Vec::new(),
             clip: None,
             pool_exhausted: false,
-            additive: false,
+            blend: BLEND_NORMAL,
+            blend_programs: create_blend_programs(),
+            layer: std::ptr::null_mut(),
+            in_layer: false,
+            layer_ready: false,
         });
         Ok(Self)
     }
@@ -203,20 +399,23 @@ impl Drop for GpuDisplay {
                 if !state.fallback.is_null() {
                     vita2d_free_texture(state.fallback);
                 }
+                if !state.layer.is_null() {
+                    vita2d_free_texture(state.layer);
+                }
+                vita2d_set_blend_mode_add(0);
+                if let Some(programs) = state.blend_programs {
+                    release_blend_programs(programs);
+                }
                 vita2d_fini();
             }
         }
     }
 }
 
-fn begin_frame(state: &mut State, width: u32, height: u32) -> bool {
-    if width == 0 || height == 0 || width > 2048 || height > 2048 {
-        return false;
-    }
-    // A frame the renderer abandoned (it fell back to the software
-    // compositor part way) is closed without being shown: GXM scenes cannot
-    // nest, and drawing into a failed scene makes vita2d use invalid
-    // uniform buffers.
+/// Closes a frame the renderer abandoned (it fell back to the software
+/// compositor part way) without showing it: GXM scenes cannot nest, and
+/// drawing into a failed scene makes vita2d use invalid uniform buffers.
+fn close_abandoned_frame(state: &mut State) {
     if state.drawing {
         unsafe {
             vita2d_disable_clipping();
@@ -226,10 +425,14 @@ fn begin_frame(state: &mut State, width: u32, height: u32) -> bool {
         free_retired(state);
         state.drawing = false;
     }
+    state.in_layer = false;
+    state.layer_ready = false;
+}
+
+/// Per-scene drawing state: no clip, normal blending, the game's viewport.
+fn reset_scene_state(state: &mut State, width: u32, height: u32) {
     state.clip = None;
-    state.pool_exhausted = false;
-    state.additive = false;
-    state.frame = state.frame.wrapping_add(1);
+    state.blend = BLEND_NORMAL;
     state.logical_size = (width, height);
     let scale = (SCREEN_W as f64 / width as f64).min(SCREEN_H as f64 / height as f64);
     let draw_w = (width as f64 * scale).round() as i32;
@@ -240,8 +443,31 @@ fn begin_frame(state: &mut State, width: u32, height: u32) -> bool {
         draw_w as f32,
         draw_h as f32,
     );
+}
+
+fn begin_frame(state: &mut State, width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 || width > 2048 || height > 2048 {
+        return false;
+    }
+    // After a wipe layer the frame is already under way: its scene has
+    // been submitted, and resetting vita2d's pool (`vita2d_start_drawing`)
+    // would overwrite vertices the GPU has yet to read.
+    let after_layer = state.layer_ready && !state.drawing;
+    if !after_layer {
+        close_abandoned_frame(state);
+        state.pool_exhausted = false;
+        state.frame = state.frame.wrapping_add(1);
+    }
+    reset_scene_state(state, width, height);
     unsafe {
-        vita2d_start_drawing();
+        if after_layer {
+            vita2d_start_drawing_advanced(
+                std::ptr::null_mut(),
+                SCE_GXM_SCENE_VERTEX_WAIT_FOR_DEPENDENCY,
+            );
+        } else {
+            vita2d_start_drawing();
+        }
         vita2d_disable_clipping();
         vita2d_set_blend_mode_add(0);
         vita2d_clear_screen();
@@ -250,10 +476,65 @@ fn begin_frame(state: &mut State, width: u32, height: u32) -> bool {
     true
 }
 
+/// Starts a frame by drawing into the wipe layer (cleared transparent).
+fn begin_layer(state: &mut State, width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 || width > 2048 || height > 2048 {
+        return false;
+    }
+    if state.blend_programs.is_none() {
+        return false;
+    }
+    close_abandoned_frame(state);
+    if state.layer.is_null() {
+        unsafe {
+            vita2d_texture_set_alloc_memblock_type(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
+            state.layer = vita2d_create_empty_texture_rendertarget(
+                SCREEN_W as u32,
+                SCREEN_H as u32,
+                SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
+            );
+        }
+        if state.layer.is_null() {
+            super::vita::log("gpu: wipe layer render target allocation failed");
+            return false;
+        }
+    }
+    state.pool_exhausted = false;
+    state.frame = state.frame.wrapping_add(1);
+    reset_scene_state(state, width, height);
+    unsafe {
+        vita2d_pool_reset();
+        vita2d_start_drawing_advanced(state.layer, SCE_GXM_SCENE_FRAGMENT_SET_DEPENDENCY);
+        vita2d_disable_clipping();
+        vita2d_set_blend_mode_add(0);
+        vita2d_set_clear_color(0);
+        vita2d_clear_screen();
+        vita2d_set_clear_color(0xFF00_0000);
+    }
+    state.drawing = true;
+    state.in_layer = true;
+    true
+}
+
+fn end_layer(state: &mut State) -> bool {
+    if !state.drawing || !state.in_layer {
+        return false;
+    }
+    unsafe {
+        vita2d_disable_clipping();
+        vita2d_end_drawing();
+    }
+    state.drawing = false;
+    state.in_layer = false;
+    state.layer_ready = true;
+    true
+}
+
 fn end_frame(state: &mut State, wait_vsync: bool) {
     if !state.drawing {
         return;
     }
+    let wait_start = std::time::Instant::now();
     unsafe {
         vita2d_disable_clipping();
         vita2d_end_drawing();
@@ -261,12 +542,17 @@ fn end_frame(state: &mut State, wait_vsync: bool) {
         // GPU finish with them (and with this frame's vertices) first.
         vita2d_wait_rendering_done();
     }
+    FRAME_WAIT_US.fetch_add(
+        wait_start.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     free_retired(state);
     unsafe {
         vita2d_set_vblank_wait(i32::from(wait_vsync));
         vita2d_swap_buffers();
     }
     state.drawing = false;
+    state.layer_ready = false;
 }
 
 /// Queues a texture to be freed once no frame in flight can use it.
@@ -319,7 +605,13 @@ fn set_clip(state: &mut State, clip: &[i32; 4]) -> bool {
     true
 }
 
-fn draw_quad(state: &State, texture: *const Vita2dTexture, vertices: &[GpuVertex; 4], alpha: f32) {
+fn draw_quad(
+    state: &State,
+    texture: *const Vita2dTexture,
+    vertices: &[GpuVertex; 4],
+    alpha: f32,
+    premultiplied: bool,
+) {
     let (vx, vy, vw, vh) = state.viewport;
     let (width, height) = state.logical_size;
     let sx = vw / width as f32;
@@ -350,7 +642,13 @@ fn draw_quad(state: &State, texture: *const Vita2dTexture, vertices: &[GpuVertex
         }
     }
     let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
-    let color = (alpha << 24) | 0x00FF_FFFF;
+    // vita2d's tint multiplies the texel: straight textures keep their
+    // colour, premultiplied ones are scaled with their alpha.
+    let color = if premultiplied {
+        alpha * 0x0101_0101
+    } else {
+        (alpha << 24) | 0x00FF_FFFF
+    };
     unsafe {
         vita2d_draw_array_textured(texture, SCE_GXM_PRIMITIVE_TRIANGLE_STRIP, out, 4, color);
     }
@@ -359,6 +657,11 @@ fn draw_quad(state: &State, texture: *const Vita2dTexture, vertices: &[GpuVertex
 /// Copies straight RGBA rows into a texture (whose rows are padded).
 fn upload(texture: *mut Vita2dTexture, width: u32, height: u32, pixels: *const u8) {
     UPLOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FRAME_UPLOADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FRAME_UPLOAD_BYTES.fetch_add(
+        u64::from(width) * u64::from(height) * 4,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     UPLOAD_BYTES.fetch_add(
         u64::from(width) * u64::from(height) * 4,
         std::sync::atomic::Ordering::Relaxed,
@@ -370,6 +673,24 @@ fn upload(texture: *mut Vita2dTexture, width: u32, height: u32, pixels: *const u
         for y in 0..height as usize {
             std::ptr::copy_nonoverlapping(pixels.add(y * row), data.add(y * stride), row);
         }
+    }
+}
+
+/// `vita2d_create_empty_texture_format` mallocs its `vita2d_texture` without
+/// clearing it and sets only `palette_UID`, but `vita2d_free_texture` also
+/// destroys `gxm_rtgt` and frees `depth_UID` when they are non-zero. On
+/// reused heap memory those are garbage: freeing a texture then unmapped and
+/// freed an unrelated memblock (`sceGxmUnmapMemory` INVALID_POINTER, then a
+/// corrupted heap). Offsets are from vita2d.h: SceGxmTexture (16 bytes),
+/// data_UID @16, palette_UID @20, gxm_rtgt @24, gxm_sfc @28, gxm_sfd @52,
+/// depth_UID @96 (100 bytes in all, the size vita2d allocates).
+unsafe fn clear_render_target_fields(texture: *mut Vita2dTexture) {
+    unsafe {
+        let base = texture.cast::<u8>();
+        base.add(24)
+            .cast::<*mut c_void>()
+            .write(std::ptr::null_mut());
+        base.add(96).cast::<i32>().write(0);
     }
 }
 
@@ -390,6 +711,7 @@ fn make_texture(width: u32, height: u32, pixels: *const u8) -> Option<*mut Vita2
             ));
             return None;
         }
+        clear_render_target_fields(texture);
         vita2d_texture_set_filters(
             texture,
             SCE_GXM_TEXTURE_FILTER_LINEAR,
@@ -403,6 +725,7 @@ fn make_texture(width: u32, height: u32, pixels: *const u8) -> Option<*mut Vita2
 fn cached_texture(
     state: &mut State,
     key: u32,
+    source_id: u64,
     pixels: *const u8,
     width: u32,
     height: u32,
@@ -414,7 +737,7 @@ fn cached_texture(
         return None;
     }
     if let Some(existing) = state.textures.get_mut(&key)
-        && existing.source_ptr == pixels as usize
+        && existing.source_id == source_id
         && existing.width == width
         && existing.height == height
     {
@@ -432,7 +755,7 @@ fn cached_texture(
         && existing.last_frame != state.frame
     {
         upload(existing.handle, width, height, pixels);
-        existing.source_ptr = pixels as usize;
+        existing.source_id = source_id;
         existing.last_frame = state.frame;
         return Some(existing.handle);
     }
@@ -461,7 +784,7 @@ fn cached_texture(
         key,
         Texture {
             handle,
-            source_ptr: pixels as usize,
+            source_id,
             width,
             height,
             bytes,
@@ -485,6 +808,7 @@ pub unsafe extern "C" fn siglus_vita_gpu_begin(width: u32, height: u32) -> bool 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn siglus_vita_gpu_draw(
     key: u32,
+    source_id: u64,
     pixels: *const u8,
     width: u32,
     height: u32,
@@ -525,16 +849,105 @@ pub unsafe extern "C" fn siglus_vita_gpu_draw(
     if !set_clip(state, clip) {
         return true;
     }
-    let Some(texture) = cached_texture(state, key, pixels, width, height) else {
+    let Some(texture) = cached_texture(state, key, source_id, pixels, width, height) else {
         return false;
     };
     let vertices = unsafe { &*(vertices as *const [GpuVertex; 4]) };
-    let additive = blend == 1;
-    if additive != state.additive {
-        state.additive = additive;
-        unsafe { vita2d_set_blend_mode_add(i32::from(additive)) };
+    if blend != state.blend {
+        if !set_blend(state, blend) {
+            return false;
+        }
+        state.blend = blend;
     }
-    draw_quad(state, texture, vertices, alpha);
+    draw_quad(
+        state,
+        texture,
+        vertices,
+        alpha,
+        blend_is_premultiplied(blend),
+    );
+    true
+}
+
+/// Starts a frame whose first scene is the wipe layer; `siglus_vita_gpu_draw`
+/// then draws into it until `siglus_vita_gpu_end_layer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn siglus_vita_gpu_begin_layer(width: u32, height: u32) -> bool {
+    let Ok(mut slot) = STATE.lock() else {
+        return false;
+    };
+    let Some(state) = slot.as_mut() else {
+        return false;
+    };
+    begin_layer(state, width, height)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn siglus_vita_gpu_end_layer() -> bool {
+    let Ok(mut slot) = STATE.lock() else {
+        return false;
+    };
+    slot.as_mut().is_some_and(end_layer)
+}
+
+/// Draws this frame's wipe layer over the screen at `alpha`.
+#[unsafe(no_mangle)]
+pub extern "C" fn siglus_vita_gpu_draw_layer(alpha: f32) -> bool {
+    let Ok(mut slot) = STATE.lock() else {
+        return false;
+    };
+    let Some(state) = slot.as_mut() else {
+        return false;
+    };
+    if !state.drawing || state.in_layer || !state.layer_ready || state.layer.is_null() {
+        return false;
+    }
+    if state.clip.is_some() {
+        state.clip = None;
+        unsafe { vita2d_disable_clipping() };
+    }
+    if state.blend != BLEND_PREMULTIPLIED_OVER {
+        if !set_blend(state, BLEND_PREMULTIPLIED_OVER) {
+            return false;
+        }
+        state.blend = BLEND_PREMULTIPLIED_OVER;
+    }
+    // The layer covers the whole screen: draw it in screen coordinates.
+    let (width, height) = state.logical_size;
+    let viewport = state.viewport;
+    state.logical_size = (SCREEN_W as u32, SCREEN_H as u32);
+    state.viewport = (0.0, 0.0, SCREEN_W as f32, SCREEN_H as f32);
+    let (w, h) = (SCREEN_W as f32, SCREEN_H as f32);
+    let vertices = [
+        GpuVertex {
+            x: 0.0,
+            y: 0.0,
+            u: 0.0,
+            v: 0.0,
+        },
+        GpuVertex {
+            x: w,
+            y: 0.0,
+            u: 1.0,
+            v: 0.0,
+        },
+        GpuVertex {
+            x: w,
+            y: h,
+            u: 1.0,
+            v: 1.0,
+        },
+        GpuVertex {
+            x: 0.0,
+            y: h,
+            u: 0.0,
+            v: 1.0,
+        },
+    ];
+    let layer = state.layer;
+    draw_quad(state, layer, &vertices, alpha, true);
+    state.logical_size = (width, height);
+    state.viewport = viewport;
     true
 }
 
@@ -611,7 +1024,7 @@ pub unsafe extern "C" fn siglus_vita_present_rgba(
         },
     ];
     let fallback = state.fallback;
-    draw_quad(state, fallback, &vertices, 1.0);
+    draw_quad(state, fallback, &vertices, 1.0, false);
     end_frame(state, wait_vsync);
 }
 

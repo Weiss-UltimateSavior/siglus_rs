@@ -274,7 +274,7 @@ pub fn dispatch(ctx: &mut CommandContext, form_id: u32, args: &[Value]) -> Resul
         // cmd_script.cpp delegates directly to tnm_is_skipping(). Do not fold
         // auto mode/message-nowait/local skip_trigger into this predicate.
         let v = ctx.runtime_is_skipping();
-        if std::env::var_os("SG_DEBUG").is_some()
+        if env_is_set!("SG_DEBUG")
             && ctx.current_scene_name.as_deref() == Some("sys10_cf01")
             && matches!(ctx.current_line_no, 700..=730 | 870..=895)
         {

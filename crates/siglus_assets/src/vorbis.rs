@@ -46,6 +46,26 @@ pub fn decode_ogg_vorbis_reader<T: Read + Seek>(rdr: T) -> Result<Pcm16> {
     })
 }
 
+/// What `decode_ogg_vorbis_reader` would produce, without keeping it:
+/// channels, sample rate and the number of interleaved samples. For timing
+/// a sound that plays as a stream by its decoded length.
+pub fn ogg_vorbis_decoded_len<T: Read + Seek>(rdr: T) -> Result<(u16, u32, u64)> {
+    use lewton::inside_ogg::OggStreamReader;
+
+    let mut r = OggStreamReader::new(rdr)
+        .map_err(|e| anyhow!("ogg/vorbis: failed to parse headers: {e}"))?;
+    let channels = r.ident_hdr.audio_channels as u16;
+    let sample_rate = r.ident_hdr.audio_sample_rate;
+    let mut samples = 0u64;
+    while let Some(pkt) = r
+        .read_dec_packet_itl()
+        .map_err(|e| anyhow!("ogg/vorbis: decode error: {e}"))?
+    {
+        samples += pkt.len() as u64;
+    }
+    Ok((channels, sample_rate, samples))
+}
+
 /// Decode an Ogg/Vorbis blob in memory.
 pub fn decode_ogg_vorbis_bytes(data: &[u8]) -> Result<Pcm16> {
     decode_ogg_vorbis_reader(std::io::Cursor::new(data))
