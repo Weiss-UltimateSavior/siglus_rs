@@ -51,9 +51,7 @@ impl PcmEvent {
 
     /// Stops the event; with `stop_sound` the effect playing now too.
     pub fn stop(&mut self, sys: &mut System, stop_sound: bool) {
-        if stop_sound
-            && let Some(channel) = self.channel.take()
-        {
+        if stop_sound && let Some(channel) = self.channel.take() {
             let now = sys.now();
             sys.sound.wav_stop(channel, 0, now);
         }
@@ -99,7 +97,10 @@ impl PcmEvent {
             // The effect ended: pause before the next one.
             self.channel = None;
             let entry = &self.entries[self.next.saturating_sub(1) % self.entries.len()];
-            let (low, high) = (entry.wait_min.max(0), entry.wait_max.max(entry.wait_min).max(0));
+            let (low, high) = (
+                entry.wait_min.max(0),
+                entry.wait_max.max(entry.wait_min).max(0),
+            );
             let pause = sys.random(low, high);
             self.due = Some(now + pause as u64);
             if self.mode == Mode::OneShot && self.next >= self.entries.len() {
@@ -119,15 +120,9 @@ impl PcmEvent {
             self.next = index + 1;
         }
         let name = self.entries[index].name.clone();
-        let played = sys.sound.wav_play(
-            &sys.resources,
-            &sys.settings,
-            now,
-            &name,
-            None,
-            false,
-            0,
-        );
+        let played = sys
+            .sound
+            .wav_play(&sys.resources, &sys.settings, now, &name, None, false, 0);
         match played {
             Ok(channel) => {
                 self.channel = Some(channel);

@@ -22,6 +22,12 @@ pub enum WaitEvent {
     Koe,
     /// Until a `PCMEVENT` has finished.
     PcmEvent(i32),
+    /// Until a serial animation (or all of them) has finished.
+    SerialPdt(Option<i32>),
+    /// Until the screen flash has ended.
+    Flash,
+    /// Until the background has stopped scrolling.
+    HaikeiScroll,
 }
 
 /// `wait`, `waitC`, `time`, `timeC`, `GetClick`, `WaitClick`.
@@ -35,6 +41,8 @@ pub struct Wait {
     pub event: WaitEvent,
     pub break_on_click: bool,
     pub click_location: Option<(IntTarget, IntTarget)>,
+    /// Skip mode does not cut it short (`DONTJUMP_*`).
+    pub unskippable: bool,
 }
 
 impl Wait {
@@ -44,6 +52,7 @@ impl Wait {
             event: WaitEvent::None,
             break_on_click: false,
             click_location: None,
+            unskippable: false,
         }
     }
 
@@ -53,7 +62,13 @@ impl Wait {
             event,
             break_on_click: false,
             click_location: None,
+            unskippable: false,
         }
+    }
+
+    pub fn unskippable(mut self) -> Self {
+        self.unskippable = true;
+        self
     }
 
     pub fn cancellable(mut self) -> Self {
@@ -87,7 +102,7 @@ impl LongOp for Wait {
             }
         }
         let now = machine.sys.now();
-        let mut done = machine.sys.should_fast_forward();
+        let mut done = !self.unskippable && machine.sys.should_fast_forward();
         if let Some(until) = self.until {
             done |= now >= until;
         }
@@ -105,6 +120,14 @@ impl LongOp for Wait {
             WaitEvent::Wav(channel) => !sound.wav_playing(channel, now),
             WaitEvent::Koe => !sound.koe_playing(now),
             WaitEvent::PcmEvent(number) => !machine.sys.pcm_events.contains_key(&number),
+            WaitEvent::SerialPdt(buf) => !machine.sys.gfx.snm.running(false, buf),
+            WaitEvent::HaikeiScroll => machine.sys.gfx.haikei_scroll.is_none(),
+            WaitEvent::Flash => machine
+                .sys
+                .gfx
+                .flash
+                .as_ref()
+                .is_none_or(|f| f.finished(now)),
             _ => false,
         };
         if done && self.break_on_click {

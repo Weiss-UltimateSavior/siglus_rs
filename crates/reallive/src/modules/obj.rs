@@ -30,7 +30,7 @@ struct Targets {
 }
 
 fn is_bg(module: u8) -> bool {
-    matches!(module, 62 | 72 | 74 | 82 | 85 | 91)
+    matches!(module, 62 | 72 | 74 | 82 | 85 | 88 | 91 | 94)
 }
 
 fn targets(machine: &mut Machine, command: &Command, range: bool) -> Result<Targets> {
@@ -142,7 +142,34 @@ fn family(base: u16) -> Option<(bool, &'static [PropertyOf])> {
                 |_| Property::ClipBottom,
             ],
         ),
+        5 => (
+            false,
+            &[
+                |_| Property::ClipX,
+                |_| Property::ClipY,
+                |_| Property::ClipRight,
+                |_| Property::ClipBottom,
+            ],
+        ),
         36 => (false, &[|_| Property::AdjustVert]),
+        70 | 72 => (
+            false,
+            &[
+                |_| Property::OwnClipX,
+                |_| Property::OwnClipY,
+                |_| Property::OwnClipRight,
+                |_| Property::OwnClipBottom,
+            ],
+        ),
+        71 => (
+            false,
+            &[
+                |_| Property::OwnClipX,
+                |_| Property::OwnClipY,
+                |_| Property::OwnClipW,
+                |_| Property::OwnClipH,
+            ],
+        ),
         40 => (true, &[Property::AdjustAlpha]),
         46 => (false, &[|_| Property::Width, |_| Property::Height]),
         47 => (false, &[|_| Property::Width]),
@@ -380,14 +407,15 @@ impl LongOp for MutatorWait {
 fn property_function(machine: &mut Machine, command: &Command, t: &Targets) -> Result<bool> {
     let opcode = command.op.opcode;
     let (kind, base) = (opcode / 1000, opcode % 1000);
-    if !(1..=6).contains(&kind) || (family(base).is_none() && !matches!(base, 4 | 21)) {
+    let event = (200..=216).contains(&base);
+    if !(1..=6).contains(&kind) || (family(base).is_none() && !matches!(base, 4 | 21) && !event) {
         return Ok(false);
     }
-    if base == 21 && !(3..=6).contains(&kind) {
+    if (base == 21 || event) && !(3..=6).contains(&kind) {
         return Ok(false);
     }
     // objRectEria / objBoxEria themselves also clear, and take shorter forms.
-    if kind == 1 && matches!(base, 34 | 35) {
+    if kind == 1 && matches!(base, 5 | 34 | 35 | 70 | 71 | 72) {
         return Ok(false);
     }
     let values = ints(machine, command, t.args)?;
@@ -396,6 +424,8 @@ fn property_function(machine: &mut Machine, command: &Command, t: &Targets) -> R
     // *EVE_ALLEVE_*: every running animation of the object.
     let id = if base == 21 {
         crate::object::ALL_MUTATORS
+    } else if event {
+        2000 + i32::from(base)
     } else {
         i32::from(base)
     };
@@ -431,14 +461,20 @@ fn grp_rect(v: &[i32]) -> Rect {
 
 /// Modules 81/82 and ranges 90/91.
 pub fn properties(machine: &mut Machine, command: &Command) -> Result<Next> {
-    let range = matches!(command.op.module, 90 | 91);
+    let range = matches!(command.op.module, 90 | 91 | 93 | 94);
+    // OBJFRONTADD(S) / OBJBACKADD(S) (87, 88, 93, 94): add to the value;
+    // their 12xx functions stop object events where they are.
+    if matches!(command.op.module, 87 | 88 | 93 | 94) {
+        let t = targets(machine, command, range)?;
+        return add_or_stop(machine, command, &t);
+    }
     let t = targets(machine, command, range)?;
     if property_function(machine, command, &t)? {
         return Ok(Next::Advance);
     }
     let v = ints_lenient(machine, command, t.args)?;
     let get = |i: usize| v.get(i).copied().unwrap_or(0);
-    if (2200..=2209).contains(&command.op.opcode) {
+    if (2200..=2216).contains(&command.op.opcode) {
         object_event(machine, &t, command.op.opcode, &v)?;
         return Ok(Next::Advance);
     }
@@ -518,6 +554,97 @@ pub fn properties(machine: &mut Machine, command: &Command) -> Result<Next> {
             d.space = get(4);
         })?,
         1039 => each(machine, &t.refs, |o| o.params.pattern = get(0))?,
+        // objAdjustAll(x, y) / X / Y: every repno's offset.
+        1041 => each(machine, &t.refs, |o| {
+            o.params.adjust_x = [0; 8];
+            o.params.adjust_y = [0; 8];
+            o.params.adjust_x[0] = get(0);
+            o.params.adjust_y[0] = get(1);
+        })?,
+        1042 => each(machine, &t.refs, |o| {
+            o.params.adjust_x = [0; 8];
+            o.params.adjust_x[0] = get(0);
+        })?,
+        1043 => each(machine, &t.refs, |o| {
+            o.params.adjust_y = [0; 8];
+            o.params.adjust_y[0] = get(0);
+        })?,
+        // OBJFRONTSET_ALLREPTR(alpha): every repno's alpha.
+        1044 => each(machine, &t.refs, |o| o.params.adjust_alpha = [get(0); 8])?,
+        // OBJFRONTSET_GANPATNO(set, pattern): show one GAN frame.
+        1045 => {
+            let now = machine.sys.now();
+            let (set, pattern) = (get(0), get(1));
+            each(machine, &t.refs, |o| {
+                if let Some(ObjectData::Gan { gan, .. }) = &o.data {
+                    let offset: i32 = gan
+                        .sets
+                        .get(set.max(0) as usize)
+                        .map(|frames| {
+                            frames
+                                .iter()
+                                .take(pattern.max(0) as usize)
+                                .map(|f| f.time.max(1))
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    o.animation = Some(Animation {
+                        start: now.saturating_sub(offset as u64),
+                        after: AfterAnimation::Stop,
+                        parameter: set,
+                        finished: false,
+                    });
+                }
+            })?;
+            // Frozen on that frame.
+            for r in &t.refs {
+                if !r.bg && r.child.is_none() && r.buf >= 0 {
+                    machine.sys.gfx.pause_animation(r.buf as usize, now);
+                }
+            }
+        }
+        // OBJFRONTSET_WEATHER_REPCNT(count) / _WEATHERPARAM_TYPEB(...)
+        1057 => each(machine, &t.refs, |o| o.params.drift.count = get(0))?,
+        1059 => each(machine, &t.refs, |o| {
+            let d = &mut o.params.drift;
+            d.count = get(0);
+            d.use_animation = get(1);
+            d.start_pattern = get(2);
+            d.end_pattern = get(3);
+            d.animation_time = get(4);
+            d.y_time = get(5);
+            d.period = get(6);
+            d.amplitude = get(7);
+            if v.len() >= 17 {
+                d.area = Rect::from_corners(get(13), get(14), get(15), get(16));
+            }
+        })?,
+        // OBJFRONTSET_FILTER_MOD / _MMX_USE / _QUAKE_USE: rendering
+        // switches of the original with no counterpart here.
+        1060 | 1073 | 1074 => {}
+        // OBJFRONTSET_BTNOFF / _BTNPUSHKEEP / _BTNACTIONNO
+        1065 => each(machine, &t.refs, |o| o.params.button.is_button = 0)?,
+        1067 => each(machine, &t.refs, |o| {
+            o.params.button.state = if get(0) != 0 { 2 } else { 0 }
+        })?,
+        1068 => each(machine, &t.refs, |o| o.params.button.action = get(0))?,
+        // OBJFRONTSET_ERIA / _OWNERIA / _BOXOWNERIA(x1, y1, x2, y2),
+        // _RECTOWNERIA(x, y, w, h); no arguments clear.
+        1072 if v.is_empty() => each(machine, &t.refs, |o| o.params.own_clip = None)?,
+        1072 => each(machine, &t.refs, |o| o.params.own_clip = Some(grp_rect(&v)))?,
+        // OBJFRONTSET_RECT(x, y, w, h): a rectangle object's area.
+        1023 => {
+            let area = if v.len() >= 4 {
+                Rect::new(get(0), get(1), get(2), get(3))
+            } else {
+                Rect::new(0, 0, machine.sys.gfx.width, machine.sys.gfx.height)
+            };
+            each(machine, &t.refs, |o| {
+                if let Some(ObjectData::Rect(rect)) = &mut o.data {
+                    *rect = area;
+                }
+            })?;
+        }
         // OBJFRONTSET_GAN_CUTNO_REP(n): the pattern offset of a GAN object.
         1058 => each(machine, &t.refs, |o| o.params.pattern = get(0))?,
         1056 => each(machine, &t.refs, |o| {
@@ -544,7 +671,32 @@ pub fn properties(machine: &mut Machine, command: &Command) -> Result<Next> {
     Ok(Next::Advance)
 }
 
-/// `OBJFRONTEVE_JUMP`, `_QUAKE*` and `_FLUSH*` (2200..2209): damped
+/// OBJFRONTADD* (base ids 0..2, 6..8, 36): add to the properties;
+/// OBJFRONTEVE_*_STOP (1200..1216): stop an object event where it is.
+fn add_or_stop(machine: &mut Machine, command: &Command, t: &Targets) -> Result<Next> {
+    let opcode = command.op.opcode;
+    let values = ints(machine, command, t.args)?;
+    if (1200..=1216).contains(&opcode) {
+        let id = 2000 + i32::from(opcode - 1000);
+        each(machine, &t.refs, |o| o.mutators.retain(|m| m.id != id))?;
+        return Ok(Next::Advance);
+    }
+    let base = opcode % 1000;
+    let Some((repno, props)) = family(base).filter(|_| opcode < 2000) else {
+        return machine.unimplemented(command);
+    };
+    let (index, deltas, _) = split_family(repno, props.len(), &values)?;
+    each(machine, &t.refs, |object| {
+        for (property, &delta) in props.iter().zip(&deltas) {
+            let property = property(index);
+            let value = property.get(&object.params);
+            property.set(&mut object.params, value.wrapping_add(delta));
+        }
+    })?;
+    Ok(Next::Advance)
+}
+
+/// `OBJFRONTEVE_JUMP`, `_QUAKE*`, `_FLUSH*`, `_BLINK*` and `_REPEAT*` (2200..2216): damped
 /// oscillations of a property around its current value. The arguments
 /// start with (time, delay); the bound and direction modes are not
 /// modelled.
@@ -556,12 +708,23 @@ fn object_event(machine: &mut Machine, t: &Targets, opcode: u16, v: &[i32]) -> R
     let (moves, count, flash): (Vec<(Property, i32)>, i32, bool) = match opcode {
         2200 => (vec![(Property::AdjustY(7), -get(2))], get(3), true),
         2201 | 2202 => (
-            vec![(Property::AdjustX(7), get(2)), (Property::AdjustY(7), get(3))],
+            vec![
+                (Property::AdjustX(7), get(2)),
+                (Property::AdjustY(7), get(3)),
+            ],
             get(4),
             false,
         ),
-        2203 => (vec![(Property::Width, get(2)), (Property::Height, get(3))], get(4), false),
-        2204 => (vec![(Property::HqWidth, get(2)), (Property::HqHeight, get(3))], get(4), false),
+        2203 => (
+            vec![(Property::Width, get(2)), (Property::Height, get(3))],
+            get(4),
+            false,
+        ),
+        2204 => (
+            vec![(Property::HqWidth, get(2)), (Property::HqHeight, get(3))],
+            get(4),
+            false,
+        ),
         2205 => (vec![(Property::Rotation, get(2))], get(3), false),
         2206 => (
             vec![
@@ -574,22 +737,77 @@ fn object_event(machine: &mut Machine, t: &Targets, opcode: u16, v: &[i32]) -> R
         ),
         2207 => {
             let colour = [get(2), get(3), get(4)];
-            each(machine, &t.refs, |o| o.params.colour[..3].copy_from_slice(&colour))?;
+            each(machine, &t.refs, |o| {
+                o.params.colour[..3].copy_from_slice(&colour)
+            })?;
             (vec![(Property::ColLevel, 255)], get(5), true)
         }
         2208 => (vec![(Property::Invert, 255)], get(2), true),
-        _ => (vec![(Property::Alpha, get(2))], get(3), true),
+        2209 => (vec![(Property::Alpha, get(2))], get(3), true),
+        // BLINK_PAL / _COL / _REVERSE / _TR: on and off, undamped.
+        2210 => (
+            vec![
+                (Property::TintR, get(2)),
+                (Property::TintG, get(3)),
+                (Property::TintB, get(4)),
+            ],
+            get(5),
+            true,
+        ),
+        2211 => {
+            let colour = [get(2), get(3), get(4)];
+            each(machine, &t.refs, |o| {
+                o.params.colour[..3].copy_from_slice(&colour)
+            })?;
+            (vec![(Property::ColLevel, 255)], get(5), true)
+        }
+        2212 => (vec![(Property::Invert, 255)], get(2), true),
+        2213 => (vec![(Property::Alpha, get(2))], get(3), true),
+        // REPEAT_MOVE / _ROTATE / _SCALE: out and back, again and again.
+        2214 => (
+            vec![
+                (Property::AdjustX(7), get(2)),
+                (Property::AdjustY(7), get(3)),
+            ],
+            get(4),
+            false,
+        ),
+        2215 => (vec![(Property::Rotation, get(2))], get(3), false),
+        _ => (
+            vec![(Property::Width, get(2)), (Property::Height, get(3))],
+            get(4),
+            false,
+        ),
     };
     let now = machine.sys.now();
     let id = i32::from(opcode);
-    let curve = if flash { CURVE_FLASH } else { CURVE_WAVE_AROUND } + count.max(1);
+    let blink_or_repeat = opcode >= 2210;
+    // A count of 0 repeats (practically) for ever.
+    let count = if blink_or_repeat && count <= 0 {
+        100_000
+    } else {
+        count.max(1)
+    };
+    let curve = match opcode {
+        2210..=2213 => crate::object::CURVE_BLINK,
+        2214..=2216 => crate::object::CURVE_REPEAT,
+        _ if flash => CURVE_FLASH,
+        _ => CURVE_WAVE_AROUND,
+    } + count;
+    // Blinks and repeats take `time` per cycle.
+    let time = if blink_or_repeat {
+        time.saturating_mul(count)
+    } else {
+        time
+    };
     each(machine, &t.refs, |object| {
         object.end_mutators(id, None);
         let targets = moves
             .iter()
             .map(|&(property, amplitude)| {
                 let base = property.get(&object.params);
-                // Flashes towards a value: the amplitude is the distance.
+                // Flashes and blinks towards a value: the amplitude is the
+                // distance.
                 let amplitude = if flash && !matches!(property, Property::AdjustY(_)) {
                     amplitude - base
                 } else {
@@ -611,7 +829,12 @@ fn object_event(machine: &mut Machine, t: &Targets, opcode: u16, v: &[i32]) -> R
 }
 
 /// Writes `values` to the variables passed from parameter `from` on.
-fn write_params(machine: &mut Machine, command: &Command, from: usize, values: &[i32]) -> Result<()> {
+fn write_params(
+    machine: &mut Machine,
+    command: &Command,
+    from: usize,
+    values: &[i32],
+) -> Result<()> {
     for (offset, &value) in values.iter().enumerate() {
         if from + offset >= Machine::param_count(command) {
             break;
@@ -624,7 +847,6 @@ fn write_params(machine: &mut Machine, command: &Command, from: usize, values: &
 
 /// The mutator id of `OBJFRONTEVE_QUAKE`.
 const QUAKE_ID: i32 = 2201;
-
 
 /// Integers, skipping arguments that are not integers (text functions).
 fn ints_lenient(machine: &mut Machine, command: &Command, from: usize) -> Result<Vec<i32>> {
@@ -695,7 +917,24 @@ pub fn creation(machine: &mut Machine, command: &Command) -> Result<Next> {
             let with_pattern = command.op.opcode < 1300;
             common_args(install(machine, r, data)?, &v, with_pattern);
         }
-        1003 => {
+        // LOADTHUMBNAIL(slot): the picture saved with a game.
+        1005 => {
+            let slot = machine.int_param(command, a)?;
+            let data = match crate::save::slot_thumbnail(machine, slot) {
+                Some(surface) => ObjectData::File {
+                    name: format!("#thumbnail{slot}"),
+                    image: Rc::new(crate::image::Image::from_surface(surface)),
+                },
+                None => ObjectData::File {
+                    name: String::new(),
+                    image: Rc::new(crate::image::Image::new(1, 1)),
+                },
+            };
+            install(machine, r, data)?;
+        }
+        // objOfFileGan; LOADGANCOPYPARAM (1004) keeps the parameters too,
+        // as every load does here.
+        1003 | 1004 => {
             let image_name = machine.str_param(command, a)?;
             let gan_name = machine.str_param(command, a + 1)?;
             let v = ints_lenient(machine, command, a + 2)?;
@@ -1025,7 +1264,12 @@ pub fn getters(machine: &mut Machine, command: &Command) -> Result<Next> {
         1037 => machine.store = p.digits.value,
         1038 => {
             let d = &p.digits;
-            write_params(machine, command, a, &[d.digits, d.zero, d.sign, d.pack, d.space])?;
+            write_params(
+                machine,
+                command,
+                a,
+                &[d.digits, d.zero, d.sign, d.pack, d.space],
+            )?;
         }
         1039 => machine.store = p.pattern,
         1040 => {
@@ -1076,6 +1320,34 @@ pub fn getters(machine: &mut Machine, command: &Command) -> Result<Next> {
                 Some(_) => 7,
             };
         }
+        // GET_SELCENTER(x, y): the centre of the object on screen.
+        1102 => {
+            let x = machine.int_target_param(command, a)?;
+            let y = machine.int_target_param(command, a + 1)?;
+            let parent = match r.child {
+                Some(_) => {
+                    let parent = ObjectRef { child: None, ..r };
+                    machine
+                        .sys
+                        .gfx
+                        .object(parent)
+                        .map_or((0, 0), |o| (o.params.x, o.params.y))
+                }
+                None => (0, 0),
+            };
+            let bounds = {
+                let gfx = &mut machine.sys.gfx;
+                object.bounds(now, &mut gfx.fonts, &gfx.colours, parent)
+            };
+            machine.set_target(x, bounds.x + bounds.w / 2)?;
+            machine.set_target(y, bounds.y + bounds.h / 2)?;
+        }
+        // EVE_DISP_ENDALL(speed up): every running change ends at once.
+        6004 => {
+            if let Ok(object) = machine.sys.gfx.object_mut(r) {
+                object.end_mutators(crate::object::ALL_MUTATORS, None);
+            }
+        }
         1100 => {
             let w = machine.int_target_param(command, a)?;
             let h = machine.int_target_param(command, a + 1)?;
@@ -1116,7 +1388,7 @@ pub fn management(machine: &mut Machine, command: &Command) -> Result<Next> {
         62 => &[true],
         _ => &[false],
     };
-    let everything = matches!(opcode, 100 | 110 | 111);
+    let everything = matches!(opcode, 100..=102 | 110..=113 | 115 | 116);
     let child = command.op.modtype == 2;
     let parent = if child {
         Some(machine.int_param(command, 0)?)
@@ -1142,6 +1414,48 @@ pub fn management(machine: &mut Machine, command: &Command) -> Result<Next> {
             .collect()
     };
     match opcode {
+        // SAVECHILD_ON / _OFF: children are always saved here.
+        6 | 7 => {}
+        // GET_FILENAME / GET_GAN_FILENAME(buf, var); the _ALL forms have
+        // nothing to write to.
+        15 | 16 => {
+            let buf = machine.int_param(command, first)?;
+            let target = machine.str_target_param(command, first + 1)?;
+            let r = refs_on(layers[0], &[buf])[0];
+            let name = match machine.sys.gfx.object(r).and_then(|o| o.data.as_ref()) {
+                Some(ObjectData::File { name, .. } | ObjectData::Digits { name, .. })
+                | Some(ObjectData::Drift { name, .. }) => name.clone(),
+                Some(ObjectData::Gan {
+                    image_name,
+                    gan_name,
+                    ..
+                }) => {
+                    if opcode == 15 {
+                        image_name.clone()
+                    } else {
+                        gan_name.clone()
+                    }
+                }
+                _ => String::new(),
+            };
+            let name = if opcode == 16
+                && !matches!(
+                    machine.sys.gfx.object(r).and_then(|o| o.data.as_ref()),
+                    Some(ObjectData::Gan { .. })
+                ) {
+                String::new()
+            } else {
+                name
+            };
+            machine.write_string(target, name)?;
+        }
+        115 | 116 => {}
+        // OBJCOPYALL: every foreground object to the background.
+        102 => {
+            let gfx = &mut machine.sys.gfx;
+            gfx.bg.clone_from(&gfx.fg);
+            gfx.dirty = true;
+        }
         // objCopy family: (source, destination).
         2 | 3 | 14 => {
             let from = machine.int_param(command, first)?;
@@ -1162,7 +1476,7 @@ pub fn management(machine: &mut Machine, command: &Command) -> Result<Next> {
                 None => free(machine.sys.gfx.object_mut(dest)?, true),
             }
         }
-        0 | 1 | 4 | 5 | 10 | 11 | 100 | 110 | 111 => {
+        0 | 1 | 4 | 5 | 10..=13 | 100 | 101 | 110..=113 => {
             let bufs: Vec<i32> = if everything || (module == 60 && opcode == 1 && count <= first) {
                 (0..OBJECT_COUNT as i32).collect()
             } else if count >= first + 2 {
@@ -1180,10 +1494,17 @@ pub fn management(machine: &mut Machine, command: &Command) -> Result<Next> {
                     let object = machine.sys.gfx.object_mut(r)?;
                     match opcode {
                         0 | 100 => free(object, false),
-                        1 => object.params.wipe_copy = false,
+                        1 | 101 => object.params.wipe_copy = false,
                         4 => object.params.wipe_copy = true,
                         5 => object.params.wipe_copy = false,
                         10 | 110 => reset_params(object),
+                        // INITREP: the repetition origin back to zero.
+                        12 | 112 => object.params.rep_origin = (0, 0),
+                        // WAIPERASE_INITPARAM
+                        13 | 113 => {
+                            reset_params(object);
+                            object.params.wipe_copy = false;
+                        }
                         _ => free(object, true),
                     }
                 }

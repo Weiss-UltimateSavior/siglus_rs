@@ -111,6 +111,8 @@ pub struct Machine {
     pub interrupt: Option<(i32, i32)>,
     /// An interrupt handler is running.
     pub in_interrupt: bool,
+    /// `INTERRUPTCOM_DISAPPEAR`: the handler is not called for now.
+    pub interrupt_suspended: bool,
     /// Slot saves kept in memory when persistence is disabled.
     pub saved_in_memory: std::collections::HashMap<i32, Vec<u8>>,
     /// `LatestSave()`: the slot most recently saved to, or -1.
@@ -165,6 +167,7 @@ impl Machine {
             halt_on_error: false,
             interrupt: None,
             in_interrupt: false,
+            interrupt_suspended: false,
             saved_in_memory: Default::default(),
             latest_save: -1,
             previous_selection: None,
@@ -428,6 +431,22 @@ impl Machine {
         Ok(())
     }
 
+    /// `RETURN_L_FLAG_SET`: sets the caller's `intL[index]`.
+    pub fn push_int_value_up(&mut self, index: i32, value: i32) -> Result<()> {
+        let depth = self.stack.len();
+        if depth >= 2 {
+            let vars = &mut self.stack[depth - 2].vars;
+            let slot = usize::try_from(index)
+                .ok()
+                .and_then(|index| vars.int_l.get_mut(index))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("reallive: invalid index {index} in RETURN_L_FLAG_SET")
+                })?;
+            *slot = value;
+        }
+        Ok(())
+    }
+
     // ---- savepoints -----------------------------------------------------
 
     pub fn mark_savepoint(&mut self) {
@@ -565,10 +584,31 @@ impl Machine {
         let scene = self.scene_number();
         let read = self.memory.has_been_read(scene, kidoku);
         self.sys.text.set_kidoku_read(read);
+        // Skip mode stops at text not read before.
+        if !read {
+            self.sys.syscom.skip_mode = false;
+        }
         self.memory.record_kidoku(scene, kidoku);
     }
 
     fn execute_command(&mut self, command: &Command) -> Result<Next> {
+        // `REALLIVE_TRACE[=scene]`: every command as it runs (debugging
+        // aid), optionally only in one scene.
+        thread_local! {
+            static TRACE: Option<Option<i32>> = std::env::var("REALLIVE_TRACE")
+                .ok()
+                .map(|v| v.parse().ok());
+        }
+        if TRACE.with(|t| t.is_some_and(|scene| scene.is_none_or(|s| s == self.scene_number()))) {
+            eprintln!(
+                "[{}] SEEN{:04} line {}: {}",
+                self.sys.now(),
+                self.scene_number(),
+                self.line,
+                crate::opcodes::name(command.op)
+                    .map_or_else(|| command.op.to_string(), |n| format!("{n} {}", command.op)),
+            );
+        }
         match &command.kind {
             CommandKind::Plain => crate::modules::dispatch(self, command),
             _ => crate::modules::jmp::flow(self, command),

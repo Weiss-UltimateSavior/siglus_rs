@@ -29,7 +29,7 @@ impl SceneMetadata {
             let read_flag_count = if chunk.is_empty() {
                 0
             } else {
-                ScnHeader::read(chunk)?.read_flag_cnt.max(0) as usize
+                ScnHeader::read(&chunk)?.read_flag_cnt.max(0) as usize
             };
             rows.push((name, read_flag_count));
         }

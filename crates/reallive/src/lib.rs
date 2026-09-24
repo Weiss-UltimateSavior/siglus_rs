@@ -35,6 +35,7 @@ pub mod scenario;
 pub mod screen;
 pub mod select;
 pub mod serial;
+pub mod serial_pdt;
 pub mod settings;
 pub mod settings_io;
 pub mod shake;
@@ -43,8 +44,10 @@ pub mod surface;
 pub mod system;
 pub mod text;
 pub mod textout;
+pub mod tone_curve;
 pub mod ui;
 pub mod ui_render;
+pub mod window_buttons;
 
 pub use archive::Archive;
 pub use gameexe::Gameexe;

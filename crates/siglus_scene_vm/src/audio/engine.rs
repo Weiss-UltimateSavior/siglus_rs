@@ -228,6 +228,8 @@ struct BgmScriptEntry {
 struct BgmPlayerSlot {
     handle: Option<BgmSoundHandle>,
     source_bytes: Option<Arc<[u8]>>,
+    /// The file an `NwaStream` source decodes from while playing.
+    source_path: Option<PathBuf>,
     source_format: Option<BgmPlaybackFormat>,
     sample_rate_hz: u32,
     total_samples: u64,
@@ -253,6 +255,7 @@ impl BgmPlayerSlot {
             h.stop(Tween::default());
         }
         self.source_bytes = None;
+        self.source_path = None;
         self.source_format = None;
         self.sample_rate_hz = 0;
         self.total_samples = 0;
@@ -319,15 +322,37 @@ impl BgmPlayerSlot {
         amp: f64,
         fade_in_ms: i64,
     ) -> Result<BgmSoundData> {
-        let source = self
-            .source_bytes
-            .as_ref()
-            .context("BGM slot not prepared")?;
         // The original player owns a C_sound_stream and decodes while playing.
         // Keep native playback streaming as well; the browser retains Kira's
         // static fallback because kira::sound::streaming is unavailable there.
-        let mut data = BgmSoundData::from_cursor(Cursor::new(Arc::clone(source)))
-            .context("kira: prepare BGM playback stream")?
+        #[cfg(not(target_arch = "wasm32"))]
+        let data = if let Some(path) = self
+            .source_path
+            .as_ref()
+            .filter(|_| self.source_format == Some(BgmPlaybackFormat::NwaStream))
+        {
+            BgmSoundData::from_decoder(
+                super::nwa_stream::NwaDecoder::open(path)
+                    .with_context(|| format!("open NWA stream: {}", path.display()))?,
+            )
+        } else {
+            let source = self
+                .source_bytes
+                .as_ref()
+                .context("BGM slot not prepared")?;
+            BgmSoundData::from_cursor(Cursor::new(Arc::clone(source)))
+                .context("kira: prepare BGM playback stream")?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let data = {
+            let source = self
+                .source_bytes
+                .as_ref()
+                .context("BGM slot not prepared")?;
+            BgmSoundData::from_cursor(Cursor::new(Arc::clone(source)))
+                .context("kira: prepare BGM playback stream")?
+        };
+        let mut data = data
             .start_position(PlaybackPosition::Samples(effective_start as usize))
             .slice(Region {
                 start: PlaybackPosition::Samples(0),
@@ -712,7 +737,8 @@ impl BgmEngine {
 
         let slot = &mut self.players[slot_id];
         slot.reset_all();
-        slot.source_bytes = Some(decoded.bytes.into());
+        slot.source_bytes = (decoded.stream_path.is_none()).then(|| decoded.bytes.into());
+        slot.source_path = decoded.stream_path;
         slot.source_format = Some(decoded.format);
         slot.sample_rate_hz = decoded.sample_rate;
         slot.total_samples = total_samples;
@@ -737,7 +763,7 @@ impl BgmEngine {
     ) -> Result<()> {
         let amp = self.total_gain_amplitude();
         let slot = &mut self.players[slot_id];
-        if slot.source_bytes.is_none() {
+        if slot.source_bytes.is_none() && slot.source_path.is_none() {
             return Err(anyhow!("BGM slot not prepared"));
         }
 

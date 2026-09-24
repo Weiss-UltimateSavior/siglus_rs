@@ -56,14 +56,20 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn i32(&mut self) -> Result<i32> {
-        let bytes = self.data.get(self.at..self.at + 4).context("HIK: truncated")?;
+        let bytes = self
+            .data
+            .get(self.at..self.at + 4)
+            .context("HIK: truncated")?;
         self.at += 4;
         Ok(i32::from_le_bytes(bytes.try_into()?))
     }
 
     fn string(&mut self) -> Result<String> {
         let length = self.i32()?.max(0) as usize;
-        let bytes = self.data.get(self.at..self.at + length).context("HIK: truncated string")?;
+        let bytes = self
+            .data
+            .get(self.at..self.at + length)
+            .context("HIK: truncated string")?;
         self.at += length;
         let text = bytes.split(|&b| b == 0).next().unwrap_or(&[]);
         Ok(String::from_utf8_lossy(text).into_owned())
@@ -103,7 +109,9 @@ impl HikScript {
         while r.at < data.len() {
             let tag = r.i32()?;
             match tag {
-                10100..=10102 | 20000 | 21000 | 21003 | 21100 | 21203 | 30000 | 40000 => r.skip(1)?,
+                10100..=10102 | 20000 | 21000 | 21003 | 21100 | 21203 | 30000 | 40000 => {
+                    r.skip(1)?
+                }
                 10103 => script.size = (r.i32()?, r.i32()?),
                 20001 => {
                     r.skip(1)?;
@@ -255,7 +263,9 @@ impl HikRenderer {
                     }
                 }
             }
-            let Some(f) = animation.frames.get(chosen) else { continue };
+            let Some(f) = animation.frames.get(chosen) else {
+                continue;
+            };
             let region = f
                 .image
                 .regions
@@ -280,7 +290,15 @@ impl HikRenderer {
             }
             if src.w > 0 && src.h > 0 {
                 let opacity = f.opacity.clamp(0, 255) as u8;
-                frame.blit(&f.image.surface, src, at.0, at.1, opacity, Blend::Mask, None);
+                frame.blit(
+                    &f.image.surface,
+                    src,
+                    at.0,
+                    at.1,
+                    opacity,
+                    Blend::Mask,
+                    None,
+                );
             }
         }
     }

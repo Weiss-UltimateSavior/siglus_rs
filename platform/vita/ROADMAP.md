@@ -1,6 +1,6 @@
 # PS Vita Port Roadmap
 
-Status: the Vita player links and packages as a VPK. Vita3K runs RewriteHF's configuration, scene-pack, and VM initialization, renders the Key opening, and completes the approximately 100-second `op00.mpg` movie after installing `libshacccg.suprx`. A diagnostic run passed 8400 player frames. Movie buffers are capped to Vita display resolution and reduced queue sizes. Physical Vita behavior and full compatibility remain unvalidated.
+Status: the Vita player links and packages as a VPK and now renders through vita2d (static, precompiled shaders; no `libshacccg.suprx`). With the earlier vitaGL renderer, Vita3K runs RewriteHF's configuration, scene-pack, and VM initialization, renders the Key opening, and completes the approximately 100-second `op00.mpg` movie. A diagnostic run passed 8400 player frames. Movie buffers are capped to Vita display resolution and reduced queue sizes. Physical Vita behavior and full compatibility remain unvalidated.
 
 Related request: [Issue #23](https://github.com/xmoezzz/siglus_rs/issues/23).
 
@@ -13,7 +13,7 @@ The goal is to reuse the existing script execution, resource parsing, and game s
 | Scripts and runtime | [vm.rs](../../crates/siglus_scene_vm/src/vm.rs), [runtime](../../crates/siglus_scene_vm/src/runtime/mod.rs) | Reuse instruction semantics; isolate platform services and audit transitive dependencies |
 | Frame stepping and input | `step()`, key, and touch interfaces in [host.rs](../../crates/siglus_scene_vm/src/host.rs) | Preserve the driving model; remove the coupling between `SiglusHost` and the concrete `Renderer` |
 | Drawing data | `RenderFrame` in [layer.rs](../../crates/siglus_scene_vm/src/layer.rs) | Use shared data across backends; define ordering, blending, clipping, and capture semantics |
-| Rendering | [render/mod.rs](../../crates/siglus_scene_vm/src/render/mod.rs), [render/switch.rs](../../crates/siglus_scene_vm/src/render/switch.rs), [gpu.rs](player/src/gpu.rs) | VitaGL GPU quads handle simple sprites; complex effects use a CPU fallback uploaded to the GPU. Validate both paths with the shader compiler installed, then measure frame time and memory on hardware |
+| Rendering | [render/mod.rs](../../crates/siglus_scene_vm/src/render/mod.rs), [render/switch.rs](../../crates/siglus_scene_vm/src/render/switch.rs), [gpu.rs](player/src/gpu.rs) | vita2d GPU quads handle simple sprites; complex effects use a CPU fallback uploaded to the GPU. Validate both paths with the shader compiler installed, then measure frame time and memory on hardware |
 | Audio | [audio/kira_hub.rs](../../crates/siglus_scene_vm/src/audio/kira_hub.rs), [audio/switch_backend.rs](../../crates/siglus_scene_vm/src/audio/switch_backend.rs) | Vita now pulls Kira PCM through a bounded output buffer; validate rate, underruns, and lifecycle on hardware |
 | Resources and video | [siglus_assets](../../crates/siglus_assets/Cargo.toml), [na_mpeg2_decoder](../../crates/na_mpeg2_decoder/Cargo.toml), [movie](../../crates/siglus_scene_vm/src/movie/mod.rs) | The MPEG decoder's desktop player dependencies are now optional; the engine movie module still uses Kira types directly and needs a bounded Vita path |
 
@@ -24,7 +24,7 @@ Rust provides the Tier 3 target `armv7-sony-vita-newlibeabihf`. It requires nigh
 ## Technical direction
 
 - **Platform entry point:** Add a Vita main loop that calls VitaSDK through Rust FFI for startup, timing, buttons, touch, file paths, and shutdown.
-- **Rendering:** VitaGL submits ordinary 2D sprites as GPU textured quads and presents through a two-buffer scanout. Complex effects still use the shared CPU compositor before GPU upload. Validate visual parity, allocation budgets, and shader compiler availability on hardware.
+- **Rendering:** vita2d (GXM with precompiled shaders, static) submits ordinary 2D sprites as GPU textured quads. Complex effects still use the shared CPU compositor before GPU upload. Validate visual parity, allocation budgets, and shader compiler availability on hardware.
 - **Audio:** Reuse portable decoding and Kira playback semantics, with bounded PCM output through VitaSDK.
 - **Build:** Use VitaSDK, Rust nightly, and `cargo-vita` to generate VPKs. After validating the toolchain, pin versions or an image digest and upgrade them through separate changes. [Vita Rust build guide](https://vita-rust.github.io/book/build/index.html)
 
@@ -61,8 +61,8 @@ Work:
 - Validate coordinate orientation, color channels, alpha conventions, texture size limits, and resource cleanup.
 - Scale the logical game viewport to the device display with letterboxing, and map touch coordinates back into game coordinates.
 - Validate required effects with simple shaders. Existing WGSL shaders must be ported or rewritten; they cannot be passed directly to VitaGL.
-- Document initialization dependencies, required system modules, and installation prerequisites. If using VitaGL, verify the `libshacccg.suprx` environment required by its documentation.
-- Choose VitaGL or GXM based on correctness, frame time, memory use, and implementation cost. Record the decision.
+- Document initialization dependencies, required system modules, and installation prerequisites. The renderer uses vita2d, whose shaders are precompiled, so no `libshacccg.suprx` is required.
+- Decision: vita2d over vitaGL, because vitaGL compiles shaders at run time and needs `libshacccg.suprx`, which cannot be distributed with the VPK. Re-evaluate frame time on hardware.
 
 Acceptance: A physical Vita correctly displays a background, translucent character sprites, clipped regions, and offscreen composition. Compare the output with desktop reference images and define acceptable pixel differences. This milestone validates rendering foundations only.
 

@@ -46,6 +46,8 @@ impl BgmContainer {
 pub enum BgmPlaybackFormat {
     Ogg,
     Wav,
+    /// NWA decoded while it plays, from `stream_path` (native builds).
+    NwaStream,
 }
 
 /// BGM payload prepared for playback without unnecessary quality-reducing conversion.
@@ -58,6 +60,8 @@ pub struct BgmPlaybackData {
     pub sample_rate: u32,
     pub total_samples: u64,
     pub description: String,
+    /// The file to stream from (`NwaStream`); `bytes` is then empty.
+    pub stream_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -294,6 +298,7 @@ pub fn decode_bgm_to_playback_bytes(
                 sample_rate: info.sample_rate,
                 total_samples: info.total_samples,
                 description,
+                stream_path: None,
             })
         }
         BgmContainer::Wav => {
@@ -308,8 +313,30 @@ pub fn decode_bgm_to_playback_bytes(
                 sample_rate: info.sample_rate,
                 total_samples: info.total_samples,
                 description: format!("WAV:{}", input.display()),
+                stream_path: None,
             })
         }
+        // A whole track decoded is up to ~50 MB (twice that while it is
+        // converted); native builds decode while playing instead.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        BgmContainer::Nwa => {
+            let resolved = crate::resource::resolve_game_file(input)?
+                .with_context(|| format!("NWA not found: {}", input.display()))?;
+            let reader = nwa::NwaReader::open(&resolved)
+                .with_context(|| format!("open NWA: {}", resolved.display()))?;
+            let header = reader.header();
+            Ok(BgmPlaybackData {
+                container: kind,
+                format: BgmPlaybackFormat::NwaStream,
+                bytes: Vec::new(),
+                channels: header.channels,
+                sample_rate: header.samples_per_sec,
+                total_samples: u64::from(header.frame_count()),
+                description: format!("NWA:{}", input.display()),
+                stream_path: Some(resolved),
+            })
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         BgmContainer::Nwa => {
             let mut reader = open_nwa_reader(input)?;
             let wav = reader.to_wav_bytes().context("decode NWA -> WAV")?;
@@ -323,6 +350,7 @@ pub fn decode_bgm_to_playback_bytes(
                 sample_rate: info.sample_rate,
                 total_samples: info.total_samples,
                 description: format!("NWA:{}", input.display()),
+                stream_path: None,
             })
         }
         BgmContainer::Unknown => {

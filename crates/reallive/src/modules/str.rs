@@ -233,6 +233,62 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 cells_before(&haystack, haystack[..byte].chars().count()) as i32
             });
         }
+        // STRFIND / STRFIND_REAL(s, first, last): the first string
+        // variable (strS) holding `s` (ignoring case, or exactly), written
+        // to both outputs; `store` is 1 when found. (Only the signature is
+        // known; this reading is a guess.)
+        (32 | 33, _) => {
+            let needle = machine.str_param(command, 0)?;
+            let exact = command.op.opcode == 33;
+            let mut found = None;
+            for index in 0..crate::memory::BANK_SIZE as i32 {
+                let target = StrTarget {
+                    bank: crate::expr::bank::STR_S,
+                    index,
+                };
+                let value = machine.read_string(target)?;
+                let hit = if exact {
+                    value == needle
+                } else {
+                    value.eq_ignore_ascii_case(&needle)
+                };
+                if hit {
+                    found = Some(index);
+                    break;
+                }
+            }
+            for at in 1..command.params.len().min(3) {
+                let target = machine.int_target_param(command, at)?;
+                machine.set_target(target, found.unwrap_or(-1))?;
+            }
+            machine.store = i32::from(found.is_some());
+        }
+        // STRCOPY_BUFSIZE(dest, src, size) / STRSET_BUFSIZE(buf, size): as
+        // if through a C buffer of `size` bytes (terminator included).
+        (40 | 41, _) => {
+            let dest = machine.str_target_param(command, 0)?;
+            let (text, size) = if command.op.opcode == 40 {
+                (
+                    machine.str_param(command, 1)?,
+                    machine.int_param(command, 2)?,
+                )
+            } else {
+                (machine.read_string(dest)?, machine.int_param(command, 1)?)
+            };
+            let mut bytes = 0;
+            let fitted: String = text
+                .chars()
+                .take_while(|c| {
+                    bytes += if c.is_ascii() || ('\u{FF61}'..='\u{FF9F}').contains(c) {
+                        1
+                    } else {
+                        2
+                    };
+                    bytes < size.max(1)
+                })
+                .collect();
+            set(machine, dest, fitted)?;
+        }
         // strout(s) / intout(n)
         (100, 0) => {
             let value = machine.str_param(command, 0)?;

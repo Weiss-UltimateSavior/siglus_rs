@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! rl_run <game dir> [frames] [--shots DIR] [--every N] [--scene N] [--click FRAME:X:Y]...
+//!        [--choices 4,1,...] [--ctrl FROM:TO] [--skip]
 //! ```
 use std::collections::BTreeMap;
 
@@ -24,7 +25,21 @@ fn main() -> Result<()> {
     let frames: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(20_000);
     let shots = value("--shots");
     let every: usize = value("--every").and_then(|v| v.parse().ok()).unwrap_or(600);
+    // `--choices 4,1,2`: the options to pick, in order (then the first).
+    let mut choices: std::collections::VecDeque<char> = value("--choices")
+        .map(|v| {
+            v.split(',')
+                .filter_map(|c| c.trim().chars().next())
+                .collect()
+        })
+        .unwrap_or_default();
     let from: usize = value("--from").and_then(|v| v.parse().ok()).unwrap_or(0);
+    // `--ctrl FROM:TO`: Ctrl held over those frames (repeating as the OS
+    // repeats a held key).
+    let ctrl: Option<(usize, usize)> = value("--ctrl").and_then(|v| {
+        let (a, b) = v.split_once(':')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    });
     let mut options = EngineOptions::headless(root);
     options.fonts = shots.is_some();
     options.start_scene = value("--scene").and_then(|v| v.parse().ok());
@@ -44,6 +59,11 @@ fn main() -> Result<()> {
     // `--monkey SEED`: click at random places (for exercising game UIs).
     let mut monkey: Option<u64> = value("--monkey").and_then(|v| v.parse().ok());
     let mut engine = Engine::open(options)?;
+    // `--skip`: everything counts as read and skip mode is on.
+    let skip = args.iter().any(|a| a == "--skip");
+    if skip {
+        engine.machine.memory.global.all_read = true;
+    }
     if let Some(dir) = &shots {
         std::fs::create_dir_all(dir)?;
     }
@@ -60,6 +80,16 @@ fn main() -> Result<()> {
         if scene != last_scene {
             println!("frame {frame:6}: SEEN{scene:04}");
             last_scene = scene;
+        }
+        if let Some((start, end)) = ctrl {
+            if (start..end).contains(&frame) {
+                engine.input(InputEvent::KeyDown(Key::Ctrl));
+            } else if frame == end {
+                engine.input(InputEvent::KeyUp(Key::Ctrl));
+            }
+        }
+        if skip {
+            engine.machine.sys.syscom.skip_mode = true;
         }
         for &(at, x, y) in &clicks {
             if at == frame {
@@ -92,7 +122,11 @@ fn main() -> Result<()> {
             if waited > 3 {
                 waited = 0;
                 match engine.machine.current_long_op().map(|op| op.name()) {
-                    Some("select") => engine.input(InputEvent::KeyDown(Key::Char('1'))),
+                    Some("select") => {
+                        let pick = choices.pop_front().unwrap_or('1');
+                        engine.input(InputEvent::KeyDown(Key::Char(pick)))
+                    }
+                    Some("name entry") => engine.input(InputEvent::KeyDown(Key::Enter)),
                     Some("system menu" | "slot menu") => {
                         engine.input(InputEvent::KeyDown(Key::Escape))
                     }
@@ -102,6 +136,11 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        // Movies decode on a worker thread in real time: give it a moment
+        // per frame so the simulated clock does not outrun it.
+        if engine.machine.sys.movie.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         engine.tick(16);
         if let Some(dir) = &shots
@@ -161,5 +200,13 @@ fn main() -> Result<()> {
         "\nlong op: {:?}",
         engine.machine.current_long_op().map(|op| op.name())
     );
+    if let Some(movie) = &engine.machine.sys.movie {
+        println!(
+            "movie: {} (started {}, showing a frame {})",
+            movie.path.display(),
+            movie.started(),
+            movie.current.is_some()
+        );
+    }
     Ok(())
 }

@@ -1725,6 +1725,33 @@ fn load_read_flags(ctx: &mut CommandContext) -> Result<()> {
     Ok(())
 }
 
+/// A fingerprint of what the global save keeps across sessions (global
+/// flags and names, CG and BGM tables, read flags), leaving out the play
+/// time. Hosts that can be killed without warning (Vita) write the global
+/// save when this changes.
+pub fn global_save_fingerprint(ctx: &CommandContext) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for code in [
+        crate::runtime::forms::codes::ELM_GLOBAL_G,
+        crate::runtime::forms::codes::ELM_GLOBAL_Z,
+    ] {
+        ctx.globals.int_lists.get(&(code as u32)).hash(&mut hasher);
+    }
+    for code in [
+        crate::runtime::forms::codes::ELM_GLOBAL_M,
+        crate::runtime::forms::codes::ELM_GLOBAL_NAMAE_GLOBAL,
+    ] {
+        ctx.globals.str_lists.get(&(code as u32)).hash(&mut hasher);
+    }
+    ctx.tables.cg_flags.hash(&mut hasher);
+    ctx.globals.bgm_table_flags.hash(&mut hasher);
+    let mut scenes: Vec<_> = ctx.globals.read_flags.iter().collect();
+    scenes.sort_by_key(|(scene, _)| **scene);
+    scenes.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn write_global_save(ctx: &CommandContext) {
     write_config_save(ctx);
     let mut stream = original_save::OriginalStreamWriter::new();

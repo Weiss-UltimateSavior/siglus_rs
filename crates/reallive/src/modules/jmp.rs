@@ -161,6 +161,35 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             machine.write_with_arguments(&integers, &strings);
             Ok(Next::Jumped)
         }
+        // RETURN_L_FLAG_SET(index, value)
+        (100, _) => {
+            let index = machine.int_param(command, 0)?;
+            let value = machine.int_param(command, 1)?;
+            machine.push_int_value_up(index, value)?;
+            Ok(Next::Advance)
+        }
+        // RETURN_L_FLAG_SETS((index, value)...), RETURN_K_FLAG_SETS((index,
+        // string)... or (index, value)...)
+        (102 | 103, _) => {
+            for at in 0..command.params.len() {
+                let pieces = machine.complex_param(command, at)?;
+                let [index, value, ..] = &pieces[..] else {
+                    continue;
+                };
+                let index = machine.eval_int(index)?;
+                if op.opcode == 103 && value.is_string() {
+                    let value = machine.eval_str(value)?;
+                    machine.push_string_value_up(index, value)?;
+                } else if op.opcode == 103 {
+                    let value = machine.eval_int(value)?;
+                    machine.push_string_value_up(index, value.to_string())?;
+                } else {
+                    let value = machine.eval_int(value)?;
+                    machine.push_int_value_up(index, value)?;
+                }
+            }
+            Ok(Next::Advance)
+        }
         // pushStringValueUp
         (101, _) => {
             let index = machine.int_param(command, 0)?;

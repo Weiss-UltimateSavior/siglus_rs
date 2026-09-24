@@ -145,7 +145,7 @@ fn parse_scenes_from_pck(pck: &ScenePck) -> Result<Vec<Scene>> {
         }
         let name = names.get(i).cloned().flatten();
         let out_index = scenes.len();
-        let mut scene = Scene::parse(name, payload, pck.string_codec)?;
+        let mut scene = Scene::parse(name, &payload, pck.string_codec)?;
         scene.pack_inc_prop_cnt = pack_inc_prop_cnt;
         scene.pack_inc_cmd_cnt = pack_inc_cmd_cnt;
         scene.pack_inc_props = pack_inc_props.clone();

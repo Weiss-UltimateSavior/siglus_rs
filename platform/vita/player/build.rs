@@ -3,22 +3,17 @@ fn main() {
         return;
     }
     // Link published VitaSDK packages; no third-party source is copied into
-    // this workspace. Static archive order follows vitaGL's dependencies.
+    // this workspace. vita2d carries its shaders precompiled, so no runtime
+    // shader compiler (libshacccg.suprx) is needed on the device.
     for library in [
-        "vitaGL",
-        "vitashark",
-        "SceShaccCgExt",
-        "taihen_stub",
-        "SceShaccCg_stub",
-        "mathneon",
+        "vita2d",
         "SceGxm_stub",
-        "SceKernelDmacMgr_stub",
-        "SceSysmodule_stub",
-        "SceAppMgr_stub",
         "SceDisplay_stub",
+        "SceSysmodule_stub",
         "SceCommonDialog_stub",
+        "SceAppUtil_stub",
+        "SceAppMgr_stub",
         "SceSysmem_stub",
-        "stdc++",
         "m",
     ] {
         println!("cargo:rustc-link-lib=static={library}");

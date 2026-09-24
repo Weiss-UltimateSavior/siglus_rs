@@ -215,7 +215,10 @@ impl Resources {
     pub fn root_file(&self, name: &str) -> Option<PathBuf> {
         // Case-insensitive at every level of a relative path.
         let mut path = self.root.clone();
-        for part in name.split(['/', '\\']).filter(|p| !p.is_empty() && *p != ".") {
+        for part in name
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
             if part == ".." {
                 return None;
             }

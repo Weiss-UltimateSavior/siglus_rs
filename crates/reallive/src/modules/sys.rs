@@ -92,9 +92,64 @@ pub fn dispatch_event_loop(machine: &mut Machine, command: &Command) -> Result<N
         }
         // CHECK_JUST_AFTER_LOAD
         3001 => machine.store = i32::from(std::mem::take(&mut machine.just_loaded)),
-        _ => return machine.unimplemented(command),
+        _ => return crate::modules::sys_max::event_loop(machine, command),
     }
     Ok(Next::Advance)
+}
+
+/// `TONECURVE_BACKGROUND/FOREGROUND/PDTEXPAND/ALLOBJECT_ON/OFF` (700..707),
+/// `TONECURVE_OBJECT_ON/OFF(buf[, curve])` (708/709), `..._ONS/OFFS(first,
+/// last[, curve])` (710/711), `TONECURVE_FACE_ON/OFF` (712/713). A curve
+/// given as a file name uses the first table.
+fn tone_curve(machine: &mut Machine, command: &Command) -> Result<()> {
+    let opcode = command.op.opcode;
+    let curve_at = |machine: &mut Machine, index: usize| -> Result<Option<usize>> {
+        let Some(param) = command.params.get(index) else {
+            return Ok(Some(0).filter(|_| machine.sys.gfx.tone_curves.table(0).is_some()));
+        };
+        if param.value.is_string() {
+            return Ok(machine.sys.gfx.tone_curves.table(0));
+        }
+        let number = machine.int_param(command, index)?;
+        Ok(machine.sys.gfx.tone_curves.table(number))
+    };
+    let on = opcode % 2 == 0;
+    match opcode {
+        700..=707 | 712 | 713 => {
+            let table = if on { curve_at(machine, 0)? } else { None };
+            let gfx = &mut machine.sys.gfx;
+            match opcode {
+                700 | 701 => gfx.background_tone = table,
+                702 | 703 => gfx.foreground_tone = table,
+                712 | 713 => gfx.face_tone = table,
+                // PDTEXPAND (images as they load) and ALLOBJECT: every
+                // object.
+                _ => gfx.all_objects_tone = table,
+            }
+        }
+        708..=711 => {
+            let (first, last, curve) = if opcode >= 710 {
+                (
+                    machine.int_param(command, 0)?,
+                    machine.int_param(command, 1)?,
+                    2,
+                )
+            } else {
+                let buf = machine.int_param(command, 0)?;
+                (buf, buf, 1)
+            };
+            let table = if on { curve_at(machine, curve)? } else { None };
+            for buf in first.max(0)..=last.max(0) {
+                match table {
+                    Some(table) => machine.sys.gfx.object_tones.insert(buf as usize, table),
+                    None => machine.sys.gfx.object_tones.remove(&(buf as usize)),
+                };
+            }
+        }
+        _ => {}
+    }
+    machine.sys.gfx.dirty = true;
+    Ok(())
 }
 
 /// Writes `values` to `target` and the variables after it.
@@ -119,7 +174,10 @@ fn write_consecutive(machine: &mut Machine, target: IntTarget, values: &[i32]) -
 }
 
 /// Text windows named by `(window)`, `(first, last)` or nothing (all).
-fn window_range(machine: &mut Machine, command: &Command) -> Result<std::ops::RangeInclusive<usize>> {
+fn window_range(
+    machine: &mut Machine,
+    command: &Command,
+) -> Result<std::ops::RangeInclusive<usize>> {
     let count = machine.sys.text.states.len();
     Ok(match command.params.len() {
         0 => 0..=count - 1,
@@ -257,12 +315,15 @@ fn timetable2(machine: &mut Machine, command: &Command, lengths: bool) -> Result
     Ok(value)
 }
 
-fn index_series(machine: &mut Machine, command: &Command) -> Result<i32> {
+pub(crate) fn index_series(machine: &mut Machine, command: &Command, lengths: bool) -> Result<i32> {
     let index = machine.int_param(command, 0)?;
     let offset = machine.int_param(command, 1)?;
     let mut init = machine.int_param(command, 2)?;
     let mut value = init;
     let mut previous_finished = false;
+    // TIMETABLELEN: each segment's start and end count from the previous
+    // segment's end.
+    let mut elapsed = 0;
     for param in command.params.iter().skip(3) {
         let Expr::Special { tag, pieces } = &param.value else {
             continue;
@@ -280,6 +341,13 @@ fn index_series(machine: &mut Machine, command: &Command) -> Result<i32> {
             }
             (1 | 2, [start, end, end_value, rest @ ..]) => {
                 let mode = rest.first().copied().unwrap_or(0);
+                let (start, end) = if lengths {
+                    let start = elapsed + start;
+                    elapsed = start + end;
+                    (start, elapsed)
+                } else {
+                    (*start, *end)
+                };
                 let (start, end) = (start + offset, end + offset);
                 if index > start && index < end {
                     value += interpolate(start, index, end, end_value - init, mode);
@@ -442,7 +510,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let values: Vec<i32> = codes
                 .iter()
                 .map(|code| {
-                    let set = if op.opcode == 151 { &input.keys_pressed } else { &input.keys_held };
+                    let set = if op.opcode == 151 {
+                        &input.keys_pressed
+                    } else {
+                        &input.keys_held
+                    };
                     i32::from(set.contains(code))
                 })
                 .collect();
@@ -501,6 +573,8 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 }
             }
         }
+        // TONECURVE_*: recolour parts of the screen with a tone curve.
+        700..=713 => tone_curve(machine, command)?,
         // TIMETABLE2 / TIMETABLELEN2
         810 | 811 => machine.store = timetable2(machine, command, op.opcode == 811)?,
         // KeyMouseOn / KeyMouseOff
@@ -812,7 +886,7 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             }
             machine.store = i32::from(any);
         }
-        800 => machine.store = index_series(machine, command)?,
+        800 => machine.store = index_series(machine, command, false)?,
         // rnd([min], max)
         1000 => {
             let values = machine.int_params_from(command, 0)?;
@@ -1054,7 +1128,7 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // Setting setters (22xx), getters (23xx) and defaults (26xx).
         2221..=2276 | 2321..=2376 | 2600..=2621 => return settings_op(machine, command),
         // save/load menus and slots
-        3000..=3009 | 3100..=3109 => {
+        3000..=3003 | 3006..=3009 | 3100..=3103 | 3106..=3109 => {
             if crate::save::sys_save_load(machine, command)? {
                 return Ok(Next::Jumped);
             }
@@ -1078,7 +1152,12 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         3500 => machine.mark_savepoint(),
         3501 => machine.mark_savepoints = true,
         3502 => machine.mark_savepoints = false,
-        _ => return machine.unimplemented(command),
+        _ => {
+            return match crate::modules::sys_max::dispatch(machine, command)? {
+                Some(next) => Ok(next),
+                None => machine.unimplemented(command),
+            };
+        }
     }
     Ok(Next::Advance)
 }
@@ -1213,7 +1292,12 @@ fn settings_op(machine: &mut Machine, command: &Command) -> Result<Next> {
             }
             _ => match current {
                 Some(value) => machine.store = value,
-                None => return machine.unimplemented(command),
+                None => {
+                    return match crate::modules::sys_max::dispatch(machine, command)? {
+                        Some(next) => Ok(next),
+                        None => machine.unimplemented(command),
+                    };
+                }
             },
         },
         // Setters.
@@ -1253,7 +1337,12 @@ fn settings_op(machine: &mut Machine, command: &Command) -> Result<Next> {
                     machine.sys.settings.use_koe.insert(character, value != 0);
                 }
                 75 => s.screen_mode = value,
-                _ => return machine.unimplemented(command),
+                _ => {
+                    return match crate::modules::sys_max::dispatch(machine, command)? {
+                        Some(next) => Ok(next),
+                        None => machine.unimplemented(command),
+                    };
+                }
             }
             if (30..=33).contains(&which) || (40..=43).contains(&which) {
                 machine.sys.volumes_changed = true;

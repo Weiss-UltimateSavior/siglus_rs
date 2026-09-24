@@ -104,7 +104,9 @@ fn experiment(root: &str, scene: Option<i32>, command: &Command) -> Result<(&'st
     }
     let machine = &mut engine.machine;
     let before = machine.diagnostics.unimplemented.clone();
-    let outcome = catch_unwind(AssertUnwindSafe(|| reallive::modules::dispatch(machine, command)));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        reallive::modules::dispatch(machine, command)
+    }));
     Ok(match outcome {
         Err(panic) => {
             let message = panic
@@ -159,7 +161,10 @@ fn game_ops(root: &str) -> Result<()> {
     for (scene, command, count) in first.values() {
         let (status, detail) = experiment(root, Some(*scene), command)?;
         let name = reallive::opcodes::name(command.op).unwrap_or("-");
-        println!("{}	{name}	{count}	SEEN{scene:04}	{status}	{detail}", command.op);
+        println!(
+            "{}	{name}	{count}	SEEN{scene:04}	{status}	{detail}",
+            command.op
+        );
     }
     Ok(())
 }

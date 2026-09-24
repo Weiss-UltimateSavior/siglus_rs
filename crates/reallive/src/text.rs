@@ -257,6 +257,8 @@ pub struct TextSystem {
     pub active: usize,
     /// `FastText()`.
     pub fast_text: bool,
+    /// `MESSAGE_SPEED(speed)`: ms per character until the next pause.
+    pub speed_override: Option<i32>,
     kidoku_read: bool,
     /// Every piece of text output, in order (headless tools and tests).
     pub log: Vec<String>,
@@ -293,6 +295,7 @@ impl TextSystem {
             states: vec![WindowState::default(); WINDOW_COUNT],
             active: 0,
             fast_text: false,
+            speed_override: None,
             kidoku_read: false,
             log: Vec::new(),
             backlog: Vec::new(),

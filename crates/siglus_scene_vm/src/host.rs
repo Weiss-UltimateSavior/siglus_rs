@@ -568,6 +568,16 @@ impl SiglusHost {
         self.renderer.borrow_mut()
     }
 
+    /// Writes the global save if what it keeps has changed since `last`
+    /// (see `global_save_fingerprint`); returns the current fingerprint.
+    pub fn persist_global_if_changed(&mut self, last: Option<u64>) -> u64 {
+        let now = crate::runtime::forms::syscom::global_save_fingerprint(&self.vm.ctx);
+        if last.is_some_and(|last| last != now) {
+            crate::runtime::forms::syscom::write_global_save(&self.vm.ctx);
+        }
+        now
+    }
+
     pub fn vm_mut(&mut self) -> &mut SceneVm<'static> {
         &mut self.vm
     }
@@ -658,12 +668,12 @@ impl SiglusHost {
             {
                 let bytes = crate::resource::read_file_bytes(&scene_pck_path)
                     .with_context(|| format!("read scene.pck: {}", scene_pck_path.display()))?;
-                ScenePck::load_and_rebuild_from_bytes(bytes, &opt)
+                ScenePck::load_lazy_from_bytes(bytes, &opt)
                     .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?
             }
             #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             {
-                ScenePck::load_and_rebuild(&scene_pck_path, &opt)
+                ScenePck::load_lazy(&scene_pck_path, &opt)
                     .with_context(|| format!("open scene.pck: {}", scene_pck_path.display()))?
             }
         };

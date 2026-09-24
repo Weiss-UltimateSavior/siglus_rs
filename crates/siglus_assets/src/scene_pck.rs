@@ -211,6 +211,59 @@ pub struct ScenePck {
     pub inc_props: Vec<PackIncProp>,
     pub inc_cmds: Vec<PackIncCmd>,
     pub string_codec: SceneStringCodec,
+    /// Set by `load_lazy`: `buf` is then the decrypted but still compressed
+    /// pack, and scenes are decompressed when asked for.
+    lazy: Option<Arc<LazyScenes>>,
+}
+
+/// Scenes of a lazily loaded pack: where each compressed chunk lies in
+/// `ScenePck::buf`, and the scenes decompressed so far (kept while any
+/// stream still holds them).
+#[derive(Debug)]
+struct LazyScenes {
+    compressed: bool,
+    ranges: Vec<Range<usize>>,
+    decoded: std::sync::Mutex<HashMap<usize, std::sync::Weak<Vec<u8>>>>,
+}
+
+/// Scene names to numbers, from the pack's name tables (before the scene
+/// data, so the same in a rebuilt and a lazily loaded pack).
+fn read_scene_name_map(buf: &[u8], header: &PackScnHeader) -> Result<HashMap<String, usize>> {
+    let mut scn_name_map = HashMap::new();
+    let name_idx_ofs = header.scn_name_index_list_ofs as usize;
+    let name_cnt = header.scn_name_cnt.max(0) as usize;
+    let name_list_ofs = header.scn_name_list_ofs as usize;
+    if name_idx_ofs + name_cnt * 8 <= buf.len() && name_list_ofs <= buf.len() {
+        for i in 0..name_cnt {
+            let idx = CIndex::read(buf, name_idx_ofs + i * 8)?;
+            let o = idx.offset.max(0) as usize;
+            let n = idx.size.max(0) as usize;
+            let byte_off = name_list_ofs
+                .checked_add(o * 2)
+                .ok_or_else(|| anyhow!("scene_pck: name offset overflow"))?;
+            let byte_end = byte_off
+                .checked_add(n * 2)
+                .ok_or_else(|| anyhow!("scene_pck: name size overflow"))?;
+            if byte_end > buf.len() {
+                continue;
+            }
+            let mut u16s = Vec::with_capacity(n);
+            for j in 0..n {
+                let p = byte_off + j * 2;
+                let w = u16::from_le_bytes([buf[p], buf[p + 1]]);
+                if w == 0 {
+                    break;
+                }
+                u16s.push(w);
+            }
+            let s = String::from_utf16_lossy(&u16s);
+            if !s.is_empty() {
+                scn_name_map.insert(s, i);
+            }
+        }
+    }
+
+    Ok(scn_name_map)
 }
 
 fn read_pack_inc_props(buf: &[u8], list_ofs: usize, count: usize) -> Result<Vec<PackIncProp>> {
@@ -359,13 +412,10 @@ fn write_mdl_string_candidate<W: Write>(
 }
 
 fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<SceneStringCodec> {
-    let mut plain = DeflateEncoder::new(Vec::new(), Compression::best());
-    let mut xor = DeflateEncoder::new(Vec::new(), Compression::best());
     let scn_cnt = header.scn_data_cnt.max(header.scn_data_index_cnt).max(0) as usize;
     let idx_ofs = header.scn_data_index_list_ofs.max(0) as usize;
     let data_base = header.scn_data_list_ofs.max(0) as usize;
-    let mut total_units = 0usize;
-
+    let mut detector = MdlDetector::new();
     for scn_no in 0..scn_cnt {
         let idx = CIndex::read(buf, idx_ofs + scn_no * 8)?;
         if idx.size <= 0 {
@@ -380,60 +430,98 @@ fn detect_scene_string_codec_mdl(buf: &[u8], header: &PackScnHeader) -> Result<S
         let chunk = buf
             .get(chunk_start..chunk_end)
             .ok_or_else(|| anyhow!("scene_pck: scene out of bounds during MDL detection"))?;
-        let (string_index_ofs, string_count, string_list_ofs) =
-            match read_scene_string_header(chunk) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-        let index_end = string_index_ofs
-            .checked_add(
-                string_count
-                    .checked_mul(8)
-                    .ok_or_else(|| anyhow!("scene_pck: string index size overflow"))?,
-            )
-            .ok_or_else(|| anyhow!("scene_pck: string index offset overflow"))?;
-        if index_end > chunk.len() || string_list_ofs > chunk.len() {
-            continue;
-        }
+        detector.feed(scn_no, chunk)?;
+    }
+    detector.finish()
+}
 
-        // Identical scene/string framing is written to both candidates. The
-        // only difference is the candidate decoding of each UTF-16 code unit.
-        plain.write_all(&(scn_no as u32).to_le_bytes())?;
-        xor.write_all(&(scn_no as u32).to_le_bytes())?;
-        for str_id in 0..string_count {
-            plain.write_all(&(str_id as u32).to_le_bytes())?;
-            xor.write_all(&(str_id as u32).to_le_bytes())?;
-            total_units = total_units.saturating_add(write_mdl_string_candidate(
-                &mut plain,
-                chunk,
-                string_index_ofs,
-                string_list_ofs,
-                str_id,
-                SceneStringCodec::Plain,
-            )?);
-            let _ = write_mdl_string_candidate(
-                &mut xor,
-                chunk,
-                string_index_ofs,
-                string_list_ofs,
-                str_id,
-                SceneStringCodec::Xor,
-            )?;
+/// Compares how well the scene strings compress decoded as plain UTF-16 and
+/// as XORed UTF-16; fed one decoded scene at a time.
+struct MdlDetector {
+    plain: DeflateEncoder<Vec<u8>>,
+    xor: DeflateEncoder<Vec<u8>>,
+    total_units: usize,
+}
+
+impl MdlDetector {
+    fn new() -> Self {
+        Self {
+            plain: DeflateEncoder::new(Vec::new(), Compression::best()),
+            xor: DeflateEncoder::new(Vec::new(), Compression::best()),
+            total_units: 0,
         }
     }
 
-    if total_units == 0 {
-        return Ok(SceneStringCodec::Xor);
+    fn feed(&mut self, scn_no: usize, chunk: &[u8]) -> Result<()> {
+        let Self {
+            plain,
+            xor,
+            total_units,
+        } = self;
+        {
+            let (string_index_ofs, string_count, string_list_ofs) =
+                match read_scene_string_header(chunk) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(()),
+                };
+            let index_end = string_index_ofs
+                .checked_add(
+                    string_count
+                        .checked_mul(8)
+                        .ok_or_else(|| anyhow!("scene_pck: string index size overflow"))?,
+                )
+                .ok_or_else(|| anyhow!("scene_pck: string index offset overflow"))?;
+            if index_end > chunk.len() || string_list_ofs > chunk.len() {
+                return Ok(());
+            }
+
+            // Identical scene/string framing is written to both candidates. The
+            // only difference is the candidate decoding of each UTF-16 code unit.
+            plain.write_all(&(scn_no as u32).to_le_bytes())?;
+            xor.write_all(&(scn_no as u32).to_le_bytes())?;
+            for str_id in 0..string_count {
+                plain.write_all(&(str_id as u32).to_le_bytes())?;
+                xor.write_all(&(str_id as u32).to_le_bytes())?;
+                *total_units = total_units.saturating_add(write_mdl_string_candidate(
+                    plain,
+                    chunk,
+                    string_index_ofs,
+                    string_list_ofs,
+                    str_id,
+                    SceneStringCodec::Plain,
+                )?);
+                let _ = write_mdl_string_candidate(
+                    xor,
+                    chunk,
+                    string_index_ofs,
+                    string_list_ofs,
+                    str_id,
+                    SceneStringCodec::Xor,
+                )?;
+            }
+        }
+        Ok(())
     }
-    let plain_len = plain.finish()?.len();
-    let xor_len = xor.finish()?.len();
-    Ok(if plain_len < xor_len {
-        SceneStringCodec::Plain
-    } else {
-        // Preserve the historical runtime behavior on ties or weak/noisy
-        // corpora; MDL must strictly prefer Plain before we disable XOR.
-        SceneStringCodec::Xor
-    })
+
+    fn finish(self) -> Result<SceneStringCodec> {
+        let Self {
+            plain,
+            xor,
+            total_units,
+        } = self;
+        if total_units == 0 {
+            return Ok(SceneStringCodec::Xor);
+        }
+        let plain_len = plain.finish()?.len();
+        let xor_len = xor.finish()?.len();
+        Ok(if plain_len < xor_len {
+            SceneStringCodec::Plain
+        } else {
+            // Preserve the historical runtime behavior on ties or weak/noisy
+            // corpora; MDL must strictly prefer Plain before we disable XOR.
+            SceneStringCodec::Xor
+        })
+    }
 }
 
 fn resolve_scene_string_codec(
@@ -669,41 +757,7 @@ impl ScenePck {
                 .ok_or_else(|| anyhow!("scene_pck: offset overflow"))?;
         }
 
-        // Build name map.
-        let mut scn_name_map = HashMap::new();
-        let name_idx_ofs = header.scn_name_index_list_ofs as usize;
-        let name_cnt = header.scn_name_cnt.max(0) as usize;
-        let name_list_ofs = header.scn_name_list_ofs as usize;
-        if name_idx_ofs + name_cnt * 8 <= out.len() && name_list_ofs <= out.len() {
-            for i in 0..name_cnt {
-                let idx = CIndex::read(&out, name_idx_ofs + i * 8)?;
-                let o = idx.offset.max(0) as usize;
-                let n = idx.size.max(0) as usize;
-                let byte_off = name_list_ofs
-                    .checked_add(o * 2)
-                    .ok_or_else(|| anyhow!("scene_pck: name offset overflow"))?;
-                let byte_end = byte_off
-                    .checked_add(n * 2)
-                    .ok_or_else(|| anyhow!("scene_pck: name size overflow"))?;
-                if byte_end > out.len() {
-                    continue;
-                }
-                let mut u16s = Vec::with_capacity(n);
-                for j in 0..n {
-                    let p = byte_off + j * 2;
-                    let w = u16::from_le_bytes([out[p], out[p + 1]]);
-                    if w == 0 {
-                        break;
-                    }
-                    u16s.push(w);
-                }
-                let s = String::from_utf16_lossy(&u16s);
-                if !s.is_empty() {
-                    scn_name_map.insert(s, i);
-                }
-            }
-        }
-
+        let scn_name_map = read_scene_name_map(&out, &header)?;
         let inc_prop_name_map = read_indexed_utf16_name_map(
             &out,
             header.inc_prop_name_index_list_ofs.max(0) as usize,
@@ -746,7 +800,162 @@ impl ScenePck {
             inc_props,
             inc_cmds,
             string_codec,
+            lazy: None,
         })
+    }
+
+    /// Opens a pack without rebuilding it: scenes stay compressed (a
+    /// quarter of the rebuilt size for RewriteHF, 11 MiB instead of 43)
+    /// and are decompressed when a scene is first used.
+    pub fn load_lazy(path: &Path, opt: &ScenePckDecodeOptions) -> Result<Self> {
+        Self::load_lazy_from_bytes(read_scene_pck_bytes(path)?, opt)
+    }
+
+    pub fn load_lazy_from_bytes(mut tmp: Vec<u8>, opt: &ScenePckDecodeOptions) -> Result<Self> {
+        if tmp.len() < 4 {
+            bail!("scene_pck: file too short");
+        }
+        let has_signature = tmp.len() >= 8 && &tmp[0..8] == b"pack_scn";
+        let header = PackScnHeader::read(&tmp, 0, has_signature)?;
+        let scn_data_list_ofs = header.scn_data_list_ofs as usize;
+        if scn_data_list_ofs > tmp.len() {
+            bail!("scene_pck: scn_data_list_ofs out of bounds");
+        }
+        let idx_ofs = header.scn_data_index_list_ofs as usize;
+        let scn_cnt = if header.scn_data_cnt > 0 {
+            header.scn_data_cnt as usize
+        } else {
+            header.scn_data_index_cnt.max(0) as usize
+        };
+        if idx_ofs + scn_cnt * 8 > tmp.len() {
+            bail!("scene_pck: scn_data_index_list out of bounds");
+        }
+        let compressed = header.original_source_header_size > 0;
+        let mut ranges = Vec::with_capacity(scn_cnt);
+        for scn_no in 0..scn_cnt {
+            let entry = CIndex::read(&tmp, idx_ofs + scn_no * 8)?;
+            if entry.size <= 0 {
+                ranges.push(0..0);
+                continue;
+            }
+            let start = scn_data_list_ofs
+                .checked_add(entry.offset.max(0) as usize)
+                .ok_or_else(|| anyhow!("scene_pck: offset overflow"))?;
+            let end = start
+                .checked_add(entry.size as usize)
+                .ok_or_else(|| anyhow!("scene_pck: size overflow"))?;
+            if end > tmp.len() {
+                bail!("scene_pck: scn chunk out of bounds (scn_no={scn_no})");
+            }
+            // Decrypt in place now; only the LZSS stage is left for later.
+            if compressed {
+                let chunk = &mut tmp[start..end];
+                if header.scn_data_exe_angou_mod != 0
+                    && let Some(exe) = opt.exe_angou_element.as_deref().filter(|k| !k.is_empty())
+                {
+                    for (i, b) in chunk.iter_mut().enumerate() {
+                        *b ^= exe[i % exe.len()];
+                    }
+                }
+                if let Some(easy) = opt.easy_angou_code.as_deref().filter(|k| !k.is_empty()) {
+                    for (i, b) in chunk.iter_mut().enumerate() {
+                        *b ^= easy[i % easy.len()];
+                    }
+                }
+            }
+            ranges.push(start..end);
+        }
+        let lazy = Arc::new(LazyScenes {
+            compressed,
+            ranges,
+            decoded: std::sync::Mutex::new(HashMap::new()),
+        });
+
+        let scn_name_map = read_scene_name_map(&tmp, &header)?;
+        let inc_prop_name_map = read_indexed_utf16_name_map(
+            &tmp,
+            header.inc_prop_name_index_list_ofs.max(0) as usize,
+            header.inc_prop_name_cnt.max(0) as usize,
+            header.inc_prop_name_list_ofs.max(0) as usize,
+        )?;
+        let inc_cmd_name_map = read_indexed_utf16_name_map(
+            &tmp,
+            header.inc_cmd_name_index_list_ofs.max(0) as usize,
+            header.inc_cmd_name_cnt.max(0) as usize,
+            header.inc_cmd_name_list_ofs.max(0) as usize,
+        )?;
+        let inc_props = read_pack_inc_props(
+            &tmp,
+            header.inc_prop_list_ofs.max(0) as usize,
+            header.inc_prop_cnt.max(0) as usize,
+        )?;
+        let inc_cmds = read_pack_inc_cmds(
+            &tmp,
+            header.inc_cmd_list_ofs.max(0) as usize,
+            header.inc_cmd_cnt.max(0) as usize,
+        )?;
+        let mut pack = Self {
+            buf: Arc::new(tmp),
+            header,
+            scn_name_map,
+            inc_prop_name_map,
+            inc_cmd_name_map: Arc::new(inc_cmd_name_map),
+            inc_props,
+            inc_cmds,
+            string_codec: SceneStringCodec::Xor,
+            lazy: Some(lazy),
+        };
+        pack.string_codec = match opt.string_encryption_override {
+            StringEncryptionOverride::Xor => SceneStringCodec::Xor,
+            StringEncryptionOverride::None => SceneStringCodec::Plain,
+            StringEncryptionOverride::Mdl => {
+                // One decoded scene at a time.
+                let mut detector = MdlDetector::new();
+                for scn_no in 0..scn_cnt {
+                    let chunk = pack.scn_data_slice(scn_no)?;
+                    if !chunk.is_empty() {
+                        detector.feed(scn_no, &chunk)?;
+                    }
+                }
+                detector.finish()?
+            }
+        };
+        Ok(pack)
+    }
+
+    /// Whether scenes are decompressed on demand (`load_lazy`).
+    pub fn is_lazy(&self) -> bool {
+        self.lazy.is_some()
+    }
+
+    /// A lazily loaded scene, decompressed now or shared with whoever still
+    /// holds it.
+    fn lazy_scene(
+        lazy: &LazyScenes,
+        buf: &Arc<Vec<u8>>,
+        scn_no: usize,
+    ) -> Result<(Arc<Vec<u8>>, Range<usize>)> {
+        let range = lazy
+            .ranges
+            .get(scn_no)
+            .cloned()
+            .ok_or_else(|| anyhow!("scene_pck: scn_no out of range"))?;
+        if range.is_empty() || !lazy.compressed {
+            return Ok((buf.clone(), range));
+        }
+        let mut decoded = lazy.decoded.lock().expect("scene cache lock poisoned");
+        if let Some(scene) = decoded.get(&scn_no).and_then(std::sync::Weak::upgrade) {
+            let len = scene.len();
+            return Ok((scene, 0..len));
+        }
+        let scene = Arc::new(
+            lzss_unpack_lenient(&buf[range])
+                .with_context(|| format!("scene_pck: lzss unpack scn_no={scn_no}"))?,
+        );
+        decoded.retain(|_, weak| weak.strong_count() > 0);
+        decoded.insert(scn_no, Arc::downgrade(&scene));
+        let len = scene.len();
+        Ok((scene, 0..len))
     }
 
     fn scn_data_range(&self, scn_no: usize) -> Result<Range<usize>> {
@@ -772,15 +981,24 @@ impl ScenePck {
         Ok(off..end)
     }
 
-    pub fn scn_data_slice(&self, scn_no: usize) -> Result<&[u8]> {
+    /// A scene's bytecode (decompressed first for a lazily loaded pack).
+    pub fn scn_data_slice(&self, scn_no: usize) -> Result<std::borrow::Cow<'_, [u8]>> {
+        if let Some(lazy) = &self.lazy {
+            let (owner, range) = Self::lazy_scene(lazy, &self.buf, scn_no)?;
+            return Ok(std::borrow::Cow::Owned(owner[range].to_vec()));
+        }
         let range = self.scn_data_range(scn_no)?;
-        Ok(&self.buf[range])
+        Ok(std::borrow::Cow::Borrowed(&self.buf[range]))
     }
 
     /// Return shared backing storage plus the scene-local byte range.
     /// SceneStream uses this to borrow directly from the rebuilt Scene.pck
-    /// without copying or leaking each visited scene chunk.
+    /// (or, lazily loaded, from the scene's own decompressed buffer) without
+    /// copying or leaking each visited scene chunk.
     pub fn scn_data_shared(&self, scn_no: usize) -> Result<(Arc<Vec<u8>>, Range<usize>)> {
+        if let Some(lazy) = &self.lazy {
+            return Self::lazy_scene(lazy, &self.buf, scn_no);
+        }
         let range = self.scn_data_range(scn_no)?;
         Ok((self.buf.clone(), range))
     }
@@ -927,7 +1145,7 @@ mod scene_name_lookup_tests {
         let mut scn_name_map = HashMap::new();
         scn_name_map.insert("_rb_titlemenu".to_string(), 37);
         let pck = ScenePck {
-            buf: Arc::from(Vec::<u8>::new().into_boxed_slice()),
+            buf: Arc::new(Vec::new()),
             header: header_for_lookup_test(),
             scn_name_map,
             inc_prop_name_map: HashMap::new(),
@@ -935,6 +1153,7 @@ mod scene_name_lookup_tests {
             inc_props: Vec::new(),
             inc_cmds: Vec::new(),
             string_codec: SceneStringCodec::Xor,
+            lazy: None,
         };
 
         assert_eq!(pck.find_scene_no("_RB_titlemenu"), Some(37));

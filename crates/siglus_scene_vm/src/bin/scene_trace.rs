@@ -93,7 +93,7 @@ Other controls:
         head
     );
 
-    let mut stream = SceneStream::new_with_string_codec(chunk, pack.string_codec)?;
+    let mut stream = SceneStream::new_with_string_codec(&chunk, pack.string_codec)?;
     stream.jump_to_z_label(0)?;
     let ctx = CommandContext::new(project_dir.clone());
     let mut vm = SceneVm::new(stream, ctx);

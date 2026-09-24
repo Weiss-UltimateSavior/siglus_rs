@@ -10,9 +10,11 @@ pub mod obj;
 pub mod scr;
 pub mod sel;
 pub mod shk;
+pub mod snm;
 pub mod sound;
 pub mod str;
 pub mod sys;
+pub mod sys_max;
 
 use anyhow::Result;
 
@@ -39,6 +41,7 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         (1, 5) => os(machine, command),
         (1, 14) => g00_buffers(machine, command),
         (1, 41) => flash(machine, command),
+        (1, 34) => snm::dispatch(machine, command),
         (1, 30) => scr::scr(machine, command),
         // refresh: end the frame so the screen is drawn.
         (1, 31) => {
@@ -52,7 +55,7 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         (1 | 2, 60..=62) => obj::management(machine, command),
         (1 | 2, 71 | 72) => obj::creation(machine, command),
         (1 | 2, 73 | 74) => obj::animation(machine, command),
-        (1 | 2, 81 | 82 | 90 | 91) => obj::properties(machine, command),
+        (1 | 2, 81 | 82 | 87 | 88 | 90 | 91 | 93 | 94) => obj::properties(machine, command),
         (1 | 2, 84 | 85) => obj::getters(machine, command),
         _ => machine.unimplemented(command),
     }
@@ -67,7 +70,9 @@ fn g00_buffers(machine: &mut Machine, command: &Command) -> Result<Next> {
             let name = machine.str_param(command, 1)?;
             let sys = &mut machine.sys;
             let image = sys.gfx.load_image(&sys.resources, &name)?;
-            sys.gfx.preloaded.insert(buf, (name.trim().to_lowercase(), image));
+            sys.gfx
+                .preloaded
+                .insert(buf, (name.trim().to_lowercase(), image));
         }
         1001 => {
             let buf = machine.int_param(command, 0)?;
@@ -85,6 +90,30 @@ fn g00_buffers(machine: &mut Machine, command: &Command) -> Result<Next> {
 /// position and size.
 fn flash(machine: &mut Machine, command: &Command) -> Result<Next> {
     let opcode = command.op.opcode;
+    // FLUSHSTOP / FLUSHWAIT / FLUSHCHECK, PIKACHUSTOP / _WAIT / _CHECK
+    if matches!(opcode, 100..=102 | 110..=112) {
+        let blink = opcode >= 110;
+        let gfx = &mut machine.sys.gfx;
+        let now = machine.sys.clock.now();
+        let running = gfx
+            .flash
+            .as_ref()
+            .is_some_and(|flash| flash.blink == blink && !flash.finished(now));
+        match opcode % 10 {
+            0 => {
+                if running {
+                    gfx.flash = None;
+                    gfx.dirty = true;
+                }
+            }
+            1 => {
+                let wait = crate::longop::Wait::event(crate::longop::WaitEvent::Flash);
+                machine.push_long_op(Box::new(wait));
+            }
+            _ => machine.store = i32::from(running),
+        }
+        return Ok(Next::Advance);
+    }
     if opcode > 33 || opcode % 10 > 3 {
         return machine.unimplemented(command);
     }
@@ -104,7 +133,11 @@ fn flash(machine: &mut Machine, command: &Command) -> Result<Next> {
     let byte = |i: usize| v.get(i).copied().unwrap_or(0).clamp(0, 255) as u8;
     let colour = [byte(colour_at), byte(colour_at + 1), byte(colour_at + 2)];
     let mut rest = v.get(colour_at + 3..).unwrap_or(&[]).iter().copied();
-    let count = if blink { rest.next().unwrap_or(1).max(1) as u32 } else { 1 };
+    let count = if blink {
+        rest.next().unwrap_or(1).max(1) as u32
+    } else {
+        1
+    };
     let time = rest.next().unwrap_or(if blink { 100 } else { 50 }).max(1) as u64;
     let now = machine.sys.now();
     machine.sys.gfx.flash = Some(crate::graphics::Flash {
@@ -114,6 +147,7 @@ fn flash(machine: &mut Machine, command: &Command) -> Result<Next> {
         time,
         count,
         fade,
+        blink,
     });
     if wait {
         let until = now + time * u64::from(count);

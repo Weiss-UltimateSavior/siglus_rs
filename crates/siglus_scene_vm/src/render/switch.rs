@@ -34,6 +34,7 @@ unsafe extern "C" {
         vertices: *const VitaGpuVertex,
         clip: *const i32,
         alpha: f32,
+        blend: u32,
     ) -> bool;
     fn siglus_vita_gpu_end(wait_vsync: bool);
 }
@@ -77,6 +78,102 @@ pub struct Renderer {
     mesh_depth: Vec<f32>,
     mesh_assets: HashMap<String, Arc<MeshAsset>>,
     mesh_textures: HashMap<std::path::PathBuf, Arc<RgbaImage>>,
+    /// Images with a sprite's colour effects applied, so the sprite can
+    /// still be a GPU quad (see `bake_color_effects`).
+    #[cfg(target_os = "vita")]
+    baked: HashMap<BakeKey, BakedImage>,
+    #[cfg(target_os = "vita")]
+    baked_bytes: usize,
+    #[cfg(target_os = "vita")]
+    frame_no: u64,
+}
+
+/// A source image (by key and pixel buffer) and the effect parameters
+/// applied to it.
+#[cfg(target_os = "vita")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct BakeKey {
+    image_key: u32,
+    pixels: usize,
+    effects: [u8; 11],
+}
+
+#[cfg(target_os = "vita")]
+struct BakedImage {
+    image: Arc<RgbaImage>,
+    gpu_key: u32,
+    last_frame: u64,
+}
+
+/// Baked images kept for reuse; the least recently drawn go first.
+#[cfg(target_os = "vita")]
+const BAKED_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+#[cfg(target_os = "vita")]
+fn sprite_color_effects(sprite: &Sprite) -> [u8; 11] {
+    [
+        sprite.reverse,
+        sprite.mono,
+        sprite.bright,
+        sprite.dark,
+        sprite.color_rate,
+        sprite.color_r,
+        sprite.color_g,
+        sprite.color_b,
+        sprite.color_add_r,
+        sprite.color_add_g,
+        sprite.color_add_b,
+    ]
+}
+
+/// The per-pixel colour part of `apply_sprite_effects` (invert, mono,
+/// bright/dark, colour rate and add), which does not depend on position or
+/// on the sprite's alpha, applied once to a whole image.
+#[cfg(target_os = "vita")]
+fn bake_color_effects(image: &RgbaImage, sprite: &Sprite) -> RgbaImage {
+    let rev = sprite.reverse as f32 / 255.0;
+    let mono = sprite.mono as f32 / 255.0;
+    let bright = sprite.bright as f32 / 255.0;
+    let dark = sprite.dark as f32 / 255.0;
+    let color_rate = sprite.color_rate as f32 / 255.0;
+    let target = [
+        sprite.color_r as f32 / 255.0,
+        sprite.color_g as f32 / 255.0,
+        sprite.color_b as f32 / 255.0,
+    ];
+    let add = [
+        sprite.color_add_r as f32 / 255.0,
+        sprite.color_add_g as f32 / 255.0,
+        sprite.color_add_b as f32 / 255.0,
+    ];
+    let mut rgba = image.rgba.clone();
+    for px in rgba.chunks_exact_mut(4) {
+        if px[3] == 0 {
+            continue;
+        }
+        let mut color = [
+            px[0] as f32 / 255.0,
+            px[1] as f32 / 255.0,
+            px[2] as f32 / 255.0,
+        ];
+        let mono_before = color[0] * 0.2989 + color[1] * 0.5886 + color[2] * 0.1145;
+        for channel in 0..3 {
+            color[channel] = color[channel] * (1.0 - rev) + (1.0 - color[channel]) * rev;
+            color[channel] = color[channel] * (1.0 - mono) + mono_before * mono;
+            color[channel] = (color[channel] + bright - dark).clamp(0.0, 1.0);
+            color[channel] =
+                (color[channel] * (1.0 - color_rate) + target[channel] * color_rate + add[channel])
+                    .clamp(0.0, 1.0);
+            px[channel] = (color[channel] * 255.0).round() as u8;
+        }
+    }
+    RgbaImage {
+        width: image.width,
+        height: image.height,
+        center_x: image.center_x,
+        center_y: image.center_y,
+        rgba,
+    }
 }
 
 impl Renderer {
@@ -108,6 +205,12 @@ impl Renderer {
             mesh_depth,
             mesh_assets,
             mesh_textures,
+            #[cfg(target_os = "vita")]
+            baked: HashMap::new(),
+            #[cfg(target_os = "vita")]
+            baked_bytes: 0,
+            #[cfg(target_os = "vita")]
+            frame_no: 0,
         };
         report_renderer_marker(b"siglus_switch: renderer object constructed\n\0");
         Ok(renderer)
@@ -115,7 +218,7 @@ impl Renderer {
 
     pub fn adapter_name(&self) -> String {
         if cfg!(target_os = "vita") {
-            "PS Vita vitaGL renderer".to_owned()
+            "PS Vita vita2d renderer".to_owned()
         } else {
             "Nintendo Switch native renderer".to_owned()
         }
@@ -170,10 +273,16 @@ impl Renderer {
     pub fn render_frame(&mut self, images: &ImageManager, frame: &RenderFrame) -> Result<()> {
         #[cfg(target_os = "vita")]
         {
+            let start = crate::platform_time::Instant::now();
             if self.try_render_gpu(images, frame) {
+                vita_stats::record(true, start);
                 return Ok(());
             }
+            let result = self.render_frame_cpu(images, frame);
+            vita_stats::record(false, start);
+            return result;
         }
+        #[cfg(not(target_os = "vita"))]
         self.render_frame_cpu(images, frame)
     }
 
@@ -215,26 +324,41 @@ impl Renderer {
     }
 
     #[cfg(target_os = "vita")]
-    fn try_render_gpu(&self, images: &ImageManager, frame: &RenderFrame) -> bool {
+    fn try_render_gpu(&mut self, images: &ImageManager, frame: &RenderFrame) -> bool {
         if frame.wipe.is_some() {
+            vita_stats::reason(vita_stats::WIPE);
             return false;
         }
         let sprites = frame.debug_flatten();
-        if sprites.iter().any(|item| {
+        for item in &sprites {
             let sprite = &item.sprite;
-            sprite.visible
-                && (sprite.mesh_kind != 0
-                    || sprite.emote_render.is_some()
-                    || sprite.mask_image_id.is_some()
-                    || sprite.tonecurve_image_id.is_some()
-                    || sprite.wipe_src_image_id.is_some()
-                    || !sprite_has_simple_rgba_effects(sprite, None, None, None))
-        }) {
+            if !sprite.visible {
+                continue;
+            }
+            let reason = if sprite.mesh_kind != 0 {
+                vita_stats::MESH
+            } else if sprite.emote_render.is_some() {
+                vita_stats::EMOTE
+            } else if sprite.mask_image_id.is_some() || sprite.tonecurve_image_id.is_some() {
+                vita_stats::MASK
+            } else if sprite.wipe_src_image_id.is_some() {
+                vita_stats::WIPE
+            } else if !matches!(sprite.blend, SpriteBlend::Normal | SpriteBlend::Add) {
+                vita_stats::BLEND
+            } else if sprite.wipe_fx_mode != 0 || sprite.mask_mode != 0 {
+                // Colour effects are baked into the image (below); these
+                // depend on position or replace the alpha.
+                vita_stats::EFFECT
+            } else {
+                continue;
+            };
+            vita_stats::reason(reason);
             return false;
         }
         if !unsafe { siglus_vita_gpu_begin(self.width, self.height) } {
             return false;
         }
+        self.frame_no = self.frame_no.wrapping_add(1);
         for item in &sprites {
             let sprite = &item.sprite;
             if !sprite.visible {
@@ -246,7 +370,23 @@ impl Renderer {
             let Some(image) = images.get(handle) else {
                 continue;
             };
-            if !self.gpu_blit(sprite, handle.key().0, &image) {
+            let blend = u32::from(sprite.blend == SpriteBlend::Add);
+            let needs_bake = sprite.reverse != 0
+                || sprite.mono != 0
+                || sprite.bright != 0
+                || sprite.dark != 0
+                || sprite.color_rate != 0
+                || sprite.color_add_r != 0
+                || sprite.color_add_g != 0
+                || sprite.color_add_b != 0;
+            let drawn = if !needs_bake {
+                self.gpu_blit(sprite, handle.key().0, &image, blend)
+            } else {
+                let (key, baked) = self.baked_image(handle.key().0, &image, sprite);
+                self.gpu_blit(sprite, key, &baked, blend)
+            };
+            if !drawn {
+                vita_stats::reason(vita_stats::BLIT_FAILED);
                 return false;
             }
         }
@@ -255,7 +395,61 @@ impl Renderer {
     }
 
     #[cfg(target_os = "vita")]
-    fn gpu_blit(&self, sprite: &Sprite, key: u32, image: &RgbaImage) -> bool {
+    /// The image with the sprite's colour effects applied, made once per
+    /// image and set of effect values.
+    fn baked_image(
+        &mut self,
+        image_key: u32,
+        image: &Arc<RgbaImage>,
+        sprite: &Sprite,
+    ) -> (u32, Arc<RgbaImage>) {
+        let key = BakeKey {
+            image_key,
+            pixels: image.rgba.as_ptr() as usize,
+            effects: sprite_color_effects(sprite),
+        };
+        let frame_no = self.frame_no;
+        if let Some(entry) = self.baked.get_mut(&key) {
+            entry.last_frame = frame_no;
+            return (entry.gpu_key, entry.image.clone());
+        }
+        vita_stats::baked();
+        let baked = Arc::new(bake_color_effects(image, sprite));
+        let bytes = baked.rgba.len();
+        while self.baked_bytes + bytes > BAKED_BUDGET_BYTES {
+            let Some((&oldest, _)) = self
+                .baked
+                .iter()
+                .filter(|(_, e)| e.last_frame != frame_no)
+                .min_by_key(|(_, e)| e.last_frame)
+            else {
+                break;
+            };
+            if let Some(old) = self.baked.remove(&oldest) {
+                self.baked_bytes -= old.image.rgba.len();
+            }
+        }
+        // GPU texture keys for baked images live above the image-key range.
+        let gpu_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            0x8000_0000 | (hasher.finish() as u32 & 0x7fff_ffff)
+        };
+        self.baked_bytes += bytes;
+        self.baked.insert(
+            key,
+            BakedImage {
+                image: baked.clone(),
+                gpu_key,
+                last_frame: frame_no,
+            },
+        );
+        (gpu_key, baked)
+    }
+
+    #[cfg(target_os = "vita")]
+    fn gpu_blit(&self, sprite: &Sprite, key: u32, image: &RgbaImage, blend: u32) -> bool {
         if image.width == 0 || image.height == 0 || image.width > 2048 || image.height > 2048 {
             return false;
         }
@@ -382,6 +576,7 @@ impl Renderer {
                 vertices.as_ptr(),
                 clip.as_ptr(),
                 alpha,
+                blend,
             )
         }
     }
@@ -1534,5 +1729,78 @@ impl FrameCaptureBackend for Renderer {
             center_y: 0,
             rgba: self.framebuffer.clone(),
         })
+    }
+}
+
+/// Counters for the Vita frontend's periodic log: how frames were drawn
+/// and why the software compositor was needed.
+#[cfg(target_os = "vita")]
+pub mod vita_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub const WIPE: usize = 0;
+    pub const MESH: usize = 1;
+    pub const EMOTE: usize = 2;
+    pub const MASK: usize = 3;
+    pub const BLEND: usize = 4;
+    pub const EFFECT: usize = 5;
+    pub const BLIT_FAILED: usize = 6;
+    const NAMES: [&str; 7] = [
+        "wipe",
+        "mesh",
+        "emote",
+        "mask",
+        "blend",
+        "effect",
+        "blit-failed",
+    ];
+
+    static GPU_FRAMES: AtomicU64 = AtomicU64::new(0);
+    static CPU_FRAMES: AtomicU64 = AtomicU64::new(0);
+    static GPU_US: AtomicU64 = AtomicU64::new(0);
+    static CPU_US: AtomicU64 = AtomicU64::new(0);
+    static REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+    static BAKED: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn baked() {
+        BAKED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn reason(index: usize) {
+        REASONS[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn record(gpu: bool, start: crate::platform_time::Instant) {
+        let us = start.elapsed().as_micros() as u64;
+        if gpu {
+            GPU_FRAMES.fetch_add(1, Ordering::Relaxed);
+            GPU_US.fetch_add(us, Ordering::Relaxed);
+        } else {
+            CPU_FRAMES.fetch_add(1, Ordering::Relaxed);
+            CPU_US.fetch_add(us, Ordering::Relaxed);
+        }
+    }
+
+    /// A summary since the last call, then reset.
+    pub fn take_summary() -> String {
+        let gpu = GPU_FRAMES.swap(0, Ordering::Relaxed);
+        let cpu = CPU_FRAMES.swap(0, Ordering::Relaxed);
+        let gpu_us = GPU_US.swap(0, Ordering::Relaxed);
+        let cpu_us = CPU_US.swap(0, Ordering::Relaxed);
+        let reasons: Vec<String> = REASONS
+            .iter()
+            .zip(NAMES)
+            .filter_map(|(count, name)| {
+                let n = count.swap(0, Ordering::Relaxed);
+                (n > 0).then(|| format!("{name}={n}"))
+            })
+            .collect();
+        format!(
+            "render gpu-frames={gpu} (avg {} us) cpu-frames={cpu} (avg {} us) cpu-reasons=[{}] effect-bakes={}",
+            gpu_us.checked_div(gpu).unwrap_or(0),
+            cpu_us.checked_div(cpu).unwrap_or(0),
+            reasons.join(" "),
+            BAKED.swap(0, Ordering::Relaxed)
+        )
     }
 }

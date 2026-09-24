@@ -118,11 +118,13 @@ pub(crate) fn load_named(sys: &mut System, name: &str) -> Option<Rc<Image>> {
 }
 
 /// The frame images of a window: main, backing and whether it is a
-/// type 4 (nine-slice) frame.
+/// nine-slice frame stretched around the text (types 3 and 4; type 3
+/// also shrinks to what the window shows).
 struct Waku {
     main: Option<Rc<Image>>,
     back: Option<Rc<Image>>,
     type4: bool,
+    fit: bool,
     area: [i32; 4],
 }
 
@@ -137,7 +139,12 @@ fn waku(sys: &mut System, config: &WindowConfig, name_box: bool) -> Waku {
     let exe = sys.gameexe.clone();
     let main = exe.str(&key("NAME")).map(str::to_owned);
     let back = exe.str(&key("BACK")).map(str::to_owned);
-    let type4 = exe.int(&key("TYPE")) == Some(4);
+    // Older games give the type per set (`#WAKU.002.TYPE`).
+    let kind = exe
+        .int(&key("TYPE"))
+        .or_else(|| exe.int(&format!("WAKU.{setno:03}.TYPE")));
+    let type4 = matches!(kind, Some(3 | 4));
+    let fit = kind == Some(3);
     let mut area = [0; 4];
     for (slot, value) in area.iter_mut().zip(exe.ints(&key("AREA"))) {
         *slot = value;
@@ -147,8 +154,30 @@ fn waku(sys: &mut System, config: &WindowConfig, name_box: bool) -> Waku {
         main: main.and_then(|name| load_named(sys, &name)),
         back: back.and_then(|name| load_named(sys, &name)),
         type4,
+        fit,
         area,
     }
+}
+
+/// What a window shows, in pixels of its text area: the text placed so
+/// far or the choices laid out in it.
+fn content_size(sys: &System, index: usize, config: &WindowConfig) -> (i32, i32) {
+    let line = line_height(config);
+    let mut size = (0, 0);
+    for ch in &sys.text.states[index].chars {
+        let w = crate::nls::cell_width(ch.c) as i32 * ch.size / 2;
+        size.0 = size.0.max(ch.x + w);
+        size.1 = size.1.max(ch.y + line);
+    }
+    if let Some(selection) = &sys.selection
+        && selection.layout == crate::select::Layout::Window(index)
+    {
+        for item in &selection.items {
+            size.0 = size.0.max(item.rect.right());
+            size.1 = size.1.max(item.rect.bottom());
+        }
+    }
+    size
 }
 
 /// Size of the text area of a window.
@@ -166,9 +195,27 @@ pub fn line_height(config: &WindowConfig) -> i32 {
 
 pub fn geometry(sys: &mut System, index: usize) -> Geometry {
     let config = sys.text.windows[index].clone();
-    let (tw, th) = text_area_size(&config);
+    let (mut tw, mut th) = text_area_size(&config);
     let [top, bottom, left, right] = config.moji_pos;
     let frame = waku(sys, &config, false);
+    if frame.fit {
+        // Between `MOJI_MIN` and `MOJI_CNT` characters / lines.
+        let cell = (config.moji_size + config.moji_rep.0).max(1);
+        let line = line_height(&config).max(1);
+        let (cw, ch) = content_size(sys, index, &config);
+        let (min_cols, min_rows) = config.moji_min;
+        // Choices longer than the window widen it (up to the screen).
+        let widest = sys.gfx.width - left - right;
+        tw = cw.max(min_cols * cell).min(widest.max(cell));
+        th = ((ch + line - 1) / line * line).clamp((min_rows * line).min(th), th);
+    }
+    // A window sized to its content keeps as much room on the right as on
+    // the left, and room for a glyph wider than the character pitch.
+    let right = if frame.fit {
+        right.max(left) + (-config.moji_rep.0).max(0)
+    } else {
+        right
+    };
     let size = match (&frame.main, &frame.back) {
         _ if frame.type4 => (tw + left + right, th + top + bottom),
         (Some(main), _) => (main.width(), main.height()),
@@ -479,6 +526,7 @@ fn finish_pause(sys: &mut System, kind: PauseKind) {
         state.size_override = None;
         state.chars_since_pause = 0;
     }
+    sys.text.speed_override = None;
     match kind {
         PauseKind::Spause => {}
         PauseKind::PageFull => {
@@ -526,7 +574,11 @@ impl TextoutOp {
         let instant = sys.text.fast_text
             || sys.settings.message_no_wait
             || sys.should_fast_forward()
-            || sys.settings.message_speed <= 0;
+            || sys
+                .text
+                .speed_override
+                .unwrap_or(sys.settings.message_speed)
+                <= 0;
         Self {
             chars: text.chars().collect(),
             at: 0,
@@ -574,7 +626,13 @@ impl LongOp for TextoutOp {
             return Ok(self.display(machine, usize::MAX));
         }
         let now = machine.sys.now();
-        let speed = f64::from(machine.sys.settings.message_speed.max(1));
+        let sys = &machine.sys;
+        let speed = f64::from(
+            sys.text
+                .speed_override
+                .unwrap_or(sys.settings.message_speed)
+                .max(1),
+        );
         self.budget += (now - self.last) as f64 / speed;
         self.last = now;
         let count = self.budget.floor() as usize;
@@ -622,6 +680,19 @@ impl LongOp for PauseOp {
             crate::backlog::handle_input(sys);
             return Ok(false);
         }
+        // A click on a window button does what the button does.
+        if let Some(position) = sys
+            .input
+            .events
+            .iter()
+            .position(|e| *e == InputEvent::Press(Button::Left))
+            && let Some(kind) = crate::window_buttons::hit(sys)
+        {
+            sys.input.events.remove(position);
+            crate::window_buttons::press(machine, kind)?;
+            return Ok(false);
+        }
+        let sys = &mut machine.sys;
         let mut done = false;
         let events = std::mem::take(&mut sys.input.events);
         let mut rest = Vec::new();
@@ -781,9 +852,36 @@ fn draw_type4(
     area: [i32; 4],
     alpha: u8,
 ) {
-    let r = |i: i32| image.region(i);
+    // Type 4 frames carry their pieces as patterns; a single picture
+    // (type 3) is cut into a 3 × 3 grid, corners a third of its height.
+    let sliced = image.regions.len() < 12;
+    let (w, h) = (image.surface.width, image.surface.height);
+    let corner = (w.min(h) / 3).max(1);
+    let r = |i: i32| {
+        if !sliced {
+            return image.region(i);
+        }
+        let (col, row) = (i % 3, i / 3);
+        let xs = [0, corner, w - corner, w];
+        let ys = [0, corner, h - corner, h];
+        // Patterns 0..11 are rows of three: top, left/right edges (3, 6)
+        // and bottom (9..11).
+        let row = match row {
+            0 => 0,
+            3 => 2,
+            _ => 1,
+        };
+        crate::image::Region {
+            x1: xs[col as usize],
+            y1: ys[row],
+            x2: xs[col as usize + 1] - 1,
+            y2: ys[row + 1] - 1,
+            origin_x: 0,
+            origin_y: 0,
+        }
+    };
     let (tl, tc, tr) = (r(0), r(1), r(2));
-    let (ls, rs) = (r(3), r(6));
+    let (ls, rs) = if sliced { (r(3), r(5)) } else { (r(3), r(6)) };
     let (bl, bc, br) = (r(9), r(10), r(11));
     let inner = Rect::new(
         window.x + ls.width() - area[2],
@@ -793,7 +891,7 @@ fn draw_type4(
     );
     draw_backing(frame, inner, None, attr, alpha);
     let blit = |frame: &mut Surface, region: crate::image::Region, dest: Rect| {
-        let src = Rect::from_corners(region.x1, region.y1, region.x2, region.y2);
+        let src = Rect::new(region.x1, region.y1, region.width(), region.height());
         frame.stretch_blit(&image.surface, src, dest, alpha, Blend::Mask);
     };
     let (x, y, w, h) = (window.x, window.y, window.w, window.h);
@@ -1011,6 +1109,14 @@ fn draw_window(
             draw_image(frame, main, 0, window.x, window.y, alpha);
         }
     }
+    crate::window_buttons::draw(
+        sys,
+        frame,
+        index,
+        geometry,
+        (window.x - geometry.window.x, window.y - geometry.window.y),
+        alpha,
+    );
     draw_faces(sys, frame, index, geometry, false, alpha);
     let origin = (
         geometry.text.x + text_offset.0,
@@ -1160,7 +1266,10 @@ fn draw_faces(
         if (is_behind != 0) != behind {
             continue;
         }
-        if let Some(image) = load_named(sys, file) {
+        if let Some(mut image) = load_named(sys, file) {
+            if let Some(table) = sys.gfx.face_tone {
+                image = sys.gfx.tone_curves.apply(&image, table);
+            }
             draw_image(
                 frame,
                 &image,

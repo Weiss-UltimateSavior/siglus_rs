@@ -1,3 +1,7 @@
+# Profile rustflags (nightly, as the Vita build already is) apply on top of
+# the RUSTFLAGS cargo-vita sets.
+cargo-features = ["profile-rustflags"]
+
 [package]
 name = "siglus_vita_player"
 version = "0.1.0"
@@ -6,6 +10,17 @@ license = "MPL-2.0"
 build = "build.rs"
 
 [workspace]
+
+# LLVM's SLP vectorizer pairs neighbouring 64-bit saturating operations
+# (x/y coordinates, times) into NEON `vqadd.s64`/`vqsub.s64`. The Vita's
+# CPU runs them, but Vita3K cannot, and computes wrong values instead:
+# clicks miss their buttons and the player dies during the opening. Loop
+# vectorization (pixel loops) stays on.
+[profile.release]
+rustflags = ["-C", "no-vectorize-slp"]
+
+[profile.dev]
+rustflags = ["-C", "no-vectorize-slp"]
 
 [package.metadata.vita]
 title_id = "SIGVITA02"

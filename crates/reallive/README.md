@@ -8,16 +8,17 @@ Tomoyo After, Little Busters!, planetarian and many 2002–2009 titles).
 | Archives | `archive`, `scenario`, `compression` | `SEEN.TXT` plus loose `SEENnnnn.TXT` overrides; LZ + XOR decompression; second-level keys chosen by `#REGNAME` or derived statistically when unknown; RLdev encoding metadata |
 | Bytecode | `bytecode`, `expr` | every element type; special flow commands (goto/gosub families, `_with`, `select`); expressions, specials and complex parameters; line markers anywhere in parameter lists |
 | Machine | `machine`, `memory`, `modules/*` | banks A–F, G, Z, L, S, M, K with bit-width views; call stack with farcall/gosub arguments; cooperative long operations that can sit under a `#CANCELCALL` menu; interrupts (`SetInterrupt`/`yield`); savepoints |
-| Text | `text`, `textout`, `modules/msg` | `#WINDOW` layout and frames (type 4 nine-slice, `BACK` colour masks, subtractive or blended backing), name boxes, faces, ruby, kinsoku with punctuation squeezing, indentation after names and opening quotes, `＊Ａ`/`％Ａ` names, key cursor, message speed, auto mode, skip of read text, backlog, open/close animations |
+| Text | `text`, `textout`, `window_buttons`, `modules/msg` | `#WINDOW` layout and frames (type 4 nine-slice, `BACK` colour masks, subtractive or blended backing), window buttons (`#WAKU…_BOX`: clear, skip, auto, backlog, `#WBCALL` extra buttons), name boxes, faces, ruby, kinsoku with punctuation squeezing, indentation after names and opening quotes, `＊Ａ`/`％Ａ` names, key cursor, message speed, auto mode, skip of read text, backlog, open/close animations |
 | Choices | `select`, `modules/sel` | window choices, `#SELBTN` buttons and button objects; all five option effects (colour, title, hide, blank, cursor); keyboard, number keys and mouse; return to previous selection |
-| Graphics | `graphics`, `surface`, `image`, `modules/grp` | 16 DCs, g00 (types 0/1/2) and PDT, the `grp*`/`rec*` family with masks and compositing, graphics stack, draw modes |
+| Graphics | `graphics`, `surface`, `image`, `modules/grp` | 16 DCs, g00 (types 0/1/2) and PDT, the `grp*`/`rec*` family with masks and compositing (masked effects too), graphics stack, draw modes, screen zoom, tone curves (`.tcc`) |
+| Backgrounds | `hik`, `serial_pdt`, `modules/scr`, `modules/snm` | `bgrLoadHaikei` pictures and HIK animations, scrolling (`HAIKEI_SCROLL_*`); serial animations (`snmPlay`, `snmStretch`, `snmScroll`, background slots) |
 | Objects | `object`, `modules/obj` | fg/bg layers of 256 objects with children; files, GAN, text, digits, drift, filter rectangles; every property and its `objEve*` animation (with check/wait/waitC/end); `objEveDisplay` presets (fade, slide, spin, stretch, wave); range and child forms; button objects |
 | Transitions | `effects` | the `#SEL` styles (fades, wipes, blinds, shapes, dithers, scrolls, squashes, slides, zooms, ripples, pixelation, masks…) |
 | Shakes | `shake`, `modules/shk` | `#SHAKE` patterns, procedural and layered shakes with envelopes |
 | Audio | `sound`, `modules/sound` | BGM with `#DSTRACK` loop points, 16 PCM channels, `#SE` sounds, voices from KOEPAC, NWK, OVK archives or loose files; per-character `#KOEONOFF`; fades and volume ramps; music ducking under voices |
 | Movies | `movie`, `modules/mov` | MPEG-1/2 with sound, streamed from a worker thread |
-| DLLs | `dll` | `EF00` (Little Busters! effects) emulated |
-| System | `system`, `settings`, `save`, `ui`, `backlog` | settings and their defaults, system commands, save/load slots and global data, built-in system menu, save/load lists, name entry, text input |
+| DLLs | `dll`, `pt00`, `dt00` | `EF00` (Little Busters! effects) emulated; `PT00` (Little Busters! baseball) and `DT00` (Tomoyo After's RPG) ported |
+| System | `system`, `settings`, `save`, `ui`, `backlog` | settings and their defaults, system commands, save/load slots (with comments, values and thumbnails) and global data, built-in system menu, save/load lists, name entry, text input, CG table queries, RealLiveMax databases (`#DATABASE`, `.dbs`) |
 
 Compared with rlvm and xclannad this implementation also: derives unknown
 XOR keys instead of refusing to run; keeps whole scenarios NLS-aware
@@ -69,11 +70,20 @@ Little Busters! loads two DLLs. `EF00` (sprite effects) is emulated in
 port reads the DLL's data tables from the game's own `PT00.dll` at run
 time, so the file must be present in the game directory.
 
+Tomoyo After's `DT00` ("Dungeons & Takafumi") is machine-translated from
+its decompilation into `src/dt00/code` by `tools/dt00` and checked against
+the original DLL run in an emulator (recorded game traces and fuzzed calls
+must leave identical memory). It too reads its data from the game's
+`dt00.dll`.
+
 ## Known gaps
 
 * The settings dialogs behind some system commands (volume, message speed)
   are not drawn; scripts that provide their own menus are unaffected.
-* HIK animated backgrounds are not supported.
-* A few undocumented functions seen in Little Busters! (`1:Sys:00210`,
-  `00211`, `00215`, `00216`, `01231`, `03503`, `1:Pcm:00040`/`00050`) are
-  reported by `rl_run` and otherwise skipped.
+* `InvokeDLL` (calls into an arbitrary native DLL) is not supported; the
+  DLLs games are known to load are.
+* Switches that only change the original's own interface (hint icons,
+  system button bars, the Alt menu, …) are remembered for scripts that read
+  them back but change nothing on screen. A few functions are known only
+  by name and signature (`STRFIND`, `KOEPLAY` window button patterns); their
+  readings are marked as guesses in the code.

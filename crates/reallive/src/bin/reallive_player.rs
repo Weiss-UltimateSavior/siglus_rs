@@ -534,7 +534,24 @@ impl ApplicationHandler for App {
                 let size = window.surface_size();
                 state.resize(size.width, size.height);
             }
-            WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.modifiers = modifiers.state();
+                // A Ctrl or Shift release can go missing (the key let go
+                // in another window, or during a system shortcut); the
+                // modifier state is the reliable one.
+                let input = &mut state.engine.machine.sys.input;
+                if !state.modifiers.control_key() {
+                    input.ctrl = false;
+                }
+                if !state.modifiers.shift_key() {
+                    input.shift = false;
+                }
+            }
+            WindowEvent::Focused(false) => {
+                let input = &mut state.engine.machine.sys.input;
+                input.ctrl = false;
+                input.shift = false;
+            }
             WindowEvent::PointerMoved { position, .. } => {
                 state.cursor = (position.x, position.y);
                 state.engine.machine.sys.input.mouse = state.game_position();

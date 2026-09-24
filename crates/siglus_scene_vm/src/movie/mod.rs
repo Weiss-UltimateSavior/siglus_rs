@@ -1,6 +1,4 @@
 use crate::platform_time::Duration;
-#[cfg(target_os = "vita")]
-use crate::platform_time::Instant;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
@@ -97,14 +95,17 @@ fn movie_output_dimensions(width: u32, height: u32) -> (u32, u32) {
         const MAX_WIDTH: u32 = 960;
         const MAX_HEIGHT: u32 = 544;
         if width > MAX_WIDTH || height > MAX_HEIGHT {
-            if u64::from(width) * u64::from(MAX_HEIGHT)
-                >= u64::from(height) * u64::from(MAX_WIDTH)
+            if u64::from(width) * u64::from(MAX_HEIGHT) >= u64::from(height) * u64::from(MAX_WIDTH)
             {
-                return (MAX_WIDTH, ((u64::from(height) * u64::from(MAX_WIDTH)
-                    / u64::from(width)) as u32).max(1));
+                return (
+                    MAX_WIDTH,
+                    ((u64::from(height) * u64::from(MAX_WIDTH) / u64::from(width)) as u32).max(1),
+                );
             }
-            return (((u64::from(width) * u64::from(MAX_HEIGHT)
-                / u64::from(height)) as u32).max(1), MAX_HEIGHT);
+            return (
+                ((u64::from(width) * u64::from(MAX_HEIGHT) / u64::from(height)) as u32).max(1),
+                MAX_HEIGHT,
+            );
         }
     }
     (width, height)
@@ -148,6 +149,9 @@ pub struct MovieStreamFrame {
     /// has this property even though frame selection itself is PTS ordered.
     pub frame_idx_is_decode_order: bool,
     pub clamped_timer_ms: Option<u64>,
+    /// The video's own size. `frame` can be smaller (Vita decodes to at
+    /// most 960x544), so objects size themselves by this, not by `frame`.
+    pub source_size: Option<(u32, u32)>,
 }
 
 enum Mpeg2StreamEvent {
@@ -185,8 +189,9 @@ struct Mpeg2StreamState {
     audio: Option<MovieAudio>,
     decoded_any_this_poll: bool,
     request_frames: Arc<AtomicUsize>,
+    /// Engine frames since this stream was last polled (Vita eviction).
     #[cfg(target_os = "vita")]
-    last_polled: Instant,
+    idle_frames: u32,
 }
 
 impl Drop for Mpeg2StreamState {
@@ -246,8 +251,9 @@ struct WmvStreamState {
     audio: Option<MovieAudio>,
     decoded_any_this_poll: bool,
     request_ms: Arc<AtomicUsize>,
+    /// Engine frames since this stream was last polled (Vita eviction).
     #[cfg(target_os = "vita")]
-    last_polled: Instant,
+    idle_frames: u32,
 }
 
 impl Drop for WmvStreamState {
@@ -314,8 +320,9 @@ struct OmvStreamState {
     /// again; serving its fast-catch-up tail would flash stale dark head
     /// frames. Hold this frame until the stream catches back up.
     held_frame: Option<(usize, Arc<RgbaImage>)>,
+    /// Engine frames since this stream was last polled (Vita eviction).
     #[cfg(target_os = "vita")]
-    last_polled: Instant,
+    idle_frames: u32,
 }
 
 impl Drop for OmvStreamState {
@@ -389,18 +396,26 @@ impl MovieManager {
     /// Release decoders whose OBJECT movies are no longer visited by the
     /// scene. Active streams update their timestamp on every presentation
     /// poll, so several simultaneous movies remain resident.
+    ///
+    /// Idleness is counted in engine frames (this runs once per frame), not
+    /// wall time: a frame that stalls for seconds (card writes, the
+    /// emulator compiling code) must not evict the movie playing now, which
+    /// then restarts from a seek and on a slow decoder never catches up.
     #[cfg(target_os = "vita")]
     pub fn evict_idle_streams(&mut self) {
-        let now = Instant::now();
-        let idle = Duration::from_secs(2);
+        const IDLE_FRAMES: u32 = 120;
         let old_mpeg_count = self.mpeg2_streams.len();
         let old_wmv_count = self.wmv_streams.len();
+        let keep = |idle: &mut u32| {
+            *idle = idle.saturating_add(1);
+            *idle <= IDLE_FRAMES
+        };
         self.mpeg2_streams
-            .retain(|_, state| now.saturating_duration_since(state.last_polled) < idle);
+            .retain(|_, state| keep(&mut state.idle_frames));
         self.wmv_streams
-            .retain(|_, state| now.saturating_duration_since(state.last_polled) < idle);
+            .retain(|_, state| keep(&mut state.idle_frames));
         self.omv_streams
-            .retain(|_, state| now.saturating_duration_since(state.last_polled) < idle);
+            .retain(|_, state| keep(&mut state.idle_frames));
         if self.mpeg2_streams.len() != old_mpeg_count {
             self.mpeg2_audio_tasks
                 .retain(|path, _| self.mpeg2_streams.contains_key(path));
@@ -840,6 +855,7 @@ impl MovieManager {
             decoded_now,
             frame_idx_is_decode_order: false,
             clamped_timer_ms: None,
+            source_size: asset.info.width.zip(asset.info.height),
         }))
     }
 
@@ -879,7 +895,7 @@ impl MovieManager {
             .expect("mpeg2 stream state exists");
         #[cfg(target_os = "vita")]
         {
-            state.last_polled = Instant::now();
+            state.idle_frames = 0;
         }
         state.last_requested_timer_ms = timer_ms;
         let request_until = desired_frame_idx
@@ -936,6 +952,7 @@ impl MovieManager {
             decoded_now,
             frame_idx_is_decode_order: false,
             clamped_timer_ms: None,
+            source_size: state.width.zip(state.height),
         }))
     }
 
@@ -1057,7 +1074,7 @@ impl MovieManager {
             .expect("wmv stream state exists");
         #[cfg(target_os = "vita")]
         {
-            state.last_polled = Instant::now();
+            state.idle_frames = 0;
         }
         state.last_effective_timer_ms = effective_timer_ms;
         let request_ms = effective_timer_ms
@@ -1128,6 +1145,7 @@ impl MovieManager {
             decoded_now,
             frame_idx_is_decode_order: true,
             clamped_timer_ms: loop_flag.then_some(effective_timer_ms),
+            source_size: state.width.zip(state.height),
         }))
     }
 
@@ -1229,7 +1247,7 @@ impl MovieManager {
             .expect("omv stream state exists");
         #[cfg(target_os = "vita")]
         {
-            state.last_polled = Instant::now();
+            state.idle_frames = 0;
         }
         let timer_rewound = effective_timer_ms < state.last_effective_timer_ms.saturating_sub(200);
         state.last_effective_timer_ms = effective_timer_ms;
@@ -1325,6 +1343,7 @@ impl MovieManager {
             decoded_now: false,
             frame_idx_is_decode_order: false,
             clamped_timer_ms: None,
+            source_size: state.width.zip(state.height),
         }))
     }
 
@@ -1634,7 +1653,7 @@ fn spawn_mpeg2_stream_state(
         decoded_any_this_poll: false,
         request_frames,
         #[cfg(target_os = "vita")]
-        last_polled: Instant::now(),
+        idle_frames: 0,
     })
 }
 
@@ -1658,7 +1677,14 @@ fn estimate_mpeg_video_seek_offset(
     let file_len = fs::metadata(path)
         .with_context(|| format!("stat movie file: {}", path.display()))?
         .len();
-    let duration_ms = audio.and_then(|track| track.duration_ms).unwrap_or(0);
+    // Without the decoded audio track (not kept on Vita), the duration comes
+    // from the last video timestamp in the file; seeking to 0 instead would
+    // leave a slow decoder behind the clock for the rest of the movie.
+    let duration_ms = audio
+        .and_then(|track| track.duration_ms)
+        .or_else(|| probe_mpeg_video_duration_ms(path))
+        .unwrap_or(0);
+
     if file_len <= MPEG2_STREAM_CHUNK_BYTES as u64 || duration_ms == 0 {
         return Ok(0);
     }
@@ -1696,12 +1722,15 @@ fn estimate_mpeg_video_seek_offset(
     }
 
     let target_in_probe = proportional.saturating_sub(region_start) as usize;
+    // Start at a sequence header or, in files with only one (common for
+    // MPEG-1), at a GOP: the worker gives the decoder the file's sequence
+    // header first (see `mpeg_sequence_header_es`).
     let sequence_pos =
-        rfind_byte_pattern_before(&probe, b"\0\0\x01\xb3", target_in_probe.min(probe.len()));
+        rfind_byte_pattern_before(&probe, b"\0\0\x01\xb3", target_in_probe.min(probe.len()))
+            .or_else(|| {
+                rfind_byte_pattern_before(&probe, b"\0\0\x01\xb8", target_in_probe.min(probe.len()))
+            });
     let Some(sequence_pos) = sequence_pos else {
-        // Without a sequence header before the target, a mid-stream decoder
-        // cannot reconstruct reference pictures safely. Fall back to the
-        // beginning instead of displaying a future GOP.
         return Ok(0);
     };
 
@@ -1737,6 +1766,54 @@ fn estimate_mpeg_video_seek_offset(
     Ok(region_start.saturating_add(pack_pos as u64))
 }
 
+/// The video elementary-stream bytes of the file's first sequence header
+/// (with its extensions), up to the first GOP or picture.
+fn mpeg_sequence_header_es(head: &[u8]) -> Option<Vec<u8>> {
+    let mut demux = na_mpeg2_decoder::Demuxer::new_auto();
+    let es: Vec<u8> = demux
+        .push(head, None)
+        .into_iter()
+        .filter(|packet| packet.stream_type == na_mpeg2_decoder::StreamType::MpegVideo)
+        .flat_map(|packet| packet.data.to_vec())
+        .collect();
+    let start = es.windows(4).position(|w| w == b"\0\0\x01\xb3")?;
+    let end = es[start + 4..]
+        .windows(4)
+        .position(|w| w[..3] == [0, 0, 1] && (w[3] == 0xb8 || w[3] == 0x00))
+        .map(|at| start + 4 + at)?;
+    Some(es[start..end].to_vec())
+}
+
+/// The span between the first and last video timestamps of an MPEG file,
+/// from its head and last MiB.
+fn probe_mpeg_video_duration_ms(path: &Path) -> Option<u64> {
+    const TAIL_BYTES: u64 = 1024 * 1024;
+    let head = read_file_prefix(path, MPEG2_HEADER_PROBE_BYTES).ok()?;
+    let first = probe_first_video_pts_90k(&head)?;
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    // Begin at a pack (program stream) or packet sync (transport stream).
+    let sync = if is_transport_stream_prefix(&head) {
+        tail.iter().position(|&b| b == 0x47).unwrap_or(0)
+    } else {
+        tail.windows(4)
+            .position(|w| w == b"\0\0\x01\xba")
+            .unwrap_or(0)
+    };
+    let mut demux = na_mpeg2_decoder::Demuxer::new_auto();
+    let last = demux
+        .push(&tail[sync..], None)
+        .into_iter()
+        .filter(|packet| packet.stream_type == na_mpeg2_decoder::StreamType::MpegVideo)
+        .filter_map(|packet| packet.pts_90k)
+        .max()?;
+    (last > first).then(|| ((last - first) / 90) as u64)
+}
+
 fn rfind_byte_pattern_before(haystack: &[u8], needle: &[u8], end: usize) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -1765,8 +1842,7 @@ fn stream_mpeg2_video_worker(
     request_frames: Arc<AtomicUsize>,
     start_offset: u64,
     initial_frame_idx: usize,
-    #[allow(unused_variables)]
-    video_origin_pts_90k: Option<i64>,
+    #[allow(unused_variables)] video_origin_pts_90k: Option<i64>,
 ) -> Result<()> {
     let prefix = read_file_prefix(path, MPEG2_HEADER_PROBE_BYTES)?;
     let mut width = None;
@@ -1791,6 +1867,13 @@ fn stream_mpeg2_video_worker(
             .with_context(|| format!("seek movie video: {}", path.display()))?;
     }
     let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
+    if start_offset > 0
+        && let Some(header) = mpeg_sequence_header_es(&prefix)
+    {
+        // Starting mid-file: the decoder needs the sequence header, which a
+        // file may carry only at its start.
+        let _ = pipeline.decoder_mut().decode_shared(&header, None);
+    }
     let mut buf = vec![0u8; MPEG2_STREAM_CHUNK_BYTES];
     let mut frame_idx = initial_frame_idx;
     let mut send_failed = false;
@@ -1831,10 +1914,7 @@ fn stream_mpeg2_video_worker(
                 let (w, h) = movie_output_dimensions(w, h);
                 let mut rgba = vec![0u8; (w as usize).saturating_mul(h as usize).saturating_mul(4)];
                 na_mpeg2_decoder::frame_to_rgba_bt601_limited_scaled(
-                    &f,
-                    &mut rgba,
-                    w as usize,
-                    h as usize,
+                    &f, &mut rgba, w as usize, h as usize,
                 );
                 let frame = Arc::new(RgbaImage {
                     width: w,
@@ -1889,12 +1969,7 @@ fn stream_mpeg2_video_worker(
         let h = f.height as u32;
         let (w, h) = movie_output_dimensions(w, h);
         let mut rgba = vec![0u8; (w as usize).saturating_mul(h as usize).saturating_mul(4)];
-        na_mpeg2_decoder::frame_to_rgba_bt601_limited_scaled(
-            &f,
-            &mut rgba,
-            w as usize,
-            h as usize,
-        );
+        na_mpeg2_decoder::frame_to_rgba_bt601_limited_scaled(&f, &mut rgba, w as usize, h as usize);
         let frame = Arc::new(RgbaImage {
             width: w,
             height: h,
@@ -1932,8 +2007,7 @@ fn vita_mpeg_frame_is_late(
     if fps <= 0.0 || request_until == usize::MAX {
         return false;
     }
-    let frame_index = ((pts.saturating_sub(origin).max(0) as f64) * fps as f64 / 90_000.0)
-        as usize;
+    let frame_index = ((pts.saturating_sub(origin).max(0) as f64) * fps as f64 / 90_000.0) as usize;
     frame_index.saturating_add(4) < request_until.saturating_sub(MPEG2_STREAM_DECODE_LEAD_FRAMES)
 }
 
@@ -2208,7 +2282,7 @@ fn spawn_wmv_stream_state(
         decoded_any_this_poll: false,
         request_ms,
         #[cfg(target_os = "vita")]
-        last_polled: Instant::now(),
+        idle_frames: 0,
     })
 }
 
@@ -2485,7 +2559,7 @@ fn spawn_omv_stream_state(path: PathBuf) -> Result<OmvStreamState> {
         last_effective_timer_ms: 0,
         held_frame: None,
         #[cfg(target_os = "vita")]
-        last_polled: Instant::now(),
+        idle_frames: 0,
     })
 }
 
@@ -4129,10 +4203,7 @@ fn decode_mpeg2_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
                         let (w, h) = movie_output_dimensions(w, h);
                         let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
                         na_mpeg2_decoder::frame_to_rgba_bt601_limited_scaled(
-                            &f,
-                            &mut rgba,
-                            w as usize,
-                            h as usize,
+                            &f, &mut rgba, w as usize, h as usize,
                         );
                         first = Some(Arc::new(RgbaImage {
                             width: w,
@@ -4156,10 +4227,7 @@ fn decode_mpeg2_preview_frame(path: &Path) -> Result<Arc<RgbaImage>> {
                     let (w, h) = movie_output_dimensions(w, h);
                     let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
                     na_mpeg2_decoder::frame_to_rgba_bt601_limited_scaled(
-                        &f,
-                        &mut rgba,
-                        w as usize,
-                        h as usize,
+                        &f, &mut rgba, w as usize, h as usize,
                     );
                     first = Some(Arc::new(RgbaImage {
                         width: w,

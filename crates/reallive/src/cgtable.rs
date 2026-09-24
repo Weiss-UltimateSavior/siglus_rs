@@ -36,12 +36,41 @@ impl CgTable {
             .map(|entry| entry.flag_no)
     }
 
+    /// Every entry, in list order.
+    pub fn entries(&self) -> Vec<CgEntry> {
+        self.data
+            .as_ref()
+            .map(|data| {
+                data.entries
+                    .iter()
+                    .map(|e| CgEntry {
+                        name: e.name.clone(),
+                        flag: e.flag_no,
+                        list: e.list_no,
+                        code: std::array::from_fn(|i| e.code.get(i).copied().unwrap_or(0)),
+                        group: std::array::from_fn(|i| e.group.get(i).copied().unwrap_or(0)),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn flags(&self) -> Vec<i32> {
         self.data
             .as_ref()
             .map(|data| data.entries.iter().map(|entry| entry.flag_no).collect())
             .unwrap_or_default()
     }
+}
+
+/// One CG of the table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CgEntry {
+    pub name: String,
+    pub flag: i32,
+    pub list: i32,
+    pub code: [i32; 5],
+    pub group: [i32; 5],
 }
 
 fn strip_extension(name: &str) -> &str {

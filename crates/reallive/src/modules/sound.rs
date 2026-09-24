@@ -93,6 +93,49 @@ pub fn bgm(machine: &mut Machine, command: &Command) -> Result<Next> {
         }
         // bgmTimer: milliseconds since the track started.
         200 => machine.store = 0,
+        // MCHANGELOOP / MCHANGEONESHOT: the playing track loops or not.
+        15 | 16 => machine
+            .sys
+            .sound
+            .set_bgm_looped(command.op.opcode == 15, now),
+        // MCHANGE(name): another track, looping as the current one does.
+        300 => {
+            let name = machine.str_param(command, 0)?;
+            let sys = &mut machine.sys;
+            let looped = sys.sound.bgm_status(now) == 0 || sys.sound.bgm_looped();
+            let result =
+                sys.sound
+                    .bgm_play(&sys.resources, &sys.settings, now, &name, looped, 0, 0);
+            report(machine, result);
+        }
+        // DEBUG_MPLAY(_WAIT, _ONESHOT)_MILLISECOND / _SECOND / _SAMPLE(name,
+        // position): music from a point in the track.
+        1000..=1002 | 2000..=2002 | 3000..=3002 => {
+            use crate::sound::StartAt;
+            let name = machine.str_param(command, 0)?;
+            let at = machine.int_param_or(command, 1, 0)?.max(0);
+            let from = match command.op.opcode / 1000 {
+                1 => StartAt::Ms(at as u64),
+                2 => StartAt::Ms(at as u64 * 1000),
+                _ => StartAt::Frame(at as usize),
+            };
+            let variant = command.op.opcode % 1000;
+            let sys = &mut machine.sys;
+            let result = sys.sound.bgm_play_from(
+                &sys.resources,
+                &sys.settings,
+                now,
+                &name,
+                variant == 0,
+                0,
+                0,
+                Some(from),
+            );
+            report(machine, result);
+            if variant == 1 {
+                wait(machine, WaitEvent::Bgm, false);
+            }
+        }
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)
@@ -197,7 +240,10 @@ pub fn pcm(machine: &mut Machine, command: &Command) -> Result<Next> {
             if let Some(mut old) = machine.sys.pcm_events.remove(&number) {
                 old.stop(&mut machine.sys, true);
             }
-            machine.sys.pcm_events.insert(number, PcmEvent::new(mode, entries));
+            machine
+                .sys
+                .pcm_events
+                .insert(number, PcmEvent::new(mode, entries));
         }
         // PCMEVENT_STOP(event, stop sound) / PCMEVENT_STOPALL(stop sound)
         50 | 51 => {
@@ -222,11 +268,83 @@ pub fn pcm(machine: &mut Machine, command: &Command) -> Result<Next> {
         // PCMEVENT_WAIT(event)
         53 => {
             let number = machine.int_param(command, 0)?;
-            machine.push_long_op(Box::new(crate::longop::Wait::event(WaitEvent::PcmEvent(number))));
+            machine.push_long_op(Box::new(crate::longop::Wait::event(WaitEvent::PcmEvent(
+                number,
+            ))));
         }
         // PCMBUF_LOAD / PCMBUF_FREE / PCMBUF_FREEALL: preloading; files are
         // read when played.
         1000..=1002 => {}
+        // wavRewind(channel)
+        8 => {
+            let channel = channel(machine, command, 0)?;
+            let sys = &mut machine.sys;
+            let result = sys
+                .sound
+                .wav_rewind(&sys.resources, &sys.settings, now, channel);
+            report(machine, result);
+        }
+        // PCMCHANGELOOP / PCMCHANGEONESHOT(channel)
+        15 | 16 => {
+            let channel = channel(machine, command, 0)?;
+            machine
+                .sys
+                .sound
+                .set_wav_looped(channel, command.op.opcode == 15, now);
+        }
+        // PCMSTOPALLMAIN / PCMSTOPALLEXTRA: the first / second half of the
+        // channels.
+        21 | 22 => {
+            let half = WAV_CHANNELS / 2;
+            let range = if command.op.opcode == 21 {
+                0..half
+            } else {
+                half..WAV_CHANNELS
+            };
+            for channel in range {
+                machine.sys.sound.wav_stop(channel, 0, now);
+            }
+        }
+        // PCMVOLSETALL(volume) / PCMVOLMAXALL(time) / PCMVOLMINALL(time)
+        32..=34 => {
+            let (volume, fade) = match command.op.opcode {
+                32 => (machine.int_param(command, 0)?, 0),
+                33 => (255, ms(machine.int_param_or(command, 0, 0)?)),
+                _ => (0, ms(machine.int_param_or(command, 0, 0)?)),
+            };
+            for channel in 0..WAV_CHANNELS {
+                machine.sys.sound.set_wav_volume(channel, now, volume, fade);
+            }
+        }
+        // PCMFADECHECK(channel)
+        107 => {
+            let channel = channel(machine, command, 0)?;
+            machine.store = i32::from(machine.sys.sound.wav_fading(channel, now));
+        }
+        // PCMPLAYWAITKEY(name, channel) / PCMWAITKEY(channel): a click ends
+        // the wait.
+        201 => {
+            let name = machine.str_param(command, 0)?;
+            let channel = channel(machine, command, 1)?;
+            let sys = &mut machine.sys;
+            let played = sys.sound.wav_play(
+                &sys.resources,
+                &sys.settings,
+                now,
+                &name,
+                Some(channel),
+                false,
+                0,
+            );
+            match played {
+                Ok(channel) => wait(machine, WaitEvent::Wav(channel), true),
+                Err(error) => report(machine, Err(error)),
+            }
+        }
+        203 => {
+            let channel = channel(machine, command, 0)?;
+            wait(machine, WaitEvent::Wav(channel), true);
+        }
         105 | 106 => {
             let channel = channel(machine, command, 0)?;
             let fade = ms(machine.int_param_or(command, 1, 1000)?);
@@ -243,13 +361,25 @@ pub fn se(machine: &mut Machine, command: &Command) -> Result<Next> {
             let number = machine.int_param(command, 0)?;
             machine.sys.play_se(number);
         }
+        // SEVOLGET / SEVOLSET(volume) / SEVOLMAX(time) / SEVOLMIN(time)
+        11 => machine.store = machine.sys.sound.se_volume(machine.sys.now()),
+        12..=14 => {
+            let now = machine.sys.now();
+            let (volume, fade) = match command.op.opcode {
+                12 => (machine.int_param(command, 0)?, 0),
+                13 => (255, ms(machine.int_param_or(command, 0, 0)?)),
+                _ => (0, ms(machine.int_param_or(command, 0, 0)?)),
+            };
+            machine.sys.sound.set_se_volume(now, volume, fade);
+        }
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)
 }
 
 /// Starts a voice and records it for the backlog.
-fn koe_play(machine: &mut Machine, id: i32, character: Option<i32>) {
+pub(crate) fn koe_play(machine: &mut Machine, id: i32, character: Option<i32>) {
+    machine.sys.last_koe = (id, character.unwrap_or(0));
     let active = machine.sys.text.active;
     machine.sys.text.current_page.voices.push(id);
     let state = &mut machine.sys.text.states[active];
@@ -308,6 +438,27 @@ pub fn koe(machine: &mut Machine, command: &Command) -> Result<Next> {
             let fade = ms(machine.int_param_or(command, 0, 0)?);
             let volume = if command.op.opcode == 13 { 255 } else { 0 };
             machine.sys.sound.set_koe_volume(now, volume, fade);
+        }
+        // KOE_DONT_MEMORY / KOEPLAYWAIT_ / KOEPLAYWAITKEY_ and the EX forms
+        // (which ignore the character switches): a voice that is not
+        // remembered for replay or the backlog.
+        15..=20 => {
+            let id = machine.int_param(command, 0)?;
+            let sys = &mut machine.sys;
+            if !sys.should_fast_forward() {
+                let result = sys.sound.koe_play(&sys.resources, &sys.settings, now, id);
+                report(machine, result);
+            }
+            match (command.op.opcode - 15) % 3 {
+                1 => wait(machine, WaitEvent::Koe, false),
+                2 => wait(machine, WaitEvent::Koe, true),
+                _ => {}
+            }
+        }
+        // SET_KOEFILEMODE(mode): which voice archives to read; any is read.
+        100 => {
+            let mode = machine.int_param(command, 0)?;
+            machine.sys.remembered.insert(23100, mode);
         }
         _ => return machine.unimplemented(command),
     }

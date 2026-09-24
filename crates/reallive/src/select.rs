@@ -663,8 +663,13 @@ fn set_button_state(sys: &mut System, slot: usize, state: i32) {
 pub struct PolledButtons {
     pub group: i32,
     hovered: Option<(usize, i32)>,
-    /// A click on a button not yet collected by `now_decide`.
-    decided: Option<i32>,
+    /// The button held down, and whether with the right button.
+    pushed: Option<(i32, bool)>,
+    /// A click on a button not yet collected by `now_decide`, and whether
+    /// it was a right click.
+    decided: Option<(i32, bool)>,
+    /// `select_btnobjstart_with_right_click`: right clicks work buttons too.
+    pub right_click: bool,
 }
 
 impl PolledButtons {
@@ -693,17 +698,35 @@ impl PolledButtons {
             }
             self.hovered = hit;
         }
-        let Some((slot, number)) = hit else { return };
+        let Some((slot, number)) = hit else {
+            self.pushed = None;
+            return;
+        };
+        if self.pushed.is_some_and(|(n, _)| n != number) {
+            self.pushed = None;
+        }
         let mut rest = Vec::new();
         for event in std::mem::take(&mut sys.input.events) {
-            match event {
-                InputEvent::Press(Button::Left) => set_button_state(sys, slot, 2),
-                InputEvent::Release(Button::Left) if self.decided.is_none() => {
-                    set_button_state(sys, slot, 1);
-                    sys.play_se(1);
-                    self.decided = Some(number);
+            let right = match event {
+                InputEvent::Press(Button::Left) | InputEvent::Release(Button::Left) => false,
+                InputEvent::Press(Button::Right) | InputEvent::Release(Button::Right)
+                    if self.right_click =>
+                {
+                    true
                 }
-                other => rest.push(other),
+                other => {
+                    rest.push(other);
+                    continue;
+                }
+            };
+            if matches!(event, InputEvent::Press(_)) {
+                set_button_state(sys, slot, 2);
+                self.pushed = Some((number, right));
+            } else if self.decided.is_none() {
+                set_button_state(sys, slot, 1);
+                sys.play_se(1);
+                self.pushed = None;
+                self.decided = Some((number, right));
             }
         }
         sys.input.events = rest;
@@ -713,8 +736,24 @@ impl PolledButtons {
         self.hovered.map_or(-1, |(_, number)| number)
     }
 
-    pub fn take_decided(&mut self) -> i32 {
-        self.decided.take().unwrap_or(-1)
+    /// The button held down (`None`: either mouse button, else only the
+    /// left or right one), or -1.
+    pub fn pushed(&self, right: Option<bool>) -> i32 {
+        match self.pushed {
+            Some((number, r)) if right.is_none_or(|want| want == r) => number,
+            _ => -1,
+        }
+    }
+
+    /// Collects a click (`None`: with either button), or -1.
+    pub fn take_decided(&mut self, right: Option<bool>) -> i32 {
+        match self.decided {
+            Some((number, r)) if right.is_none_or(|want| want == r) => {
+                self.decided = None;
+                number
+            }
+            _ => -1,
+        }
     }
 
     /// Returns the highlighted button to normal.

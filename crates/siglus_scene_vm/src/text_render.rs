@@ -7,7 +7,7 @@
 
 use crate::assets::RgbaImage;
 use crate::image_manager::{ImageHandle, ImageManager};
-use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontArc, FontRef, FontVec, PxScale, ScaleFont, point};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -142,6 +142,10 @@ pub struct FontCache {
     /// the same invalidation boundary instead of pinning the first loaded face
     /// for the lifetime of the process.
     requested_name: String,
+    /// Faces already resolved, by normalized request: switching back to a
+    /// face neither rescans the font directories nor reads a font file
+    /// again (each scan read whole files, tens of MiB, per switch).
+    resolved: std::collections::HashMap<String, (FontArc, Option<PathBuf>, u32)>,
 }
 
 impl FontCache {
@@ -151,6 +155,7 @@ impl FontCache {
             loaded_from: None,
             loaded_face_index: 0,
             requested_name: String::new(),
+            resolved: std::collections::HashMap::new(),
         }
     }
 
@@ -182,6 +187,34 @@ impl FontCache {
             return true;
         }
 
+        if let Some((font, path, face)) = self.resolved.get(&normalized) {
+            self.font = Some(font.clone());
+            self.loaded_from = path.clone();
+            self.loaded_face_index = *face;
+            self.requested_name = normalized;
+            return true;
+        }
+        let found = self.resolve_for_project_named(project_dir, requested_name, &normalized);
+        if found && let Some(font) = &self.font {
+            self.resolved.insert(
+                normalized,
+                (
+                    font.clone(),
+                    self.loaded_from.clone(),
+                    self.loaded_face_index,
+                ),
+            );
+        }
+        found
+    }
+
+    fn resolve_for_project_named(
+        &mut self,
+        project_dir: &Path,
+        requested_name: &str,
+        normalized: &str,
+    ) -> bool {
+        let normalized = normalized.to_owned();
         self.font = None;
         self.loaded_from = None;
         self.loaded_face_index = 0;
@@ -355,7 +388,9 @@ impl FontCache {
         let Some(bytes) = embedded_font::EMBEDDED_DEFAULT_FONT else {
             return false;
         };
-        match FontVec::try_from_vec_and_index(bytes.to_vec(), 0) {
+        // Parsed in place: the font lives in the executable, so it costs no
+        // heap (a copy was 7.5 MiB, repeated on every font switch).
+        match FontRef::try_from_slice(bytes) {
             Ok(font) => {
                 self.font = Some(FontArc::from(font));
                 let source =

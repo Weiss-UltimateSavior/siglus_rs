@@ -222,6 +222,12 @@ fn property_code(property: Property) -> (i32, i32) {
         Property::ClipH => (30, 0),
         Property::ClipRight => (31, 0),
         Property::ClipBottom => (32, 0),
+        Property::OwnClipX => (33, 0),
+        Property::OwnClipY => (34, 0),
+        Property::OwnClipW => (35, 0),
+        Property::OwnClipH => (36, 0),
+        Property::OwnClipRight => (37, 0),
+        Property::OwnClipBottom => (38, 0),
     }
 }
 
@@ -261,6 +267,12 @@ fn property_from_code(code: i32, index: i32) -> Option<Property> {
         30 => Property::ClipH,
         31 => Property::ClipRight,
         32 => Property::ClipBottom,
+        33 => Property::OwnClipX,
+        34 => Property::OwnClipY,
+        35 => Property::OwnClipW,
+        36 => Property::OwnClipH,
+        37 => Property::OwnClipRight,
+        38 => Property::OwnClipBottom,
         _ => return None,
     })
 }

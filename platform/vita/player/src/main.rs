@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "vita", feature(alloc_error_hook))]
+
 #[cfg(not(target_os = "vita"))]
 fn main() {
     eprintln!("siglus_vita_player must be built with cargo-vita for PS Vita");
@@ -7,12 +9,15 @@ fn main() {
 mod gpu;
 
 // newlib's default heap is too small for RewriteHF's rebuilt 43 MiB scene
-// pack plus decoded images and a few 1280x720 video frames. Keep the heap
-// below Vita's user-memory budget so vitaGL and system services still fit.
+// pack plus decoded images, transition captures and video frames. The heap
+// is reserved whole at startup; in extended memory mode (cargo-vita sets
+// ATTRIBUTE2=12) about 180 MiB of user memory stayed free beside a 160 MiB
+// heap after vitaGL started, and 160 MiB ran out when a RewriteHF route
+// began. 256 MiB leaves ~85 MiB for vitaGL, thread stacks and the system.
 #[cfg(target_os = "vita")]
 #[used]
 #[unsafe(export_name = "_newlib_heap_size_user")]
-pub static NEWLIB_HEAP_SIZE_USER: u32 = 160 * 1024 * 1024;
+pub static NEWLIB_HEAP_SIZE_USER: u32 = 256 * 1024 * 1024;
 
 #[cfg(target_os = "vita")]
 mod vita {
@@ -64,6 +69,36 @@ mod vita {
 
     unsafe extern "C" {
         fn mallinfo() -> MallInfo;
+    }
+
+    /// The latest VM status line, for the out-of-memory report.
+    static LAST_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    /// Freed when an allocation fails, so the report can still be written.
+    static EMERGENCY_RESERVE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+    fn note_status(status: String) {
+        if let Ok(mut last) = LAST_STATUS.try_lock() {
+            *last = status;
+        }
+    }
+
+    /// Logs an allocation failure (size, heap figures and where the VM
+    /// was) before the runtime aborts.
+    fn report_alloc_error(layout: std::alloc::Layout) {
+        if let Ok(mut reserve) = EMERGENCY_RESERVE.try_lock() {
+            reserve.take();
+        }
+        let heap = unsafe { mallinfo() };
+        log(&format!(
+            "out of memory: allocation of {} bytes failed; heap-arena={} heap-used={} heap-free={}",
+            layout.size(),
+            heap.arena,
+            heap.uordblks,
+            heap.fordblks
+        ));
+        if let Ok(last) = LAST_STATUS.try_lock() {
+            log(&format!("out of memory: last status: {last}"));
+        }
     }
 
     pub(super) fn log(message: &str) {
@@ -319,10 +354,33 @@ mod vita {
         let mut touch_active = false;
         let mut last_touch_position = (0.0, 0.0);
         // Local Vita3K smoke mode: the emulator's macOS window sometimes
-        // crashes while dispatching a mouse click. Drive the same host touch
-        // path once, after the opening has reached RewriteHF's title screen.
-        let title_tap_smoke = PathBuf::from(ROOT).join("title-tap-smoke").exists();
+        // crashes while dispatching a mouse click. `smoke-taps` lists taps
+        // to drive through the same host touch path, one `frame x y` (game
+        // coordinates) per line; `title-tap-smoke` is the one tap on
+        // RewriteHF's title screen.
+        let mut smoke_taps: Vec<(u64, f64, f64)> =
+            fs::read_to_string(PathBuf::from(ROOT).join("smoke-taps"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split_whitespace();
+                    Some((
+                        parts.next()?.parse().ok()?,
+                        parts.next()?.parse().ok()?,
+                        parts.next()?.parse().ok()?,
+                    ))
+                })
+                .collect();
+        if PathBuf::from(ROOT).join("title-tap-smoke").exists() {
+            smoke_taps.push((6_700, 445.0, 662.0));
+        }
         let mut frame = 0u64;
+        // Frame rate and time spent in the engine step (VM + render), per
+        // logging period.
+        let mut period_start = std::time::Instant::now();
+        let mut step_us = 0u64;
+        let mut step_max_us = 0u64;
+        let mut global_fingerprint = None;
         let mut silent_samples = [0i16; SILENT_AUDIO_FRAMES * 2];
         loop {
             if frame < 6 {
@@ -337,17 +395,19 @@ mod vita {
                     panel,
                 );
             }
-            if title_tap_smoke && (6_700..=6_704).contains(&frame) {
-                let phase = if frame == 6_700 {
-                    0
-                } else if frame == 6_704 {
-                    2
-                } else {
-                    1
-                };
-                host.touch(phase, 445.0, 662.0);
-                if phase != 1 {
-                    log(&format!("frame {frame}: title smoke touch phase={phase}"));
+            for &(at, x, y) in &smoke_taps {
+                if (at..=at + 4).contains(&frame) {
+                    let phase = match frame - at {
+                        0 => 0,
+                        4 => 2,
+                        _ => 1,
+                    };
+                    host.touch(phase, x, y);
+                    if phase != 1 {
+                        log(&format!(
+                            "frame {frame}: smoke touch phase={phase} at {x},{y}"
+                        ));
+                    }
                 }
             }
             if frame < 6 {
@@ -356,20 +416,55 @@ mod vita {
             if _audio.is_none() {
                 unsafe { render_stereo_i16(silent_samples.as_mut_ptr(), SILENT_AUDIO_FRAMES) };
             }
-            if host
+            let step_start = std::time::Instant::now();
+            let finished = host
                 .step(16)
-                .map_err(|error| format!("engine frame: {error:#}"))?
-            {
+                .map_err(|error| format!("engine frame: {error:#}"))?;
+            let us = step_start.elapsed().as_micros() as u64;
+            step_us += us;
+            step_max_us = step_max_us.max(us);
+            if finished {
                 break;
             }
             if frame < 6 {
                 log(&format!("frame {frame}: step complete"));
             }
             frame += 1;
+            // A Vita app is usually closed without an exit the engine sees:
+            // keep global data (flags such as "opening seen", read text)
+            // on the card a few seconds after it changes.
+            if frame % 300 == 0 {
+                let now = host.persist_global_if_changed(global_fingerprint);
+                if global_fingerprint.is_some_and(|last| last != now) {
+                    log(&format!("frame {frame}: global save written"));
+                }
+                global_fingerprint = Some(now);
+            }
+            if frame % 120 == 0 {
+                let secs = period_start.elapsed().as_secs_f64().max(0.001);
+                log(&format!(
+                    "frame {frame}: fps {:.1}, step avg {} us max {} us; {}; {}",
+                    120.0 / secs,
+                    step_us / 120,
+                    step_max_us,
+                    siglus_scene_vm::render::vita_stats::take_summary(),
+                    super::gpu::take_upload_summary(),
+                ));
+                period_start = std::time::Instant::now();
+                step_us = 0;
+                step_max_us = 0;
+            }
+            if frame % 120 == 0 && frame % 600 != 0 {
+                let status = format!("frame {frame}: {}", host.debug_status_summary());
+                log(&status);
+                note_status(status);
+            }
             if frame % 600 == 0 {
                 log_memory(&format!("frame {frame}"));
                 log_engine_memory(&mut host, &format!("frame {frame}"));
-                log(&format!("frame {frame}: {}", host.debug_status_summary()));
+                let status = format!("frame {frame}: {}", host.debug_status_summary());
+                log(&status);
+                note_status(status);
                 let stats = host.movie_memory_stats();
                 log(&format!(
                     "frame {frame}: movie-streams={} movie-frames={} movie-rgba-bytes={} movie-pcm-bytes={} movie-assets={} movie-previews={}",
@@ -391,6 +486,10 @@ mod vita {
         std::panic::set_hook(Box::new(|info| {
             log(&format!("player panic: {info}"));
         }));
+        if let Ok(mut reserve) = EMERGENCY_RESERVE.lock() {
+            *reserve = Some(vec![0; 1024 * 1024]);
+        }
+        std::alloc::set_alloc_error_hook(report_alloc_error);
         if let Err(error) = run() {
             log(&format!("player error: {error}"));
             eprintln!("{error}");

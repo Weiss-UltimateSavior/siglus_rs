@@ -173,6 +173,8 @@ pub struct GlobalMemory {
     pub global_names: Vec<String>,
     /// Scenario number → read kidoku markers (bit set).
     pub kidoku: HashMap<i32, Vec<u64>>,
+    /// `ALLSET_READFLAG`: everything counts as read.
+    pub all_read: bool,
 }
 
 impl Default for GlobalMemory {
@@ -183,6 +185,7 @@ impl Default for GlobalMemory {
             str_m: vec![String::new(); BANK_SIZE],
             global_names: vec![String::new(); NAME_COUNT],
             kidoku: HashMap::new(),
+            all_read: false,
         }
     }
 }
@@ -308,6 +311,9 @@ impl Memory {
     }
 
     pub fn has_been_read(&self, scene: i32, kidoku: i32) -> bool {
+        if self.global.all_read {
+            return true;
+        }
         let Ok(kidoku) = usize::try_from(kidoku) else {
             return false;
         };

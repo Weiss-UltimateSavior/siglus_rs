@@ -119,10 +119,16 @@ fn read_display(machine: &mut Machine, args: &Args, at: usize, end: usize) -> Re
         } else {
             Rect::from_corners(values[0], values[1], values[2], values[3])
         };
+        let mut transition = Transition::from_sel(&values);
+        // Early games leave the opacity of an inline effect at 0 (RUSUR's
+        // title menu); it means "unset", not "invisible".
+        if values[14] == 0 {
+            transition.opacity = 255;
+        }
         return Ok(Display {
             src: Some(src),
             dest: (values[4], values[5]),
-            transition: Transition::from_sel(&values),
+            transition,
         });
     }
     let sel = args.int(machine, at)?;
@@ -205,11 +211,26 @@ fn open_onto_screen(
             blend,
             None,
         );
+        let dc1 = gfx.dc(1)?;
+        let dc0 = gfx.dc_mut(0)?;
+        let rect = dc0.rect();
+        dc0.blit(&dc1, rect, 0, 0, 255, Blend::Copy, None);
+    } else {
+        // "?": DC 1 as it is; only the given area of it reaches the
+        // screen (the rest of DC 0 stays), and DC 1 is left alone.
+        let dc1 = gfx.dc(1)?;
+        let src = display.src.unwrap_or(dc1.rect());
+        let blend = if mask { Blend::Mask } else { Blend::Copy };
+        gfx.dc_mut(0)?.blit(
+            &dc1,
+            src,
+            display.dest.0,
+            display.dest.1,
+            opacity(display.transition.opacity),
+            blend,
+            None,
+        );
     }
-    let dc1 = gfx.dc(1)?;
-    let dc0 = gfx.dc_mut(0)?;
-    let rect = dc0.rect();
-    dc0.blit(&dc1, rect, 0, 0, 255, Blend::Copy, None);
     if promote {
         gfx.promote_objects();
     }
@@ -390,12 +411,27 @@ fn copy_blend(opcode: u16) -> Option<(Blend, bool, bool)> {
 }
 
 pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
-    let opcode = command.op.opcode % 1000;
+    // BOXWAIP/BOXBG/BOXCHR/BOXBGCHR/BOXGRP/BOXBGCHRDC/BOXBGCHRKEEP (52..58)
+    // are grpDisplay..BGCHRKEEP (72..78) under their newer names; 62..68
+    // are the same with a transition time as the last argument.
+    let (opcode, timed) = match command.op.opcode % 1000 {
+        raw @ 52..=58 => (raw + 20, false),
+        raw @ 62..=68 => (raw + 10, true),
+        // WAIP_TIME .. BGCHRKEEP_TIME: the same, newest names.
+        raw @ 82..=88 => (raw - 10, true),
+        raw => (raw, false),
+    };
     let args = Args {
         command,
         rec: command.op.opcode >= 1000,
     };
-    let n = args.count();
+    let mut n = args.count();
+    let time_override = if timed && n > 0 {
+        n -= 1;
+        Some(args.int(machine, n)?)
+    } else {
+        None
+    };
     match opcode {
         // allocDC(dc, w, h) / freeDC(dc)
         15 => {
@@ -487,7 +523,10 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // grpDisplay(dc, ...)
         72 => {
             let dc = args.int(machine, 0)?;
-            let display = read_display(machine, &args, 1, n)?;
+            let mut display = read_display(machine, &args, 1, n)?;
+            if let Some(time) = time_override {
+                display.transition.time = time;
+            }
             let source = (*machine.sys.gfx.dc(dc)?).clone();
             open_onto_screen(machine, Some(&source), display, false, true)?;
             push_stack(machine, "display");
@@ -495,7 +534,10 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
         // grpOpenBg / grpMaskOpen / grpOpen
         73 | 74 | 76 => {
             let name = args.str(machine, 0)?;
-            let display = read_display(machine, &args, 1, n)?;
+            let mut display = read_display(machine, &args, 1, n)?;
+            if let Some(time) = time_override {
+                display.transition.time = time;
+            }
             let image = if name == "?" {
                 None
             } else {
@@ -523,7 +565,10 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             };
             // The effect part is everything between the source and the
             // compositors.
-            let display = read_display(machine, &args, 1, plain)?;
+            let mut display = read_display(machine, &args, 1, plain.min(n))?;
+            if let Some(time) = time_override {
+                display.transition.time = time;
+            }
             {
                 let dc1 = machine.sys.gfx.dc_mut(1)?;
                 let rect = dc1.rect();
@@ -850,6 +895,153 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let rect = src.rect();
             gfx.dc_mut(dst_dc)?
                 .blit(&src, rect, 0, 0, opacity(alpha), Blend::Mask, None);
+        }
+        // BGCHRKEEP / RECTBGCHRKEEP(sel...): keep the background and the
+        // characters as they are; nothing changes on screen. GRPKEEP too.
+        78 | 10 => {}
+        // GRPKEEPBACK(sel): the same picture, with the background objects
+        // brought forward through the transition.
+        11 => {
+            let mut display = read_display(machine, &args, 0, n)?;
+            if let Some(time) = time_override {
+                display.transition.time = time;
+            }
+            open_onto_screen(machine, None, display, false, true)?;
+        }
+        // BANKBANK(source, destination): a whole DC copied.
+        17 => {
+            let from = args.int(machine, 0)?;
+            let to = args.int(machine, 1)?;
+            let surface = (*machine.sys.gfx.dc(from)?).clone();
+            machine.sys.gfx.set_dc(to, surface)?;
+        }
+        // SHAKEZOOM(index): a `#SHAKE` entry (the zoom is not shown).
+        33 => {
+            let index = args.int(machine, 0)?;
+            crate::modules::shk::shake_from_gameexe(machine, index)?;
+        }
+        // PIXELPUT / PIXELSET(x, y, dc, r, g, b)
+        34 | 35 => {
+            let (x, y) = (args.int(machine, 0)?, args.int(machine, 1)?);
+            let dc = args.int(machine, 2)?;
+            let colour = args.rgb(machine, 3)?;
+            machine
+                .sys
+                .gfx
+                .dc_mut(dc)?
+                .fill(Rect::new(x, y, 1, 1), colour, 255);
+        }
+        // ROTATE_GET_DISPERIA(grpRotate's arguments..., x1, y1, x2, y2): the
+        // area a rotation would draw on.
+        169 => {
+            let src_rect = args.rect(machine, 0)?;
+            let origin = (args.int(machine, 4)?, args.int(machine, 5)?);
+            let dst_rect = args.rect(machine, 7)?;
+            let dest_origin = (args.int(machine, 11)?, args.int(machine, 12)?);
+            let angle = args.int(machine, 14)?;
+            let scale = (args.int(machine, 15)?, args.int(machine, 16)?);
+            let transform = crate::surface::Transform::new(
+                (f64::from(origin.0), f64::from(origin.1)),
+                (f64::from(dest_origin.0), f64::from(dest_origin.1)),
+                f64::from(angle) / 10.0,
+                (f64::from(scale.0) / 100.0, f64::from(scale.1) / 100.0),
+            );
+            let area = transform.bounds(src_rect).intersect(&dst_rect);
+            let values = if args.rec {
+                [area.x, area.y, area.w, area.h]
+            } else {
+                [area.x, area.y, area.right() - 1, area.bottom() - 1]
+            };
+            for (i, value) in values.into_iter().enumerate() {
+                let target = machine.int_target_param(command, 18 + i)?;
+                machine.set_target(target, value)?;
+            }
+        }
+        // Masked grpOutline / grpFill (220/221), grpInvert / grpMono /
+        // grpColour / grpLight (320..323); 240.. / 340.. use the inverted
+        // mask. The mask DC's red channel weighs the effect per pixel.
+        220 | 221 | 240 | 241 | 320..=323 | 340..=343 => {
+            let anti = matches!(opcode, 240 | 241 | 340..=343);
+            let base = if opcode >= 300 {
+                300 + opcode % 20
+            } else {
+                200 + opcode % 20
+            };
+            // Arguments after the DC, and the optional area in front.
+            let width = match base {
+                200 | 201 | 302 => 5,
+                303 => 3,
+                _ => 2,
+            };
+            let (rect, at) = if n >= width + 4 {
+                (Some(args.rect(machine, 0)?), 4)
+            } else {
+                (None, 0)
+            };
+            let dc = args.int(machine, at)?;
+            let mask_dc = args.int(machine, at + width - 1)?;
+            let gfx = &mut machine.sys.gfx;
+            let mask = gfx.dc(mask_dc)?;
+            let original = (*gfx.dc(dc)?).clone();
+            let mut changed = original.clone();
+            let rect = rect.unwrap_or(changed.rect());
+            match base {
+                200 | 201 => {
+                    let colour = args.rgb(machine, at + 1)?;
+                    if base == 200 {
+                        changed.outline(rect, colour, 255);
+                    } else {
+                        changed.fill(rect, colour, 255);
+                    }
+                }
+                300 => changed.invert(rect, 255),
+                301 => changed.mono(rect, 255),
+                302 => {
+                    let rgb = [
+                        args.int(machine, at + 1)?,
+                        args.int(machine, at + 2)?,
+                        args.int(machine, at + 3)?,
+                    ];
+                    changed.colour(rect, rgb, 255);
+                }
+                _ => {
+                    let level = args.int(machine, at + 1)?;
+                    changed.colour(rect, [level; 3], 255);
+                }
+            }
+            let mut out = original.clone();
+            let area = rect.intersect(&out.rect());
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let m = u32::from(mask.pixel(x, y)[0]);
+                    let m = if anti { 255 - m } else { m };
+                    let (a, b) = (original.pixel(x, y), changed.pixel(x, y));
+                    let at = ((y * out.width + x) * 4) as usize;
+                    for c in 0..4 {
+                        out.rgba[at + c] =
+                            ((u32::from(a[c]) * (255 - m) + u32::from(b[c]) * m) / 255) as u8;
+                    }
+                }
+            }
+            machine.sys.gfx.set_dc(dc, out)?;
+        }
+        // BOXPIKACHU_OLD(r, g, b, count): the screen blinks, and the game
+        // waits for it.
+        405 => {
+            let colour = args.rgb(machine, 0)?;
+            let count = args.int(machine, 3)?.max(1) as u32;
+            let now = machine.sys.now();
+            machine.sys.gfx.flash = Some(crate::graphics::Flash {
+                area: None,
+                colour: [colour[0], colour[1], colour[2]],
+                start: now,
+                time: 100,
+                count,
+                fade: false,
+                blink: true,
+            });
+            let wait = crate::longop::Wait::event(crate::longop::WaitEvent::Flash);
+            machine.push_long_op(Box::new(wait));
         }
         _ => return machine.unimplemented(command),
     }

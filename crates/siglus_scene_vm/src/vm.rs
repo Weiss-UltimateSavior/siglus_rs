@@ -1965,7 +1965,7 @@ impl<'a> SceneVm<'a> {
         Ok(true)
     }
 
-    pub(crate) fn install_initial_scene_pck(&mut self, pack: ScenePck, append_dir: String) {
+    pub fn install_initial_scene_pck(&mut self, pack: ScenePck, append_dir: String) {
         self.scene_pck_cache = Some(pack);
         self.scene_pck_append_dir = Some(append_dir);
     }
@@ -2015,13 +2015,13 @@ impl<'a> SceneVm<'a> {
                 easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
                 string_encryption_override,
             };
-            self.scene_pck_cache = Some(ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?);
+            self.scene_pck_cache = Some(ScenePck::load_lazy_from_bytes(bytes, &opt)?);
         }
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             let opt = crate::resource::load_scene_pck_decode_options(&self.ctx.project_dir)?;
-            self.scene_pck_cache = Some(ScenePck::load_and_rebuild(&scene_pck_path, &opt)?);
+            self.scene_pck_cache = Some(ScenePck::load_lazy(&scene_pck_path, &opt)?);
         }
 
         self.ctx.install_scene_metadata(

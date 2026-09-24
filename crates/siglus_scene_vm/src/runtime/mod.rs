@@ -2123,14 +2123,14 @@ impl CommandContext {
                 easy_angou_code: Some(siglus_assets::keys::SCENE_KEY.to_vec()),
                 string_encryption_override,
             };
-            ScenePck::load_and_rebuild_from_bytes(bytes, &opt)?
+            ScenePck::load_lazy_from_bytes(bytes, &opt)?
         };
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let pck = {
             let scene_pck_path =
                 crate::resource::find_scene_pck_path_for_append(&self.project_dir, &active_append)?;
             let opt = crate::resource::load_scene_pck_decode_options(&self.project_dir)?;
-            ScenePck::load_and_rebuild(&scene_pck_path, &opt)?
+            ScenePck::load_lazy(&scene_pck_path, &opt)?
         };
         self.install_scene_metadata(&active_append, &pck)?;
         let slot = self.scene_metadata.borrow();
@@ -11843,6 +11843,7 @@ fn install_object_movie_stream_frame(
     file: &str,
     frame_idx: usize,
     frame: std::sync::Arc<crate::assets::RgbaImage>,
+    source_size: Option<(u32, u32)>,
     trace: bool,
 ) {
     let globals::ObjectBackend::Movie {
@@ -11871,12 +11872,25 @@ fn install_object_movie_stream_frame(
     };
     obj.movie.frame_image_cursor = 0;
 
+    // The object is as large as the video, even when the decoded picture is
+    // smaller (Vita): the sprite then stretches it to that size.
+    let (video_w, video_h) = source_size
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or((frame.width, frame.height));
     *image_id = Some(img_id.clone());
-    *width = frame.width;
-    *height = frame.height;
+    *width = video_w;
+    *height = video_h;
     if let Some(layer) = layers.layer_mut(*layer_id)
         && let Some(sprite) = layer.sprite_mut(*sprite_id)
     {
+        sprite.size_mode = if (video_w, video_h) == (frame.width, frame.height) {
+            SpriteSizeMode::Intrinsic
+        } else {
+            SpriteSizeMode::Explicit {
+                width: video_w,
+                height: video_h,
+            }
+        };
         sprite.image_id = Some(img_id.clone());
         sprite.object_anchor = true;
         sprite.texture_center_x = 0.0;
@@ -12249,7 +12263,7 @@ fn sync_movie_object_recursive(
                 obj.movie.last_frame_idx = Some(frame_idx);
                 let frame = polled.frame.clone();
                 install_object_movie_stream_frame(
-                    layers, images, obj, stage_idx, obj_idx, file, frame_idx, frame, trace,
+                    layers, images, obj, stage_idx, obj_idx, file, frame_idx, frame, polled.source_size, trace,
                 );
             }
             // Keep OBJECT movie video on the same independent media clock as

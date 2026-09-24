@@ -366,7 +366,35 @@ impl std::fmt::Debug for Voice {
     }
 }
 
+/// Where a track starts (`DEBUG_MPLAY_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartAt {
+    Ms(u64),
+    Frame(usize),
+}
+
 impl Voice {
+    /// Switches looping on or off while it plays; a sound that stops
+    /// looping ends at the end of its current pass.
+    fn set_looped(&mut self, looped: bool, now: u64) {
+        if self.looped == looped {
+            return;
+        }
+        #[cfg(not(target_os = "horizon"))]
+        if let Some(handle) = self.handle.as_mut() {
+            if looped {
+                handle.set_loop_region(0.0..);
+            } else {
+                handle.set_loop_region(None);
+            }
+        }
+        if !looped && self.duration > 0 {
+            let played = now.saturating_sub(self.started);
+            self.started = now - played % self.duration;
+        }
+        self.looped = looped;
+    }
+
     fn playing(&self, now: u64) -> bool {
         if self.paused_at.is_some() {
             return true;
@@ -440,6 +468,8 @@ pub struct Sound {
     /// A track waiting for the current one to fade out.
     queued_bgm: Option<(String, bool, u64, u64)>,
     wav: [Option<Voice>; WAV_CHANNELS],
+    /// What each channel last played, and whether looped (`wavRewind`).
+    wav_names: [(String, bool); WAV_CHANNELS],
     koe: Option<Voice>,
     se: Vec<Voice>,
     movie: Option<Voice>,
@@ -447,6 +477,8 @@ pub struct Sound {
     bgm_volume: Ramp,
     wav_volume: [Ramp; WAV_CHANNELS],
     koe_volume: Ramp,
+    /// `SEVOLSET` and friends.
+    se_volume: Ramp,
     voices: HashMap<i32, VoiceArchive>,
     cache: HashMap<(Kind, String), Pcm>,
     /// Last applied device volumes, to avoid redundant updates.
@@ -527,6 +559,8 @@ impl Sound {
             bgm_volume: Ramp::fixed(255),
             wav_volume: [Ramp::fixed(255); WAV_CHANNELS],
             koe_volume: Ramp::fixed(255),
+            se_volume: Ramp::fixed(255),
+            wav_names: std::array::from_fn(|_| (String::new(), false)),
             voices: HashMap::new(),
             cache: HashMap::new(),
             applied: Vec::new(),
@@ -638,6 +672,7 @@ impl Sound {
 
     /// `bgmPlay` / `bgmLoop`. With `fade_out`, the current track fades
     /// out first and the new one starts afterwards.
+    #[allow(clippy::too_many_arguments)]
     pub fn bgm_play(
         &mut self,
         resources: &Resources,
@@ -648,6 +683,24 @@ impl Sound {
         fade_in: u64,
         fade_out: u64,
     ) -> Result<()> {
+        self.bgm_play_from(
+            resources, settings, now, name, looped, fade_in, fade_out, None,
+        )
+    }
+
+    /// `bgm_play`, starting `from` into the track (`DEBUG_MPLAY_*`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn bgm_play_from(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        name: &str,
+        looped: bool,
+        fade_in: u64,
+        fade_out: u64,
+        from: Option<StartAt>,
+    ) -> Result<()> {
         if fade_out > 0 && self.bgm_playing(now) {
             Self::fade_out(&mut self.bgm, now, fade_out);
             self.queued_bgm = Some((name.to_owned(), looped, fade_in, now + fade_out));
@@ -657,10 +710,71 @@ impl Sound {
         self.queued_bgm = None;
         self.bgm_name = name.to_owned();
         self.bgm_looped = looped;
-        let pcm = self.bgm_pcm(resources, name)?;
+        let mut pcm = self.bgm_pcm(resources, name)?;
+        if let Some(from) = from {
+            let frame = match from {
+                StartAt::Ms(ms) => (ms as f64 * f64::from(pcm.rate) / 1000.0) as usize,
+                StartAt::Frame(frame) => frame,
+            };
+            let frames = pcm.frames();
+            pcm.trim(frame, frames);
+            pcm.loop_start = pcm.loop_start.map(|start| start.saturating_sub(frame));
+        }
         let volume = self.volume_of(settings, channel::BGM, now, self.bgm_volume.value(now));
         self.bgm = Some(self.start(&pcm, looped, volume, fade_in, now));
         Ok(())
+    }
+
+    /// `MCHANGELOOP` / `MCHANGEONESHOT`: whether the playing track loops.
+    pub fn set_bgm_looped(&mut self, looped: bool, now: u64) {
+        self.bgm_looped = looped;
+        if let Some(voice) = self.bgm.as_mut() {
+            voice.set_looped(looped, now);
+        }
+    }
+
+    /// `PCMCHANGELOOP` / `PCMCHANGEONESHOT`.
+    pub fn set_wav_looped(&mut self, channel: usize, looped: bool, now: u64) {
+        if let Some(voice) = self.wav.get_mut(channel).and_then(Option::as_mut) {
+            voice.set_looped(looped, now);
+        }
+        if let Some(entry) = self.wav_names.get_mut(channel) {
+            entry.1 = looped;
+        }
+    }
+
+    /// `wavRewind`: the channel's sound again from the start.
+    pub fn wav_rewind(
+        &mut self,
+        resources: &Resources,
+        settings: &Settings,
+        now: u64,
+        channel: usize,
+    ) -> Result<()> {
+        let Some((name, looped)) = self.wav_names.get(channel).cloned() else {
+            return Ok(());
+        };
+        if name.is_empty() || !self.wav_playing(channel, now) {
+            return Ok(());
+        }
+        self.wav_play(resources, settings, now, &name, Some(channel), looped, 0)?;
+        Ok(())
+    }
+
+    /// `PCMFADECHECK`: the channel is fading out.
+    pub fn wav_fading(&self, channel: usize, now: u64) -> bool {
+        self.wav
+            .get(channel)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| v.playing(now) && v.ends_at.is_some())
+    }
+
+    pub fn set_se_volume(&mut self, now: u64, volume: i32, fade: u64) {
+        self.se_volume.retarget(now, volume, fade);
+    }
+
+    pub fn se_volume(&self, now: u64) -> i32 {
+        self.se_volume.value(now)
     }
 
     pub fn bgm_stop(&mut self) {
@@ -672,6 +786,10 @@ impl Sound {
     pub fn bgm_fade_out(&mut self, now: u64, fade: u64) {
         self.queued_bgm = None;
         Self::fade_out(&mut self.bgm, now, fade);
+    }
+
+    pub fn bgm_looped(&self) -> bool {
+        self.bgm_looped
     }
 
     pub fn bgm_playing(&self, now: u64) -> bool {
@@ -760,6 +878,7 @@ impl Sound {
             self.wav_volume[index].value(now),
         );
         self.wav[index] = Some(self.start(&pcm, looped, volume, fade_in, now));
+        self.wav_names[index] = (name.to_owned(), looped);
         Ok(index)
     }
 
@@ -815,7 +934,7 @@ impl Sound {
             return Ok(());
         }
         let pcm = self.load(resources, Kind::Wav, &file)?;
-        let volume = self.volume_of(settings, channel::SE, now, 255);
+        let volume = self.volume_of(settings, channel::SE, now, self.se_volume.value(now));
         self.se.retain(|v| v.playing(now));
         let voice = self.start(&pcm, false, volume, 0, now);
         self.se.push(voice);

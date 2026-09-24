@@ -432,20 +432,27 @@ impl LongOp for SyscomMenu {
 #[derive(Debug)]
 pub struct MessageBox {
     overlay: Overlay,
+    results: Vec<i32>,
 }
 
 impl MessageBox {
     pub fn new(title: String, message: String, cancel: bool) -> Self {
-        let mut rows = vec![Row {
-            text: "OK".into(),
-            enabled: true,
-        }];
         if cancel {
-            rows.push(Row {
-                text: "キャンセル".into(),
-                enabled: true,
-            });
+            Self::with_buttons(title, message, &[("OK", 1), ("キャンセル", 0)])
+        } else {
+            Self::with_buttons(title, message, &[("OK", 1)])
         }
+    }
+
+    /// A box with the given buttons and what each stores.
+    pub fn with_buttons(title: String, message: String, buttons: &[(&str, i32)]) -> Self {
+        let rows = buttons
+            .iter()
+            .map(|(text, _)| Row {
+                text: (*text).into(),
+                enabled: true,
+            })
+            .collect();
         let title = if title.is_empty() {
             message
         } else {
@@ -457,6 +464,7 @@ impl MessageBox {
                 rows,
                 ..Overlay::default()
             },
+            results: buttons.iter().map(|b| b.1).collect(),
         }
     }
 }
@@ -471,7 +479,9 @@ impl LongOp for MessageBox {
             return Ok(false);
         };
         machine.sys.ui.overlay = None;
-        machine.store = i32::from(choice == Some(0));
+        // Cancelling picks the last button.
+        let index = choice.unwrap_or(self.results.len() - 1);
+        machine.store = self.results.get(index).copied().unwrap_or(0);
         Ok(true)
     }
 

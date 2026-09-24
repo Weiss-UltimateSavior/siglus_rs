@@ -136,7 +136,151 @@ pub fn serialize_slot(machine: &Machine) -> Vec<u8> {
         w.bool(machine.sys.syscom.skip_mode);
     });
     machine.save_subsystems(&mut w);
+    let extra = SlotExtra {
+        message: current_message(machine),
+        ..SlotExtra::default()
+    };
+    w.section("extra", |w| extra.write(w));
+    if let Some(thumbnail) = &machine.sys.gfx.thumbnail {
+        let small = thumbnail_of(thumbnail);
+        w.section("thumbnail", |w| {
+            w.i32(small.width);
+            w.i32(small.height);
+            w.bytes(&small.rgba);
+        });
+    }
     w.bytes
+}
+
+/// Saved pictures are a quarter of the screen's size.
+fn thumbnail_of(screen: &crate::surface::Surface) -> crate::surface::Surface {
+    use crate::surface::{Blend, Rect, Surface};
+    let (w, h) = ((screen.width / 4).max(1), (screen.height / 4).max(1));
+    let mut small = Surface::new(w, h);
+    small.stretch_blit(
+        screen,
+        Rect::new(0, 0, screen.width, screen.height),
+        Rect::new(0, 0, w, h),
+        255,
+        Blend::Copy,
+    );
+    small
+}
+
+/// The picture saved with slot `slot` (`OBJ*LOADTHUMBNAIL`).
+pub fn slot_thumbnail(machine: &Machine, slot: i32) -> Option<crate::surface::Surface> {
+    let bytes = slot_bytes(machine, slot)?;
+    let sections = slot_sections(&bytes).ok()?;
+    let (_, body) = sections.into_iter().find(|(name, _)| name == "thumbnail")?;
+    let mut r = Reader::new(body);
+    let (width, height) = (r.i32().ok()?, r.i32().ok()?);
+    let rgba = r.bytes().ok()?.to_vec();
+    (rgba.len() == (width.max(0) * height.max(0) * 4) as usize).then_some(crate::surface::Surface {
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// What RealLiveMax keeps with a save besides the game: three comments,
+/// the text on screen when it was made and some script values
+/// (`SET_SAVE_COMMENT*`, `GET_SAVE_MESSAGE`, `GET_SAVE_VALUE`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SlotExtra {
+    pub comments: [String; 3],
+    pub message: String,
+    pub values: Vec<i32>,
+}
+
+impl SlotExtra {
+    fn write(&self, w: &mut Writer) {
+        for comment in &self.comments {
+            w.str(comment);
+        }
+        w.str(&self.message);
+        w.i32s(&self.values);
+    }
+
+    fn read(r: &mut Reader) -> Result<Self> {
+        Ok(Self {
+            comments: [r.str()?, r.str()?, r.str()?],
+            message: r.str()?,
+            values: r.i32s()?,
+        })
+    }
+}
+
+/// The text of the page being read (`GET_SAVE_MESSAGE_NOW`).
+pub fn current_message(machine: &Machine) -> String {
+    machine.sys.text.current_page.lines.join("")
+}
+
+pub fn slot_extra(machine: &Machine, slot: i32) -> Option<SlotExtra> {
+    let bytes = slot_bytes(machine, slot)?;
+    let sections = slot_sections(&bytes).ok()?;
+    match sections.into_iter().find(|(name, _)| name == "extra") {
+        Some((_, body)) => SlotExtra::read(&mut Reader::new(body)).ok(),
+        None => Some(SlotExtra::default()),
+    }
+}
+
+fn write_slot_bytes(machine: &mut Machine, slot: i32, bytes: Vec<u8>) -> Result<()> {
+    if !machine.sys.options.persist {
+        machine.saved_in_memory.insert(slot, bytes);
+        return Ok(());
+    }
+    let path = slot_path(machine, slot);
+    std::fs::create_dir_all(path.parent().expect("slot files live in a directory"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Replaces the extra data of an existing save.
+pub fn set_slot_extra(machine: &mut Machine, slot: i32, extra: &SlotExtra) -> Result<()> {
+    let Some(bytes) = slot_bytes(machine, slot) else {
+        return Ok(());
+    };
+    let mut w = Writer::new();
+    w.bytes.extend_from_slice(SLOT_MAGIC);
+    for (name, body) in slot_sections(&bytes)? {
+        if name != "extra" {
+            w.str(&name);
+            w.bytes(body);
+        }
+    }
+    w.section("extra", |w| extra.write(w));
+    write_slot_bytes(machine, slot, w.bytes)
+}
+
+/// `DELETE_SAVEDATA`.
+pub fn delete_slot(machine: &mut Machine, slot: i32) -> Result<()> {
+    machine.saved_in_memory.remove(&slot);
+    let path = slot_path(machine, slot);
+    if machine.sys.options.persist && path.is_file() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// `COPY_SAVEDATA` / `SWAP_SAVEDATA`.
+pub fn copy_slot(machine: &mut Machine, from: i32, to: i32, swap: bool) -> Result<()> {
+    let source = slot_bytes(machine, from);
+    let dest = slot_bytes(machine, to);
+    match source {
+        Some(bytes) => write_slot_bytes(machine, to, bytes)?,
+        None => delete_slot(machine, to)?,
+    }
+    if swap {
+        match dest {
+            Some(bytes) => write_slot_bytes(machine, from, bytes)?,
+            None => delete_slot(machine, from)?,
+        }
+    }
+    Ok(())
+}
+
+/// The header of a slot, saved to disk or kept in memory.
+pub fn any_slot_header(machine: &Machine, slot: i32) -> Option<SaveHeader> {
+    read_header(&slot_bytes(machine, slot)?).ok()
 }
 
 fn slot_sections(bytes: &[u8]) -> Result<Vec<(String, &[u8])>> {
@@ -182,6 +326,20 @@ pub fn slot_memory(machine: &Machine, slot: i32) -> Option<LocalMemory> {
 }
 
 pub fn save_slot(machine: &mut Machine, slot: i32) -> Result<()> {
+    // Without `MAKE_THUMBNAIL`, the picture is the screen as it is now.
+    let made = machine.sys.gfx.thumbnail.is_some();
+    if !made {
+        let frame = crate::screen::compose_layers(&mut machine.sys, true);
+        machine.sys.gfx.thumbnail = Some(std::rc::Rc::new(frame));
+    }
+    let result = save_slot_inner(machine, slot);
+    if !made {
+        machine.sys.gfx.thumbnail = None;
+    }
+    result
+}
+
+fn save_slot_inner(machine: &mut Machine, slot: i32) -> Result<()> {
     if !machine.sys.options.persist {
         machine
             .saved_in_memory

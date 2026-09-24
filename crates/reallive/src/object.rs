@@ -345,6 +345,13 @@ pub enum Property {
     ClipH,
     ClipRight,
     ClipBottom,
+    /// The object's own clip (`objOwnEria` and friends), likewise.
+    OwnClipX,
+    OwnClipY,
+    OwnClipW,
+    OwnClipH,
+    OwnClipRight,
+    OwnClipBottom,
 }
 
 /// An unset clip, as a rectangle: large enough not to clip.
@@ -391,6 +398,12 @@ impl Property {
             Property::ClipH => p.clip.unwrap_or(NO_CLIP).h,
             Property::ClipRight => p.clip.unwrap_or(NO_CLIP).right(),
             Property::ClipBottom => p.clip.unwrap_or(NO_CLIP).bottom(),
+            Property::OwnClipX => p.own_clip.unwrap_or(NO_CLIP).x,
+            Property::OwnClipY => p.own_clip.unwrap_or(NO_CLIP).y,
+            Property::OwnClipW => p.own_clip.unwrap_or(NO_CLIP).w,
+            Property::OwnClipH => p.own_clip.unwrap_or(NO_CLIP).h,
+            Property::OwnClipRight => p.own_clip.unwrap_or(NO_CLIP).right(),
+            Property::OwnClipBottom => p.own_clip.unwrap_or(NO_CLIP).bottom(),
         }
     }
 
@@ -439,6 +452,22 @@ impl Property {
                     _ => r.h = value - r.y,
                 }
             }
+            Property::OwnClipX
+            | Property::OwnClipY
+            | Property::OwnClipW
+            | Property::OwnClipH
+            | Property::OwnClipRight
+            | Property::OwnClipBottom => {
+                let r = p.own_clip.get_or_insert(NO_CLIP);
+                match self {
+                    Property::OwnClipX => r.x = value,
+                    Property::OwnClipY => r.y = value,
+                    Property::OwnClipW => r.w = value,
+                    Property::OwnClipH => r.h = value,
+                    Property::OwnClipRight => r.w = value - r.x,
+                    _ => r.h = value - r.y,
+                }
+            }
         }
     }
 }
@@ -468,6 +497,10 @@ pub const CURVE_WAVE_AROUND: i32 = 1000;
 /// `CURVE_FLASH + n`: `n` damped pulses from the base towards base +
 /// amplitude and back.
 pub const CURVE_FLASH: i32 = 2000;
+/// `CURVE_BLINK + n`: `n` times base + amplitude, then base (on/off).
+pub const CURVE_BLINK: i32 = 3000;
+/// `CURVE_REPEAT + n`: `n` undamped trips to base + amplitude and back.
+pub const CURVE_REPEAT: i32 = 4000;
 
 impl Mutator {
     fn value_at(&self, from: i32, to: i32, now: u64) -> (i32, bool) {
@@ -479,15 +512,35 @@ impl Mutator {
             return (to, true);
         }
         let t = (now - begin) as f64 / f64::from(self.duration);
+        if self.curve >= CURVE_REPEAT {
+            let cycles = f64::from(self.curve - CURVE_REPEAT);
+            let phase = (t * cycles).fract();
+            let tri = 1.0 - (phase * 2.0 - 1.0).abs();
+            return (
+                (f64::from(from) + f64::from(to) * tri).round() as i32,
+                false,
+            );
+        }
+        if self.curve >= CURVE_BLINK {
+            let cycles = f64::from(self.curve - CURVE_BLINK);
+            let on = (t * cycles).fract() < 0.5;
+            return (if on { from + to } else { from }, false);
+        }
         if self.curve >= CURVE_FLASH {
             let cycles = f64::from(self.curve - CURVE_FLASH);
             let pulse = (t * cycles * std::f64::consts::PI).sin().abs() * (1.0 - t);
-            return ((f64::from(from) + f64::from(to) * pulse).round() as i32, false);
+            return (
+                (f64::from(from) + f64::from(to) * pulse).round() as i32,
+                false,
+            );
         }
         if self.curve >= CURVE_WAVE_AROUND {
             let cycles = f64::from(self.curve - CURVE_WAVE_AROUND);
             let wave = (t * cycles * std::f64::consts::TAU).sin() * (1.0 - t);
-            return ((f64::from(from) + f64::from(to) * wave).round() as i32, false);
+            return (
+                (f64::from(from) + f64::from(to) * wave).round() as i32,
+                false,
+            );
         }
         if self.curve == CURVE_WAVE {
             let wave = (t * f64::from(to) * std::f64::consts::TAU).sin() * (1.0 - t);
@@ -590,6 +643,16 @@ impl Object {
             animation: None,
             mutators: Vec::new(),
             text_cache: RefCell::new(None),
+        }
+    }
+
+    pub fn image_mut(&mut self) -> Option<&mut Rc<Image>> {
+        match self.data.as_mut()? {
+            ObjectData::File { image, .. }
+            | ObjectData::Gan { image, .. }
+            | ObjectData::Digits { image, .. }
+            | ObjectData::Drift { image, .. } => Some(image),
+            _ => None,
         }
     }
 

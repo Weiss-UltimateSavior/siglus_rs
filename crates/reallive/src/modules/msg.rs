@@ -25,7 +25,7 @@ pub fn textout(machine: &mut Machine, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn pause(machine: &mut Machine, kind: PauseKind) -> Next {
+pub(crate) fn pause(machine: &mut Machine, kind: PauseKind) -> Next {
     let op = PauseOp::new(machine, kind);
     machine.push_long_op(Box::new(op));
     Next::Advance
@@ -225,10 +225,69 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let slot = machine.int_param_or(command, 0, 0)?.clamp(0, 7) as usize;
             machine.sys.text.states[active].faces[slot] = None;
         }
+        // MESSAGE_SPEED(speed): this message's speed.
+        108 => machine.sys.text.speed_override = Some(machine.int_param(command, 0)?),
+        // MULTI_MESSAGE(window...): the text goes to the first window named.
+        112 => {
+            let window = machine.int_param(command, 0)?;
+            let count = machine.sys.text.states.len() as i32;
+            machine.sys.text.active = window.clamp(0, count - 1) as usize;
+        }
+        // SYSBTN_OPEN / _CLOSE([time]): the floating system buttons, which
+        // this interface does not have.
+        400 | 401 => {
+            machine
+                .sys
+                .remembered
+                .insert(SYSBTN, i32::from(command.op.opcode == 400));
+        }
+        // GET/SET_SYSBTN_PATNO_USER/_OWNER, GET_SYSBTN_PATMOD,
+        // SET_SYSBTN_PATMOD_USER/_OWNER/(mod), and the same for the
+        // full-screen backlog (502..509).
+        402..=409 | 502..=509 => {
+            let opcode = command.op.opcode;
+            let base = if opcode >= 500 {
+                MSGBK_PATTERNS
+            } else {
+                SYSBTN + 1
+            };
+            match opcode % 100 {
+                2 | 4 | 6 => {
+                    let key = base + (opcode % 100 - 2) / 2;
+                    machine.store = machine.sys.remembered.get(&key).copied().unwrap_or(0);
+                }
+                3 | 5 => {
+                    let value = machine.int_param(command, 0)?;
+                    machine
+                        .sys
+                        .remembered
+                        .insert(base + (opcode % 100 - 3) / 2, value);
+                }
+                // PATMOD: 0 the user's pattern, 1 the owner's.
+                7 => {
+                    machine.sys.remembered.insert(base + 2, 0);
+                }
+                8 => {
+                    machine.sys.remembered.insert(base + 2, 1);
+                }
+                _ => {
+                    let value = machine.int_param(command, 0)?;
+                    machine.sys.remembered.insert(base + 2, value);
+                }
+            }
+        }
+        // FLAGINDEX(var): a debugging aid of the original's message
+        // window; nothing to show here.
+        2000 => {}
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)
 }
+
+/// `remembered` keys: the system button bar's state, then its pattern
+/// numbers (user, owner) and mode; the full-screen backlog's patterns.
+const SYSBTN: u16 = 30400;
+const MSGBK_PATTERNS: u16 = 30500;
 
 /// Hides the text windows until the player clicks.
 #[derive(Debug)]

@@ -60,7 +60,18 @@ pub struct Input {
     pub keys_held: std::collections::BTreeSet<i32>,
     /// Key-table codes pressed since `CLEAR_KEYTABLE` cleared them.
     pub keys_pressed: std::collections::BTreeSet<i32>,
+    /// Wheel movement since `MOUSEWHEELCLEAR`: up negative, down positive.
+    pub wheel: i32,
+    /// Double clicks (left, right) since `DBLCLKCLEAR`, where they were.
+    pub double_clicks: [Option<(i32, i32)>; 2],
+    /// Time of the frame, for double-click detection (set by the engine).
+    pub now: u64,
+    /// The last press of each button: (time, position).
+    last_press: [Option<(u64, (i32, i32))>; 2],
 }
+
+/// Two presses within this many ms, close together, are a double click.
+const DOUBLE_CLICK_MS: u64 = 400;
 
 /// The key-table code of an input (`GET_KEYTABLE_DATA` and friends).
 ///
@@ -121,6 +132,25 @@ impl Input {
         }
         if let InputEvent::Press(button) = event {
             self.last_click = Some((self.mouse.0, self.mouse.1, button));
+            match button {
+                Button::WheelUp => self.wheel -= 1,
+                Button::WheelDown => self.wheel += 1,
+                Button::Left | Button::Right => {
+                    let side = usize::from(button == Button::Right);
+                    let here = self.mouse;
+                    let double = self.last_press[side].is_some_and(|(at, (x, y))| {
+                        self.now.saturating_sub(at) <= DOUBLE_CLICK_MS
+                            && (x - here.0).abs() <= 4
+                            && (y - here.1).abs() <= 4
+                    });
+                    if double {
+                        self.double_clicks[side] = Some(here);
+                        self.last_press[side] = None;
+                    } else {
+                        self.last_press[side] = Some((self.now, here));
+                    }
+                }
+            }
         }
         if let Some(code) = key_code(&event) {
             match event {

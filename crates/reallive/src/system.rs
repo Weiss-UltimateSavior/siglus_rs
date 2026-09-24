@@ -101,6 +101,17 @@ pub struct System {
     pub fade_out_requested: bool,
     /// The running selection, for the renderer.
     pub selection: Option<crate::select::Selection>,
+    /// RealLiveMax switches with no effect here, remembered for scripts
+    /// that read them back (see `modules::sys_max`).
+    pub remembered: std::collections::BTreeMap<u16, i32>,
+    /// `SET_MOUSEAREA`: the pointer is kept inside (x1, y1, x2, y2).
+    pub mouse_area: Option<(i32, i32, i32, i32)>,
+    /// The last voice played: (id, character) (`KOE_REPLAY`).
+    pub last_koe: (i32, i32),
+    /// `CCOM_SET_WINDOW_EXBTN_OFF`: extra window buttons hidden.
+    pub exbtn_hidden: std::collections::BTreeSet<usize>,
+    /// `#DATABASE.nnn` tables, loaded on first use (`None`: missing).
+    pub databases: std::collections::HashMap<i32, Option<Rc<siglus_assets::dbs::DbsDatabase>>>,
     /// Running `PCMEVENT_*` sound events, by number.
     pub pcm_events: std::collections::BTreeMap<i32, crate::pcm_event::PcmEvent>,
     /// A polled button-object selection (`select_btnobjstart`).
@@ -129,7 +140,14 @@ impl Default for System {
 impl System {
     pub fn new(gameexe: Rc<Gameexe>, root: PathBuf, options: SystemOptions) -> Self {
         let settings = Settings::from_gameexe(&gameexe);
+        let ctrl_key_skip = gameexe.int("CTRL_USE").unwrap_or(1) != 0;
         let resources = Resources::new(&root, &gameexe, options.nls);
+        let tone_curves = gameexe
+            .str("TONECURVE_FILENAME")
+            .filter(|name| !name.is_empty())
+            .and_then(|name| resources.read(crate::resource::Kind::Data, name))
+            .map(|bytes| crate::tone_curve::ToneCurves::parse(&bytes))
+            .unwrap_or_default();
         let wipe_closes_windows = gameexe.int("WAIP_WINDOWCLOSE").unwrap_or(0) != 0;
         let grp_closes_windows = gameexe.int("GRPCOM_WINDOWCLOSE").unwrap_or(0) != 0;
         let cg_table = gameexe
@@ -159,7 +177,10 @@ impl System {
         Self {
             sound,
             movie: None,
-            gfx: Graphics::new(&gameexe, fonts),
+            gfx: Graphics {
+                tone_curves,
+                ..Graphics::new(&gameexe, fonts)
+            },
             syscom: Syscom::from_gameexe(&gameexe),
             text: TextSystem::new(&gameexe),
             defaults: settings.clone(),
@@ -175,7 +196,7 @@ impl System {
             cursor_visible: true,
             mouse_cursor: 0,
             fast_forward: false,
-            ctrl_key_skip: true,
+            ctrl_key_skip,
             quit_requested: false,
             options,
             in_menu: false,
@@ -197,6 +218,11 @@ impl System {
             selection: None,
             polled_buttons: None,
             pcm_events: Default::default(),
+            remembered: Default::default(),
+            mouse_area: None,
+            last_koe: (-1, 0),
+            exbtn_hidden: Default::default(),
+            databases: Default::default(),
         }
     }
 
@@ -252,8 +278,13 @@ impl System {
     }
 
     /// Whether text and waits should be skipped right now.
+    /// Text, waits and transitions go by at once: the host's fast
+    /// forward, Ctrl held (`#CTRL_USE`), or skip mode over text already
+    /// read.
     pub fn should_fast_forward(&self) -> bool {
-        self.fast_forward || (self.ctrl_key_skip && self.input.ctrl)
+        self.fast_forward
+            || (self.ctrl_key_skip && self.input.ctrl)
+            || (self.syscom.skip_mode && self.syscom.skip_mode_allowed && self.text.kidoku_read())
     }
 
     pub fn take_savepoint(&mut self) {

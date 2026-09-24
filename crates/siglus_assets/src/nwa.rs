@@ -59,8 +59,9 @@ impl UnitCache {
     }
 }
 
-trait ReadSeek: Read + Seek {}
-impl<T: Read + Seek> ReadSeek for T {}
+// `Send` so a reader can decode on an audio streaming thread.
+trait ReadSeek: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ReadSeek for T {}
 
 /// NWA reader with random access by frame index.
 pub struct NwaReader {

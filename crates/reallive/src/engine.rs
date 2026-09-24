@@ -152,6 +152,15 @@ impl Engine {
     pub fn tick(&mut self, elapsed_ms: u64) {
         let machine = &mut self.machine;
         machine.sys.clock.advance(elapsed_ms);
+        machine.sys.input.now = machine.sys.clock.now();
+        if let Some((x1, y1, x2, y2)) = machine.sys.mouse_area {
+            let (x, y) = machine.sys.input.mouse;
+            let clamped = (x.clamp(x1, x2.max(x1)), y.clamp(y1, y2.max(y1)));
+            if clamped != (x, y) {
+                machine.sys.input.mouse = clamped;
+                machine.sys.warp_cursor = Some(clamped);
+            }
+        }
         for request in std::mem::take(&mut machine.sys.ui.requests) {
             match request {
                 Request::SyscomMenu => {
@@ -188,7 +197,7 @@ impl Engine {
         let Some((scene, entrypoint)) = machine.interrupt else {
             return;
         };
-        if machine.in_interrupt || machine.halted {
+        if machine.in_interrupt || machine.interrupt_suspended || machine.halted {
             return;
         }
         match machine.archive.scenario(scene) {

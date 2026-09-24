@@ -38,9 +38,15 @@ pub fn compose_layers(sys: &mut System, windows: bool) -> Surface {
     if let Some(hik) = &mut sys.gfx.hik {
         hik.render(&mut frame, now);
     }
+    if let Some(table) = sys.gfx.background_tone {
+        tone(sys, &mut frame, table);
+    }
     let object_offset = if layers.objects { offset } else { (0, 0) };
     sys.gfx
         .draw_objects_offset(&mut frame, now, show, object_offset);
+    if let Some(table) = sys.gfx.foreground_tone {
+        tone(sys, &mut frame, table);
+    }
     if windows {
         let window_offset = if layers.window { offset } else { (0, 0) };
         let text_offset = if layers.text { offset } else { (0, 0) };
@@ -48,6 +54,10 @@ pub fn compose_layers(sys: &mut System, windows: bool) -> Surface {
         crate::select::draw_buttons(sys, &mut frame);
     }
     frame
+}
+
+fn tone(sys: &mut System, frame: &mut Surface, table: usize) {
+    sys.gfx.tone_curves.apply_to(frame, table);
 }
 
 /// What the player sees this frame.
@@ -70,6 +80,24 @@ pub fn compose(sys: &mut System) -> Surface {
         );
         shaken.stretch_blit(&frame, frame.rect(), dest, 255, Blend::Copy);
         frame = shaken;
+    }
+    if let Some((percent, cx, cy)) = sys.gfx.screen_zoom
+        && percent > 0
+        && percent != 100
+    {
+        // The part of the screen that fills it, centred on (cx, cy).
+        let (w, h) = (frame.width * 100 / percent, frame.height * 100 / percent);
+        let x = (cx - w / 2).clamp(0, (frame.width - w).max(0));
+        let y = (cy - h / 2).clamp(0, (frame.height - h).max(0));
+        let mut zoomed = Surface::new(frame.width, frame.height);
+        zoomed.stretch_blit(
+            &frame,
+            Rect::new(x, y, w, h),
+            frame.rect(),
+            255,
+            Blend::Copy,
+        );
+        frame = zoomed;
     }
     if let Some(flash) = &sys.gfx.flash {
         let alpha = flash.alpha(now);

@@ -56,6 +56,17 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             }
         }
         3 => machine.push_long_op(Box::new(MovieWait { cancellable: false })),
+        // MOVWAITKEY: wait for the movie; a click ends it.
+        21 => machine.push_long_op(Box::new(MovieWait { cancellable: true })),
+        // SET_WMP_VOL / SET_WMP_STOP_MOD: settings of the Windows Media
+        // player the original used for some formats; remembered only.
+        1000 | 1001 => {
+            let value = machine.int_param(command, 0)?;
+            machine
+                .sys
+                .remembered
+                .insert(26000 + command.op.opcode, value);
+        }
         4 => machine.store = i32::from(machine.sys.movie.is_some()),
         5 => machine.sys.stop_movie(),
         _ => return machine.unimplemented(command),

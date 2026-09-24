@@ -76,6 +76,46 @@ impl ObjectRef {
 }
 
 /// A flash of colour over the screen or part of it.
+/// A background scroll to (x, y) (either may stay) over `time` ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HaikeiMove {
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub time: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HaikeiScroll {
+    pub from: (i32, i32),
+    pub to: (i32, i32),
+    pub start: u64,
+    pub time: u64,
+}
+
+impl HaikeiScroll {
+    pub fn start(from: (i32, i32), m: HaikeiMove, now: u64) -> Self {
+        Self {
+            from,
+            to: (m.x.unwrap_or(from.0), m.y.unwrap_or(from.1)),
+            start: now,
+            time: m.time,
+        }
+    }
+
+    pub fn at(&self, now: u64) -> (i32, i32) {
+        if self.time == 0 || now >= self.start + self.time {
+            return self.to;
+        }
+        let t = (now - self.start) as f64 / self.time as f64;
+        let lerp = |a: i32, b: i32| a + (f64::from(b - a) * t).round() as i32;
+        (lerp(self.from.0, self.to.0), lerp(self.from.1, self.to.1))
+    }
+
+    pub fn finished(&self, now: u64) -> bool {
+        now >= self.start + self.time
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flash {
     pub area: Option<Rect>,
@@ -87,6 +127,8 @@ pub struct Flash {
     pub count: u32,
     /// Fades out instead of cutting off.
     pub fade: bool,
+    /// Started by a `*PIKACHU*` (blink) command.
+    pub blink: bool,
 }
 
 impl Flash {
@@ -165,16 +207,38 @@ pub struct Graphics {
     /// `*GANANM_NEXT_*`: animations to start when the running one ends
     /// (a looping one at the end of its cycle): (object, when, animation).
     pub queued_animations: Vec<(ObjectRef, Option<u64>, crate::object::Animation)>,
+    /// `#TONECURVE_FILENAME` and which parts use which table
+    /// (`TONECURVE_*`).
+    pub tone_curves: crate::tone_curve::ToneCurves,
+    pub object_tones: HashMap<usize, usize>,
+    pub all_objects_tone: Option<usize>,
+    pub background_tone: Option<usize>,
+    pub foreground_tone: Option<usize>,
+    pub face_tone: Option<usize>,
     /// An animated HIK background shown over DC 0.
     pub hik: Option<crate::hik::HikRenderer>,
     /// `HAIKEI_SET_POS`: the background's scroll position.
     pub haikei_pos: (i32, i32),
+    /// The picture `bgrLoadHaikei` showed (redrawn when it scrolls).
+    pub haikei_image: Option<Rc<Image>>,
+    /// `HAIKEI_SCROLL_POS*`: the running scroll, those queued after it
+    /// (`_NEXT`) and those waiting for `_READY_SYNC`.
+    pub haikei_scroll: Option<HaikeiScroll>,
+    pub haikei_queue: Vec<HaikeiMove>,
+    pub haikei_ready: Vec<HaikeiMove>,
     /// A screen flash (`BOXFLUSH` and friends, module 1:41).
     pub flash: Option<Flash>,
     /// `CAPTURE*` without a bank: the last screen capture.
     pub capture: Option<Rc<Surface>>,
+    /// `MAKE_THUMBNAIL`: the picture the next save keeps.
+    pub thumbnail: Option<Rc<Surface>>,
+    /// `SET_SCREENZOOM*`: the screen magnified by a percentage around a
+    /// point.
+    pub screen_zoom: Option<(i32, i32, i32)>,
     /// `G00BUF_LOAD`: images kept in the cache, by buffer number.
     pub preloaded: HashMap<i32, (String, Rc<Image>)>,
+    /// Serial animations drawn onto DC 0 (module 1:34).
+    pub snm: crate::serial_pdt::SerialPdts,
     pub fonts: FontSet,
     pub snapshot: GraphicsSnapshot,
     /// Names of images loaded since the last query (CG tracking).
@@ -252,8 +316,21 @@ impl Graphics {
             flash: None,
             hik: None,
             haikei_pos: (0, 0),
+            tone_curves: Default::default(),
+            object_tones: HashMap::new(),
+            all_objects_tone: None,
+            background_tone: None,
+            foreground_tone: None,
+            face_tone: None,
             fonts,
             snapshot: GraphicsSnapshot::default(),
+            snm: Default::default(),
+            thumbnail: None,
+            haikei_image: None,
+            haikei_scroll: None,
+            haikei_queue: Vec::new(),
+            haikei_ready: Vec::new(),
+            screen_zoom: None,
             loaded_images: Vec::new(),
         }
     }
@@ -440,6 +517,7 @@ impl Graphics {
     /// without the wipe-copy flag are deleted and background objects move
     /// to the foreground.
     pub fn promote_objects(&mut self) {
+        self.snm.promote();
         for index in 0..OBJECT_COUNT {
             let background = self.bg[index].take();
             match background {
@@ -465,10 +543,61 @@ impl Graphics {
     }
 
     /// Advances animations and mutators.
+    /// Moves the background (`HAIKEI_*_POS`), redrawing a picture
+    /// background on DC 0.
+    pub fn set_haikei_pos(&mut self, pos: (i32, i32)) {
+        if pos == self.haikei_pos && self.hik.is_none() {
+            return;
+        }
+        self.haikei_pos = pos;
+        if let Some(hik) = &mut self.hik {
+            hik.offset = pos;
+        }
+        self.draw_haikei();
+    }
+
+    /// Draws the picture background onto DC 0 at the scroll position.
+    pub fn draw_haikei(&mut self) {
+        let Some(image) = self.haikei_image.clone() else {
+            return;
+        };
+        let (x, y) = self.haikei_pos;
+        if let Ok(dc0) = self.dc_mut(0) {
+            let rect = dc0.rect();
+            dc0.fill(rect, [0, 0, 0, 255], 255);
+            let src = Rect::new(x, y, rect.w, rect.h).intersect(&image.surface.rect());
+            dc0.blit(
+                &image.surface,
+                src,
+                src.x - x,
+                src.y - y,
+                255,
+                crate::surface::Blend::Mask,
+                None,
+            );
+        }
+    }
+
     pub fn update(&mut self, now: u64) {
         let mut changed = false;
         if self.hik.is_some() {
             changed = true;
+        }
+        if let Some(scroll) = self.haikei_scroll {
+            self.set_haikei_pos(scroll.at(now));
+            changed = true;
+            if scroll.finished(now) {
+                self.haikei_scroll = (!self.haikei_queue.is_empty())
+                    .then(|| HaikeiScroll::start(scroll.to, self.haikei_queue.remove(0), now));
+            }
+        }
+        if !self.snm.fg.is_empty() {
+            let mut snm = std::mem::take(&mut self.snm);
+            if let Ok(dc) = self.dc_mut(0) {
+                changed |= snm.update(dc, now);
+            }
+            snm.fg.retain(|_, s| !s.finished);
+            self.snm = snm;
         }
         if self.flash.as_ref().is_some_and(|flash| flash.finished(now)) {
             self.flash = None;
@@ -477,7 +606,9 @@ impl Graphics {
             changed = true;
         }
         for (r, due, mut animation) in std::mem::take(&mut self.queued_animations) {
-            let Ok(object) = self.object_mut(r) else { continue };
+            let Ok(object) = self.object_mut(r) else {
+                continue;
+            };
             let ready = match due {
                 Some(due) => now >= due,
                 None => !object.is_animating(),
@@ -584,7 +715,20 @@ impl Graphics {
                 continue;
             };
             ctx.now = self.paused_animations.get(&index).copied().unwrap_or(now);
-            if offset == (0, 0) {
+            let tone = self
+                .object_tones
+                .get(&index)
+                .copied()
+                .or(self.all_objects_tone);
+            if let Some(table) = tone {
+                let mut toned = object.clone();
+                if let Some(image) = toned.image_mut() {
+                    *image = self.tone_curves.apply(image, table);
+                }
+                toned.params.x += offset.0;
+                toned.params.y += offset.1;
+                toned.render(frame, &mut ctx, None);
+            } else if offset == (0, 0) {
                 object.render(frame, &mut ctx, None);
             } else {
                 let mut shifted = object.clone();
@@ -635,6 +779,11 @@ impl Graphics {
         self.transition_frame = None;
         self.interface_hidden = false;
         self.hik = None;
+        self.snm = Default::default();
+        self.haikei_image = None;
+        self.haikei_scroll = None;
+        self.haikei_queue.clear();
+        self.haikei_ready.clear();
         self.flash = None;
         self.dirty = true;
     }
@@ -827,6 +976,24 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod haikei_tests {
+    use super::*;
+
+    #[test]
+    fn scrolls_interpolate_and_keep_unnamed_axes() {
+        let m = HaikeiMove {
+            x: Some(100),
+            y: None,
+            time: 1000,
+        };
+        let scroll = HaikeiScroll::start((0, 40), m, 0);
+        assert_eq!(scroll.at(500), (50, 40));
+        assert_eq!(scroll.at(2000), (100, 40));
+        assert!(scroll.finished(1000));
+    }
 }
 
 #[cfg(test)]

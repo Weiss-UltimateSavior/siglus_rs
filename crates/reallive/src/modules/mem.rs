@@ -103,7 +103,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let keys_at = machine.int_target_param(command, 1)?;
             let keys = read_ints(machine, keys_at, count)?;
             let order = sorted_order(&keys, op.opcode == 200);
-            write_ints(machine, keys_at, &order.iter().map(|&i| keys[i]).collect::<Vec<_>>())?;
+            write_ints(
+                machine,
+                keys_at,
+                &order.iter().map(|&i| keys[i]).collect::<Vec<_>>(),
+            )?;
             let strings = matches!(overload, 1 | 3)
                 || (overload == 0 && command.params.get(2).is_some_and(|p| p.value.is_string()));
             let (source, dest) = if overload >= 2 { (2, 3) } else { (2, 2) };
@@ -120,7 +124,11 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 let from = machine.int_target_param(command, source)?;
                 let to = machine.int_target_param(command, dest)?;
                 let values = read_ints(machine, from, count)?;
-                write_ints(machine, to, &order.iter().map(|&i| values[i]).collect::<Vec<_>>())?;
+                write_ints(
+                    machine,
+                    to,
+                    &order.iter().map(|&i| values[i]).collect::<Vec<_>>(),
+                )?;
             }
         }
         // FLAGINDEXSORT_LARGE / _SMALL(count, keys[, dest[, first index]]):
@@ -139,6 +147,17 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
             let indices: Vec<i32> = order.iter().map(|&i| i as i32 + top).collect();
             write_ints(machine, dest, &indices)?;
         }
+        // FLAGCOPY_INDEX(source, source offset, dest, dest offset, count)
+        (5, _) => {
+            let source = machine.int_target_param(command, 0)?;
+            let source_shift = machine.int_param(command, 1)?;
+            let dest = machine.int_target_param(command, 2)?;
+            let dest_shift = machine.int_param(command, 3)?;
+            let count = machine.int_param_or(command, 4, 1)?.max(0) as usize;
+            let values = read_ints(machine, offset(source, source_shift), count)?;
+            write_ints(machine, offset(dest, dest_shift), &values)?;
+        }
+        (300..=307, _) => database(machine, command)?,
         _ => return machine.unimplemented(command),
     }
     Ok(Next::Advance)
@@ -181,7 +200,10 @@ fn read_ints(machine: &mut Machine, first: IntTarget, count: usize) -> Result<Ve
 }
 
 fn write_ints(machine: &mut Machine, first: IntTarget, values: &[i32]) -> Result<()> {
-    for (target, &value) in Machine::int_range(first, values.len()).into_iter().zip(values) {
+    for (target, &value) in Machine::int_range(first, values.len())
+        .into_iter()
+        .zip(values)
+    {
         machine.set_target(target, value)?;
     }
     Ok(())
@@ -192,4 +214,119 @@ fn offset_str(target: crate::machine::StrTarget, offset: usize) -> crate::machin
         index: target.index + offset as i32,
         ..target
     }
+}
+
+/// Database `number` (`#DATABASE.nnn = "name"`, the table in
+/// `dat/name.dbs`), loaded once.
+fn load_database(
+    machine: &mut Machine,
+    number: i32,
+) -> Option<std::rc::Rc<siglus_assets::dbs::DbsDatabase>> {
+    if let Some(loaded) = machine.sys.databases.get(&number) {
+        return loaded.clone();
+    }
+    let entry = machine
+        .gameexe
+        .get(&format!("DATABASE.{number:03}"))
+        .or_else(|| machine.gameexe.get(&format!("DATABASE.{number}")));
+    let name = entry.and_then(|e| e.str(0)).map(str::to_owned);
+    let loaded = name.and_then(|name| {
+        let resources = &machine.sys.resources;
+        let path = resources
+            .root_file(&format!("dat/{name}.dbs"))
+            .or_else(|| resources.root_file(&format!("{name}.dbs")))?;
+        match siglus_assets::dbs::DbsDatabase::load(&path) {
+            Ok(db) => Some(std::rc::Rc::new(db)),
+            Err(error) => {
+                machine.report(format!("database {name}: {error:#}"));
+                None
+            }
+        }
+    });
+    machine.sys.databases.insert(number, loaded.clone());
+    loaded
+}
+
+/// `DATABASEGET_NUM/_STR(db, item, column, var)`, `DATABASEGET(db, item,
+/// (column, var[, count])...)`, `DATABASECHECK_ITEM/_COLUMN`,
+/// `DATABASEFIND_NUM/_STR/_STR_REAL(db, column, value)`.
+fn database(machine: &mut Machine, command: &Command) -> Result<()> {
+    let opcode = command.op.opcode;
+    let number = machine.int_param(command, 0)?;
+    let db = load_database(machine, number);
+    match opcode {
+        300 | 301 => {
+            let item = machine.int_param(command, 1)?;
+            let column = machine.int_param(command, 2)?;
+            if opcode == 300 {
+                let value = match &db {
+                    Some(db) => db.get_data_int(item, column)?.unwrap_or(0),
+                    None => 0,
+                };
+                let target = machine.int_target_param(command, 3)?;
+                machine.set_target(target, value)?;
+            } else {
+                let value = match &db {
+                    Some(db) => db.get_data_str(item, column)?.unwrap_or_default(),
+                    None => String::new(),
+                };
+                let target = machine.str_target_param(command, 3)?;
+                machine.write_string(target, value)?;
+            }
+        }
+        302 => {
+            let item = machine.int_param(command, 1)?;
+            for index in 2..command.params.len() {
+                let pieces = machine.complex_param(command, index)?;
+                let [column, target, rest @ ..] = &pieces[..] else {
+                    continue;
+                };
+                let column = machine.eval_int(column)?;
+                let count = match rest.first() {
+                    Some(count) => machine.eval_int(count)?.max(0),
+                    None => 1,
+                };
+                if target.is_string() {
+                    let first = machine.str_target(target)?;
+                    for i in 0..count {
+                        let value = match &db {
+                            Some(db) => db.get_data_str(item, column + i)?.unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        machine.write_string(offset_str(first, i as usize), value)?;
+                    }
+                } else {
+                    let first = machine.int_target(target)?;
+                    for i in 0..count {
+                        let value = match &db {
+                            Some(db) => db.get_data_int(item, column + i)?.unwrap_or(0),
+                            None => 0,
+                        };
+                        machine.set_target(offset(first, i), value)?;
+                    }
+                }
+            }
+        }
+        303 | 304 => {
+            let value = machine.int_param(command, 1)?;
+            machine.store = match &db {
+                Some(db) if opcode == 303 => db.check_item_no(value),
+                Some(db) => db.check_column_no(value),
+                None => 0,
+            };
+        }
+        _ => {
+            let column = machine.int_param(command, 1)?;
+            machine.store = match (&db, opcode) {
+                (None, _) => -1,
+                (Some(db), 305) => {
+                    let value = machine.int_param(command, 2)?;
+                    db.find_num(column, value)?
+                }
+                (Some(db), 306) => db.find_str(column, &machine.str_param(command, 2)?)?,
+                (Some(db), _) => db.find_str_real(column, &machine.str_param(command, 2)?)?,
+            };
+        }
+    }
+    Ok(())
 }

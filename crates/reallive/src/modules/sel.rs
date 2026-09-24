@@ -50,26 +50,41 @@ pub fn dispatch(machine: &mut Machine, command: &Command) -> Result<Next> {
                 polled.finish(&mut machine.sys);
             }
         }
-        // select_btnobjstart(group[, ...])
-        22 => {
+        // select_btnobjstart(group) / _with_right_click(group)
+        22 | 122 => {
             let group = machine.int_param_or(command, 0, 0)?;
             if let Some(mut polled) = machine.sys.polled_buttons.take() {
                 polled.finish(&mut machine.sys);
             }
             let mut polled = crate::select::PolledButtons::new(group);
+            polled.right_click = command.op.opcode == 122;
             polled.update(&mut machine.sys);
             machine.sys.polled_buttons = Some(polled);
         }
         // select_btnobjnow_hit / select_btnobjnow_decide
         30 => {
-            machine.store = machine.sys.polled_buttons.as_ref().map_or(-1, |p| p.hovered());
+            machine.store = machine
+                .sys
+                .polled_buttons
+                .as_ref()
+                .map_or(-1, |p| p.hovered());
         }
-        32 => {
+        // select_btnobjnow_push (_left, _right) / _decide (_left, _right)
+        31 | 33 | 35 => {
+            let right = [None, Some(false), Some(true)][usize::from((command.op.opcode - 31) / 2)];
+            machine.store = machine
+                .sys
+                .polled_buttons
+                .as_ref()
+                .map_or(-1, |p| p.pushed(right));
+        }
+        32 | 34 | 36 => {
+            let right = [None, Some(false), Some(true)][usize::from((command.op.opcode - 32) / 2)];
             machine.store = machine
                 .sys
                 .polled_buttons
                 .as_mut()
-                .map_or(-1, crate::select::PolledButtons::take_decided);
+                .map_or(-1, |p| p.take_decided(right));
         }
         _ => return machine.unimplemented(command),
     }
