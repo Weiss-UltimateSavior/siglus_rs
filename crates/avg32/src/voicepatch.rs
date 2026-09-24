@@ -51,7 +51,7 @@ impl VoicePatch {
         let mut scenes: HashMap<i32, Option<Vec<u8>>> = HashMap::new();
         let mut best: Option<(usize, Vec<(i32, i32, u32)>)> = None;
         for directory in directories {
-            let Ok(entries) = std::fs::read_dir(&directory) else {
+            let Ok(entries) = game_fs::read_dir(&directory) else {
                 continue;
             };
             for entry in entries.flatten() {
@@ -59,7 +59,7 @@ impl VoicePatch {
                 if !(name.starts_with("voicepat") && name.ends_with(".txt")) {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(entry.path()) else {
+                let Ok(bytes) = game_fs::read(entry.path()) else {
                     continue;
                 };
                 let lines = parse(&crate::game::decode_text(&bytes));

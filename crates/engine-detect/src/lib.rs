@@ -14,8 +14,7 @@
 //! `Gameexe.ini`, falling back to the game root and `DAT/`.
 
 use std::fmt;
-use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -78,8 +77,8 @@ const REALLIVE_HEADER_SIZES: [u32; 2] = [0x1d0, 0x1cc];
 
 /// Detects the engine of the game installed at `root`.
 pub fn detect_game_root(root: impl AsRef<Path>) -> io::Result<GameLayout> {
-    let root = root.as_ref().canonicalize()?;
-    if !root.is_dir() {
+    let root = game_fs::canonicalize(root.as_ref())?;
+    if !game_fs::is_dir(&root) {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
             format!("{} is not a game directory", root.display()),
@@ -94,7 +93,7 @@ pub fn detect_game_root(root: impl AsRef<Path>) -> io::Result<GameLayout> {
         pdt_root: ["PDT", "DAT/PDT"]
             .into_iter()
             .find_map(|path| find_case_insensitive(&root, path))
-            .filter(|path| path.is_dir()),
+            .filter(|path| game_fs::is_dir(path)),
         uk2_config: find_case_insensitive(&root, "UK2.CFG"),
         evidence: Vec::new(),
         kind: EngineKind::Unknown,
@@ -172,8 +171,12 @@ fn classify(layout: &mut GameLayout) -> EngineKind {
 /// first.
 fn scenario_locations(root: &Path, gameexe: &Path) -> Vec<(PathBuf, String)> {
     let mut locations = Vec::new();
-    if let Some((folder, file)) = fs::read(gameexe).ok().and_then(|bytes| foldname(&bytes)) {
-        if let Some(directory) = find_case_insensitive(root, &folder).filter(|p| p.is_dir()) {
+    if let Some((folder, file)) = game_fs::read(gameexe)
+        .ok()
+        .and_then(|bytes| foldname(&bytes))
+    {
+        if let Some(directory) = find_case_insensitive(root, &folder).filter(|p| game_fs::is_dir(p))
+        {
             locations.push((directory, file.clone()));
         }
         locations.push((root.to_path_buf(), file));
@@ -182,7 +185,7 @@ fn scenario_locations(root: &Path, gameexe: &Path) -> Vec<(PathBuf, String)> {
         let directory = if directory.is_empty() {
             Some(root.to_path_buf())
         } else {
-            find_case_insensitive(root, directory).filter(|p| p.is_dir())
+            find_case_insensitive(root, directory).filter(|p| game_fs::is_dir(p))
         };
         if let Some(directory) = directory {
             locations.push((directory, "SEEN.TXT".to_owned()));
@@ -222,7 +225,7 @@ fn foldname(gameexe: &[u8]) -> Option<(String, String)> {
 }
 
 fn classify_seen_archive(path: &Path) -> EngineKind {
-    let Ok(data) = fs::read(path) else {
+    let Ok(data) = game_fs::read(path) else {
         return EngineKind::Unknown;
     };
     if data.starts_with(AVG32_ARCHIVE_MAGIC) {
@@ -256,7 +259,7 @@ fn classify_seen_archive(path: &Path) -> EngineKind {
 /// (AVG32 uses `SEEN###.TXT`, RealLive `SEEN####.TXT`).
 fn classify_loose_scenes(directory: &Path) -> Option<(EngineKind, String)> {
     let mut by_name = None;
-    for entry in fs::read_dir(directory).ok()?.flatten() {
+    for entry in game_fs::read_dir(directory).ok()?.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_ascii_uppercase) else {
             continue;
         };
@@ -267,7 +270,7 @@ fn classify_loose_scenes(directory: &Path) -> Option<(EngineKind, String)> {
         let Some(digits) = digits else {
             continue;
         };
-        let head = read_head(&entry.path(), 8);
+        let head = game_fs::read_head(entry.path(), 8);
         if head.starts_with(AVG32_SCENE_MAGIC) {
             return Some((EngineKind::Avg32, format!("{name} is a TPC32 scene")));
         }
@@ -293,24 +296,17 @@ fn classify_loose_scenes(directory: &Path) -> Option<(EngineKind, String)> {
 }
 
 fn find_file(directory: &Path, accept: impl Fn(&str, &[u8]) -> bool) -> Option<PathBuf> {
-    let mut entries: Vec<_> = fs::read_dir(directory).ok()?.flatten().collect();
+    let mut entries: Vec<_> = game_fs::read_dir(directory).ok()?.flatten().collect();
     entries.sort_by_key(|entry| entry.file_name());
     entries.into_iter().find_map(|entry| {
         let name = entry.file_name().to_str()?.to_ascii_uppercase();
         let path = entry.path();
-        path.is_file()
-            .then(|| read_head(&path, 32))
+        entry
+            .is_file()
+            .then(|| game_fs::read_head(&path, 32))
             .filter(|head| accept(&name, head))
             .map(|_| path)
     })
-}
-
-fn read_head(path: &Path, len: usize) -> Vec<u8> {
-    let mut head = Vec::with_capacity(len);
-    if let Ok(file) = fs::File::open(path) {
-        let _ = file.take(len as u64).read_to_end(&mut head);
-    }
-    head
 }
 
 /// Resolves a relative path one component at a time, ignoring ASCII case.
@@ -318,13 +314,16 @@ pub fn find_case_insensitive(directory: &Path, wanted: impl AsRef<Path>) -> Opti
     let mut current = directory.to_path_buf();
     for component in wanted.as_ref().components() {
         let wanted = component.as_os_str().to_str()?;
-        current = fs::read_dir(&current).ok()?.flatten().find_map(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .filter(|name| name.eq_ignore_ascii_case(wanted))
-                .map(|_| entry.path())
-        })?;
+        current = game_fs::read_dir(&current)
+            .ok()?
+            .flatten()
+            .find_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .filter(|name| name.eq_ignore_ascii_case(wanted))
+                    .map(|_| entry.path())
+            })?;
     }
     Some(current)
 }
@@ -361,6 +360,7 @@ fn strip_prefix_ignore_case<'a>(bytes: &'a [u8], prefix: &[u8]) -> Option<&'a [u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     struct TempDir(PathBuf);
 

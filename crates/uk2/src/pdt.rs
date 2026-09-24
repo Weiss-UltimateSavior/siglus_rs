@@ -87,12 +87,14 @@ impl Pdt34Header {
             .ok_or_else(|| anyhow::anyhow!("uk2: truncated PDT34 payload"))
     }
 
-    /// Returns the RGB 4-bit channels stored in each PC-98 palette word.
+    /// Returns the RGB 4-bit channels of a palette word.  PDT34 stores the
+    /// PC-98 analog palette order `0xGRB`, which `UK2.EXE` writes to the
+    /// hardware unchanged.
     pub fn palette_nibbles(&self, index: usize) -> Option<[u8; 3]> {
         let value = *self.palette.get(index)?;
         Some([
-            ((value >> 8) & 0x000f) as u8,
             ((value >> 4) & 0x000f) as u8,
+            ((value >> 8) & 0x000f) as u8,
             (value & 0x000f) as u8,
         ])
     }
@@ -281,8 +283,8 @@ fn unpack_indexed_to_rgba(indexed: &[u8], palette: &[u16; 16]) -> Vec<u8> {
     for &byte in indexed {
         for nibble in [byte >> 4, byte & 0x0f] {
             let colour = palette[usize::from(nibble)];
-            let red = (((colour >> 8) & 0x000f) * 0x11) as u8;
-            let green = (((colour >> 4) & 0x000f) * 0x11) as u8;
+            let red = (((colour >> 4) & 0x000f) * 0x11) as u8;
+            let green = (((colour >> 8) & 0x000f) * 0x11) as u8;
             let blue = ((colour & 0x000f) * 0x11) as u8;
             rgba.extend_from_slice(&[red, green, blue, 255]);
         }
@@ -331,10 +333,10 @@ mod tests {
     }
 
     #[test]
-    fn expands_palette_words_in_rgb_channel_order() {
+    fn expands_palette_words_in_grb_channel_order() {
         let indexed = [0x12, 0x30];
         let palette = [
-            0, 0x0f00, 0x00f0, 0x000f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0x00f0, 0x0f00, 0x000f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let rgba = unpack_indexed_to_rgba(&indexed, &palette);
         assert_eq!(

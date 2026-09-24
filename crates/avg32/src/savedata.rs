@@ -158,7 +158,7 @@ fn put_bits(bytes: &mut [u8], at: usize, bits: impl Iterator<Item = bool>) {
 }
 
 fn read_file(path: &Path) -> Vec<u8> {
-    std::fs::read(path).unwrap_or_default()
+    game_fs::read(path).unwrap_or_default()
 }
 
 /// Reads the global header (global flags and names).
@@ -223,9 +223,9 @@ pub fn save_global(
 
 fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        game_fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, bytes)?;
+    game_fs::write(path, bytes)?;
     Ok(())
 }
 
@@ -460,8 +460,8 @@ mod tests {
             assert_eq!(loaded.macros, data.macros);
             assert_eq!(list_slots(&path, version, 3)[2].title, b"test");
             assert!(!list_slots(&path, version, 3)[0].valid);
-            std::fs::remove_file(&path).unwrap();
+            game_fs::remove_file(&path).unwrap();
         }
-        let _ = std::fs::remove_dir_all(directory);
+        let _ = game_fs::remove_dir_all(directory);
     }
 }

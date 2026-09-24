@@ -230,8 +230,8 @@ fn write_slot_bytes(machine: &mut Machine, slot: i32, bytes: Vec<u8>) -> Result<
         return Ok(());
     }
     let path = slot_path(machine, slot);
-    std::fs::create_dir_all(path.parent().expect("slot files live in a directory"))?;
-    std::fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))
+    game_fs::create_dir_all(path.parent().expect("slot files live in a directory"))?;
+    game_fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Replaces the extra data of an existing save.
@@ -255,8 +255,8 @@ pub fn set_slot_extra(machine: &mut Machine, slot: i32, extra: &SlotExtra) -> Re
 pub fn delete_slot(machine: &mut Machine, slot: i32) -> Result<()> {
     machine.saved_in_memory.remove(&slot);
     let path = slot_path(machine, slot);
-    if machine.sys.options.persist && path.is_file() {
-        std::fs::remove_file(path)?;
+    if machine.sys.options.persist && game_fs::is_file(&path) {
+        game_fs::remove_file(path)?;
     }
     Ok(())
 }
@@ -311,13 +311,13 @@ pub fn read_header(bytes: &[u8]) -> Result<SaveHeader> {
 }
 
 pub fn slot_header(machine: &Machine, slot: i32) -> Option<SaveHeader> {
-    let bytes = std::fs::read(slot_path(machine, slot)).ok()?;
+    let bytes = game_fs::read(slot_path(machine, slot)).ok()?;
     read_header(&bytes).ok()
 }
 
 /// The local memory stored in a slot (`GetSaveFlag`).
 pub fn slot_memory(machine: &Machine, slot: i32) -> Option<LocalMemory> {
-    let bytes = std::fs::read(slot_path(machine, slot)).ok()?;
+    let bytes = game_fs::read(slot_path(machine, slot)).ok()?;
     let sections = slot_sections(&bytes).ok()?;
     let (_, body) = sections.into_iter().find(|(name, _)| name == "memory")?;
     let mut local = LocalMemory::default();
@@ -348,8 +348,8 @@ fn save_slot_inner(machine: &mut Machine, slot: i32) -> Result<()> {
         return Ok(());
     }
     let path = slot_path(machine, slot);
-    std::fs::create_dir_all(path.parent().expect("slot files live in a directory"))?;
-    std::fs::write(&path, serialize_slot(machine))
+    game_fs::create_dir_all(path.parent().expect("slot files live in a directory"))?;
+    game_fs::write(&path, serialize_slot(machine))
         .with_context(|| format!("failed to write {}", path.display()))?;
     machine.latest_save = slot;
     save_global(machine)?;
@@ -360,11 +360,11 @@ fn slot_bytes(machine: &Machine, slot: i32) -> Option<Vec<u8>> {
     if let Some(bytes) = machine.saved_in_memory.get(&slot) {
         return Some(bytes.clone());
     }
-    std::fs::read(slot_path(machine, slot)).ok()
+    game_fs::read(slot_path(machine, slot)).ok()
 }
 
 pub fn slot_exists(machine: &Machine, slot: i32) -> bool {
-    machine.saved_in_memory.contains_key(&slot) || slot_path(machine, slot).is_file()
+    machine.saved_in_memory.contains_key(&slot) || game_fs::is_file(slot_path(machine, slot))
 }
 
 /// Restores a serialized game. Execution resumes at the savepoint.
@@ -429,15 +429,15 @@ pub fn save_global(machine: &Machine) -> Result<()> {
     w.section("misc", |w| w.i32(machine.latest_save));
     w.section("settings", |w| crate::settings_io::write(w, &machine.sys));
     let path = global_path(machine);
-    std::fs::create_dir_all(path.parent().expect("a directory"))?;
-    std::fs::write(&path, w.bytes).with_context(|| format!("failed to write {}", path.display()))
+    game_fs::create_dir_all(path.parent().expect("a directory"))?;
+    game_fs::write(&path, w.bytes).with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn load_global(machine: &mut Machine) -> Result<()> {
     if !machine.sys.options.persist {
         return Ok(());
     }
-    let Ok(bytes) = std::fs::read(global_path(machine)) else {
+    let Ok(bytes) = game_fs::read(global_path(machine)) else {
         return Ok(());
     };
     let body = bytes

@@ -55,8 +55,14 @@ impl TrueTypeFont {
 
     /// A Japanese system font, preferring `AVG32_FONT` when it is set.
     pub fn load_system() -> Option<Self> {
+        if let Some(font) = game_fs::host_fonts()
+            .into_iter()
+            .find_map(|bytes| Self::from_bytes(bytes.as_ref().clone()))
+        {
+            return Some(font);
+        }
         if let Some(path) = std::env::var_os("AVG32_FONT") {
-            if let Some(font) = std::fs::read(path).ok().and_then(Self::from_bytes) {
+            if let Some(font) = game_fs::read(path).ok().and_then(Self::from_bytes) {
                 return Some(font);
             }
         }
@@ -85,7 +91,8 @@ impl TrueTypeFont {
         ];
         CANDIDATES
             .iter()
-            .find_map(|path| std::fs::read(path).ok().and_then(Self::from_bytes))
+            .chain(game_fs::ANDROID_CJK_FONTS)
+            .find_map(|path| game_fs::read(path).ok().and_then(Self::from_bytes))
     }
 }
 

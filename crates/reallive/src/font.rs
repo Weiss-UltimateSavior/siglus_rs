@@ -94,18 +94,21 @@ impl FontSet {
     /// separator) followed by the system CJK fonts.
     pub fn load_system() -> Self {
         let mut faces = Vec::new();
+        for bytes in game_fs::host_fonts() {
+            faces.extend(load_faces(bytes.as_ref().clone()));
+        }
         if let Some(paths) = std::env::var_os("REALLIVE_FONT") {
             for path in std::env::split_paths(&paths) {
-                if let Ok(bytes) = std::fs::read(&path) {
+                if let Ok(bytes) = game_fs::read(&path) {
                     faces.extend(load_faces(bytes));
                 }
             }
         }
-        for path in CANDIDATES {
+        for path in CANDIDATES.iter().chain(game_fs::ANDROID_CJK_FONTS) {
             if faces.len() >= 4 {
                 break;
             }
-            if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(bytes) = game_fs::read(path) {
                 faces.extend(load_faces(bytes));
             }
         }

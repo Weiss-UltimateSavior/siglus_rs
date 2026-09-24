@@ -265,7 +265,7 @@ still needs further work.
 
 All 350 Sorcer Kingdom `.PDT` files in the supplied directory begin with `0x34`. The next 32 bytes decode as sixteen little-endian 12-bit palette values. This format remains separate from AVG32/RealLive `PDT10`/`PDT11`.
 
-The display path is recovered from `sub_22893`, `sub_226B7`, and `sub_225BE`. `sub_22893` consumes the tag byte before calling the image decoder. The 32-byte palette block is followed by RLE marker bytes at file offsets `0x21` and `0x22`, four little-endian rectangle bounds at `0x23..0x2b`, then four planar streams beginning at `0x2b`. Each plane stores byte-columns and pairs of scanlines; the PC-98 display buffer is 640x400. The Rust decoder uses this layout and decodes all 350 supplied PDT files. Palette words use `0xRGB` nibble order: the animation/palette routine at `sub_1FCFD` extracts red from bits 8..11, green from bits 4..7, blue from bits 0..3, then rebuilds the same 12-bit order.
+The display path is recovered from `sub_22893`, `sub_226B7`, and `sub_225BE`. `sub_22893` consumes the tag byte before calling the image decoder. The 32-byte palette block is followed by RLE marker bytes at file offsets `0x21` and `0x22`, four little-endian rectangle bounds at `0x23..0x2b`, then four planar streams beginning at `0x2b`. Each plane stores byte-columns and pairs of scanlines; the PC-98 display buffer is 640x400. The Rust decoder uses this layout and decodes all 350 supplied PDT files. Palette words use the PC-98 analog palette order `0xGRB` (green in bits 8..11, red in bits 4..7, blue in bits 0..3): `sub_1F676` writes them to ports AAh/ACh/AEh in that order without reordering, and `COLOR.TBL` banks use the same layout.
 
 ## Engine port
 

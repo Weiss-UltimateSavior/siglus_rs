@@ -50,7 +50,7 @@ impl Avg32Engine {
         let clock = if options.virtual_clock {
             Clock::Virtual(0)
         } else {
-            Clock::Real(std::time::Instant::now())
+            Clock::Real(web_time::Instant::now())
         };
         let mut sys = System::new(game, clock, options.audio, options.persist);
         let start = sys.ini().start_seen;

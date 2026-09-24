@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		02B4B35B608C17973C53C4D6 /* SiglusPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B313075C32E13167F16B56E9 /* SiglusPlayer.swift */; };
+		F1A0B0C0D0E0F0A1B2C3D4E5 /* FramebufferPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2A0B0C0D0E0F0A1B2C3D4E5 /* FramebufferPlayer.swift */; };
 		1BC69CE053E2ACBB2FA7AAE9 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 58FE75882FD0F00C6477395C /* VideoToolbox.framework */; };
 		256DD044475200FC9C221618 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 229A730085517A1E83012985 /* Foundation.framework */; };
 		2C1A28F0CDF554371E7C52B4 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9B714A8596CA8065862E9855 /* MetalKit.framework */; };
@@ -45,6 +46,7 @@
 		9B714A8596CA8065862E9855 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		A54BDC18677C609E8F765EFF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		B313075C32E13167F16B56E9 /* SiglusPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiglusPlayer.swift; sourceTree = "<group>"; };
+		F2A0B0C0D0E0F0A1B2C3D4E5 /* FramebufferPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FramebufferPlayer.swift; sourceTree = "<group>"; };
 		B646B7A9799FC24D2FA7369F /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		BA676DC74FF028E765F24EF1 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		BCB412A196863B560C1D96B0 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
@@ -103,6 +105,7 @@
 				A54BDC18677C609E8F765EFF /* Info.plist */,
 				1AA1C5F7D0A43111585108D3 /* LaunchScreen.storyboard */,
 				2708E589433DDE9B0661BE70 /* SiglusLauncherApp.swift */,
+				F2A0B0C0D0E0F0A1B2C3D4E5 /* FramebufferPlayer.swift */,
 				B313075C32E13167F16B56E9 /* SiglusPlayer.swift */,
 				79CAFC35F8C8A1848255373F /* ZipImporter.swift */,
 			);
@@ -233,6 +236,7 @@
 				E065699C398006FD7312A324 /* ContentView.swift in Sources */,
 				BFF0C06124C62313E05CE318 /* GameLibrary.swift in Sources */,
 				D26C74BC89684A4F42AAD061 /* SiglusLauncherApp.swift in Sources */,
+				F1A0B0C0D0E0F0A1B2C3D4E5 /* FramebufferPlayer.swift in Sources */,
 				02B4B35B608C17973C53C4D6 /* SiglusPlayer.swift in Sources */,
 				46FD465F9360F7E2CFACC84D /* ZipImporter.swift in Sources */,
 			);

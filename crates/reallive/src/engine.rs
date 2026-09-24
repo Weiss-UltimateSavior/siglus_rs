@@ -56,7 +56,7 @@ impl EngineOptions {
 /// A file in `dir` by case-insensitive name.
 fn find_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
     let wanted = name.to_ascii_lowercase();
-    std::fs::read_dir(dir)
+    game_fs::read_dir(dir)
         .ok()?
         .flatten()
         .find(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase() == wanted)

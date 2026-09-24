@@ -6,8 +6,10 @@ ANDROID_DIR="${ROOT_DIR}/platform/android"
 APP_DIR="${ANDROID_DIR}/app"
 JNI_LIBS_DIR="${APP_DIR}/src/main/jniLibs"
 
-SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
-SIGLUS_RUST_LIB_NAME="${SIGLUS_RUST_LIB_NAME:-siglus_scene_vm}"
+# The app library package. Deliberately not SIGLUS_CARGO_PKG: CI sets that to
+# siglus_scene_vm for the desktop binary builds.
+LAUNCHER_CARGO_PKG="${LAUNCHER_CARGO_PKG:-game_launcher}"
+SIGLUS_RUST_LIB_NAME="${SIGLUS_RUST_LIB_NAME:-${LAUNCHER_CARGO_PKG}}"
 SIGLUS_SO_NAME="${SIGLUS_SO_NAME:-siglus}"
 ANDROID_PLATFORM="${ANDROID_PLATFORM:-28}"
 VARIANT="${VARIANT:-debug}"
@@ -76,10 +78,10 @@ pushd "${ROOT_DIR}" >/dev/null
 echo "[android] Building Rust shared library via cargo ndk ..."
 cargo ndk $(for abi in ${ABIS}; do printf -- "-t %s " "${abi}"; done) \
   -o "${JNI_LIBS_DIR}" \
-  build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} -p "${SIGLUS_CARGO_PKG}"
+  build ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} -p "${LAUNCHER_CARGO_PKG}"
 popd >/dev/null
 
-# Cargo outputs lib${SIGLUS_RUST_LIB_NAME}.so for the siglus_scene_vm package.
+# Cargo outputs lib${SIGLUS_RUST_LIB_NAME}.so for the game_launcher package.
 # The Android Java side intentionally loads the stable ABI name libsiglus.so.
 for abi in ${ABIS}; do
   src="${JNI_LIBS_DIR}/${abi}/lib${SIGLUS_RUST_LIB_NAME}.so"

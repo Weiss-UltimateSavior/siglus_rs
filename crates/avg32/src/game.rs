@@ -46,11 +46,11 @@ impl Avg32Game {
             .as_ref()
             .expect("AVG32 layout has Gameexe.ini");
         let gameexe = decode_text(
-            &std::fs::read(gameexe_path)
+            &game_fs::read(gameexe_path)
                 .with_context(|| format!("failed to read {}", gameexe_path.display()))?,
         );
         let setup = find_case_insensitive(&layout.root, Path::new("SETUP.INI"))
-            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|path| game_fs::read(path).ok())
             .map(|bytes| decode_text(&bytes));
         let ini = Ini::parse(&gameexe, setup.as_deref());
         let resources = Avg32Resources::from_ini(&layout.root, &ini);
@@ -77,7 +77,7 @@ impl Avg32Game {
                 }
             }
         }
-        let mut names: Vec<String> = std::fs::read_dir(&route.directory)
+        let mut names: Vec<String> = game_fs::read_dir(&route.directory)
             .into_iter()
             .flatten()
             .flatten()

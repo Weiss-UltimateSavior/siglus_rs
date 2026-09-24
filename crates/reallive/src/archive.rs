@@ -47,8 +47,8 @@ pub struct Archive {
 impl Archive {
     /// Opens `SEEN.TXT` (it may be missing when only loose files exist).
     pub fn open(path: &Path, regname: &str, nls: Nls) -> Result<Self> {
-        let data = if path.is_file() {
-            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?
+        let data = if game_fs::is_file(path) {
+            game_fs::read(path).with_context(|| format!("failed to read {}", path.display()))?
         } else {
             Vec::new()
         };
@@ -65,7 +65,7 @@ impl Archive {
             }
         }
         if let Some(directory) = path.parent() {
-            if let Ok(listing) = std::fs::read_dir(directory) {
+            if let Ok(listing) = game_fs::read_dir(directory) {
                 for entry in listing.flatten() {
                     let name = entry.file_name().to_string_lossy().to_ascii_uppercase();
                     if name.len() == 12
@@ -156,7 +156,7 @@ impl Archive {
         {
             Source::Packed { offset, length } => Ok(self.data[*offset..offset + length].to_vec()),
             Source::Loose(path) => {
-                std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+                game_fs::read(path).with_context(|| format!("failed to read {}", path.display()))
             }
         }
     }
@@ -212,7 +212,7 @@ mod tests {
             return;
         };
         let root = Path::new(&root);
-        let Some(seen) = std::fs::read_dir(root)
+        let Some(seen) = game_fs::read_dir(root)
             .ok()
             .into_iter()
             .flatten()
@@ -225,7 +225,7 @@ mod tests {
         else {
             return;
         };
-        let ini = std::fs::read_dir(root)
+        let ini = game_fs::read_dir(root)
             .unwrap()
             .flatten()
             .map(|entry| entry.path())

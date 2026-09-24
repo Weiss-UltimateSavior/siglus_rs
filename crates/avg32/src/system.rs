@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Instant;
+use web_time::Instant;
 
 use crate::animation::Avg32Animation;
 use crate::buffer::{AVG32_HEIGHT, AVG32_WIDTH, SCREEN_H, SCREEN_W};
@@ -341,8 +341,7 @@ pub fn detect_version(ini: &Ini, root: &std::path::Path) -> i32 {
     }
     let size = |name: &str| {
         crate::resource::find_case_insensitive(root, std::path::Path::new(name))
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
+            .and_then(|path| game_fs::file_len(path).ok())
     };
     if let Some(size) = size("AVG3217D.EXE") {
         return if size >= 330_000 { 1714 } else { 1704 };

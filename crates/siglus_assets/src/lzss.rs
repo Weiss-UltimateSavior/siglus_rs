@@ -39,7 +39,8 @@ pub fn lzss_unpack(src: &[u8]) -> Result<Vec<u8>> {
     }
 
     let mut pos = payload_start;
-    let mut out: Vec<u8> = Vec::with_capacity(org_size);
+    // The header size is untrusted: reserve no more than the input can expand to.
+    let mut out: Vec<u8> = Vec::with_capacity(org_size.min(src.len().saturating_mul(18)));
 
     while out.len() < org_size {
         if pos >= payload_end {
@@ -122,7 +123,8 @@ pub fn lzss_unpack_lenient(src: &[u8]) -> Result<Vec<u8>> {
     let payload_end = arc_size.min(src.len());
 
     let mut pos = payload_start;
-    let mut out: Vec<u8> = Vec::with_capacity(org_size);
+    // The header size is untrusted: reserve no more than the input can expand to.
+    let mut out: Vec<u8> = Vec::with_capacity(org_size.min(src.len().saturating_mul(18)));
 
     while out.len() < org_size {
         if pos >= payload_end {
@@ -206,7 +208,8 @@ pub fn lzss_unpack32(src: &[u8]) -> Result<Vec<u8>> {
     }
 
     let mut pos = payload_start;
-    let mut out: Vec<u8> = Vec::with_capacity(org_size);
+    // The header size is untrusted: reserve no more than the input can expand to.
+    let mut out: Vec<u8> = Vec::with_capacity(org_size.min(src.len().saturating_mul(18)));
 
     while out.len() < org_size {
         if pos >= payload_end {

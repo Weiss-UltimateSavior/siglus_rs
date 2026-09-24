@@ -56,7 +56,7 @@ impl std::fmt::Debug for Movie {
 /// frames are padded to whole macroblocks).
 fn stream_info(path: &Path) -> (f64, Option<(i32, i32)>) {
     let mut head = vec![0; 64 * 1024];
-    let read = std::fs::File::open(path)
+    let read = game_fs::open(path)
         .and_then(|mut f| f.read(&mut head))
         .unwrap_or(0);
     let header = siglus_assets::mpeg2::find_sequence_header(&head[..read]);
@@ -72,9 +72,9 @@ fn stream_info(path: &Path) -> (f64, Option<(i32, i32)>) {
 
 fn spawn_video(path: PathBuf, stop: Arc<AtomicBool>) -> Receiver<VideoFrame> {
     let (tx, rx) = sync_channel(4);
-    std::thread::spawn(move || {
+    run_worker(move || {
         let (per_frame, size) = stream_info(&path);
-        let Ok(mut file) = std::fs::File::open(&path) else {
+        let Ok(mut file) = game_fs::open(&path) else {
             return;
         };
         let mut pipeline = na_mpeg2_decoder::MpegVideoPipeline::new();
@@ -119,8 +119,8 @@ fn spawn_video(path: PathBuf, stop: Arc<AtomicBool>) -> Receiver<VideoFrame> {
 
 fn spawn_audio(path: PathBuf, stop: Arc<AtomicBool>) -> Receiver<Option<Pcm>> {
     let (tx, rx) = sync_channel(1);
-    std::thread::spawn(move || {
-        let Ok(mut file) = std::fs::File::open(&path) else {
+    run_worker(move || {
+        let Ok(mut file) = game_fs::open(&path) else {
             let _ = tx.send(None);
             return;
         };
@@ -149,6 +149,15 @@ fn spawn_audio(path: PathBuf, stop: Arc<AtomicBool>) -> Receiver<Option<Pcm>> {
         let _ = tx.send((!pcm.samples.is_empty()).then_some(pcm));
     });
     rx
+}
+
+/// Movies decode on worker threads.  The browser build has none, so there
+/// the worker is dropped and the movie ends as soon as it starts.
+fn run_worker(work: impl FnOnce() + Send + 'static) {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    std::thread::spawn(work);
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    drop(work);
 }
 
 impl Movie {

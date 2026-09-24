@@ -139,6 +139,11 @@ This project is non-commercial and intended for research purposes.
 | Android | arm64-v8a, x86_64 |
 | WebAssembly | wasm32-unknown-unknown |
 
+The app launchers (macOS bundle, iOS, Android, WebAssembly) import one game or
+many games at once, detect the engine (SiglusEngine, RealLive, AVG32, UK2),
+show cover art or the game icon, and let you pick the text encoding for
+non-Siglus games. See [crates/game_launcher](crates/game_launcher/README.md).
+
 ## Pre-built binaries
 * See preview releases on [GitHub Releases](https://github.com/xmoezzz/siglus_rs/releases)
 

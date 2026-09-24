@@ -30,8 +30,9 @@ typealias SiglusMessageboxCallback = @convention(c) (
     UnsafePointer<CChar>?
 ) -> Void
 
-@_silgen_name("siglus_run_entry")
-private func siglus_run_entry(_ gameRootUtf8: UnsafePointer<CChar>) -> Int32
+/// Runs any supported engine; SiglusEngine games go to the Siglus host.
+@_silgen_name("game_run_entry")
+private func game_run_entry(_ gameRootUtf8: UnsafePointer<CChar>, _ nls: UnsafePointer<CChar>?) -> Int32
 
 @_silgen_name("siglus_pump_set_native_messagebox_callback")
 private func siglus_pump_set_native_messagebox_callback(
@@ -162,7 +163,7 @@ final class LauncherHost {
         let hosting = NSHostingView(rootView: rootView)
 
         self.window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 1040, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -220,7 +221,10 @@ final class LauncherHost {
 
     func runGame(_ game: GameEntry) -> Int32 {
         return game.rootPath.withCString { gameC in
-            siglus_run_entry(gameC)
+            if let nls = game.nls {
+                return nls.withCString { game_run_entry(gameC, $0) }
+            }
+            return game_run_entry(gameC, nil)
         }
     }
 }
@@ -248,9 +252,9 @@ struct SiglusLauncherMain {
             return
         }
 
-        print("[launcher] -> siglus_run_entry(game_root=\(game.rootPath)); NSApp.isRunning=\(NSApp.isRunning)")
+        print("[launcher] -> game_run_entry(game_root=\(game.rootPath), engine=\(game.engine), nls=\(game.nls ?? "-")); NSApp.isRunning=\(NSApp.isRunning)")
         let rc = host.runGame(game)
-        print("[launcher] <- siglus_run_entry returned \(rc); exiting process")
+        print("[launcher] <- game_run_entry returned \(rc); exiting process")
 
         // IMPORTANT:
         // We do NOT return to the launcher UI after a game finishes.

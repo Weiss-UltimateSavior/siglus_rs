@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 #[cfg(not(target_os = "horizon"))]
-use std::time::Instant;
+use web_time::Instant;
 
 #[cfg(not(target_os = "horizon"))]
 use anyhow::Context;

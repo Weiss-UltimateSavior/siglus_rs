@@ -163,8 +163,8 @@ impl System {
         let seed = if options.virtual_clock {
             0x853c_49e6_748f_ea9b
         } else {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map_or(1, |d| d.as_nanos() as u64)
                 | 1
         };

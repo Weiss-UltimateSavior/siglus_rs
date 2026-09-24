@@ -11,8 +11,10 @@ HDR_DIR="$IOS_DIR/Headers"
 VENDOR_DIR="$IOS_DIR/Vendor"
 OUT_XCF="$VENDOR_DIR/Siglus.xcframework"
 
-SIGLUS_CARGO_PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
-RUST_LIB_NAME="${RUST_LIB_NAME:-siglus_scene_vm}" # cargo output: lib${RUST_LIB_NAME}.a
+# The app library package. Deliberately not SIGLUS_CARGO_PKG: CI sets that to
+# siglus_scene_vm for the desktop binary builds.
+LAUNCHER_CARGO_PKG="${LAUNCHER_CARGO_PKG:-game_launcher}"
+RUST_LIB_NAME="${RUST_LIB_NAME:-${LAUNCHER_CARGO_PKG}}" # cargo output: lib${RUST_LIB_NAME}.a
 LIB_NAME="${LIB_NAME:-siglus}" # xcframework public library name: lib${LIB_NAME}.a
 
 TGT_IOS="aarch64-apple-ios"
@@ -35,8 +37,8 @@ rustup target add "$TGT_SIM" >/dev/null 2>&1 || true
 
 echo "[ios-xcf] Building Rust static libs..."
 pushd "$ROOT_DIR" >/dev/null
-cargo build --release -p "$SIGLUS_CARGO_PKG" --target "$TGT_IOS"
-cargo build --release -p "$SIGLUS_CARGO_PKG" --target "$TGT_SIM"
+cargo build --release -p "$LAUNCHER_CARGO_PKG" --target "$TGT_IOS"
+cargo build --release -p "$LAUNCHER_CARGO_PKG" --target "$TGT_SIM"
 popd >/dev/null
 
 LIB_IOS_RUST_A="$ROOT_DIR/target/$TGT_IOS/release/lib${RUST_LIB_NAME}.a"
@@ -47,7 +49,7 @@ LIB_SIM_A="$TMP_LIB_DIR/ios-arm64-simulator/lib${LIB_NAME}.a"
 
 if [[ ! -f "$LIB_IOS_RUST_A" ]]; then
   echo "ERROR: Missing iOS static lib: $LIB_IOS_RUST_A" >&2
-  echo "Hint: ensure siglus_scene_vm outputs staticlib for iOS." >&2
+  echo "Hint: ensure ${LAUNCHER_CARGO_PKG} outputs staticlib for iOS." >&2
   exit 1
 fi
 if [[ ! -f "$LIB_SIM_RUST_A" ]]; then

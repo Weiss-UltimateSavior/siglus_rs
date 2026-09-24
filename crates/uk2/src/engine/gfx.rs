@@ -444,7 +444,8 @@ impl Engine {
     /// position `x`, line `y`.  Returns 1 for a half-width character.
     pub fn draw_glyph(&mut self, text: &[u8], x: i32, y: i32, colour: u16, bold: i32) -> u16 {
         let c = text.first().copied().unwrap_or(0);
-        let half = c < 0x80 || (0xa0..0xc0).contains(&c);
+        let foreign = c == super::font::FOREIGN_GLYPH && text.len() >= 3;
+        let half = !foreign && (c < 0x80 || (0xa0..0xc0).contains(&c));
         self.set_w(GLYPH_HALF, u16::from(half));
         let mut glyph = [0u8; 32];
         if half && self.mem.d(ANK_FONT) != 0 {
@@ -460,6 +461,8 @@ impl Engine {
         } else if half {
             // ANK ROM fallback (only reachable before kana.pdt1 is loaded).
             glyph[..16].fill(0);
+        } else if foreign {
+            glyph = self.foreign_glyph(text[1], text[2]);
         } else {
             let trail = text.get(1).copied().unwrap_or(0);
             glyph = self.kanji.sjis_glyph(c, trail);

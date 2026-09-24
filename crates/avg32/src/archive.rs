@@ -24,7 +24,7 @@ pub struct PaclArchive {
 impl PaclArchive {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path)
+        let bytes = game_fs::read(path)
             .with_context(|| format!("failed to read AVG32 PACL archive {}", path.display()))?;
         Self::from_bytes(bytes)
     }

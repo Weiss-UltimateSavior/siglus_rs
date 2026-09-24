@@ -94,6 +94,48 @@ void siglus_pump_destroy(SiglusPumpHandle *handle);
 int32_t siglus_run_entry(const char *game_root_utf8);
 #endif
 
+/* ---------------------------------------------------------------------------
+ * Multi-engine launcher API (game_launcher): SiglusEngine, RealLive, AVG32
+ * and UK2.  Returned strings are UTF-8 JSON or text; free them with
+ * game_string_free.  RealLive/AVG32/UK2 games are hosted frame by frame
+ * through game_fb_*; SiglusEngine games keep using the siglus_* host API.
+ * ------------------------------------------------------------------------- */
+void game_string_free(char *ptr);
+/* One game folder: {"id","root","engine","engine_name","supported",
+ * "unsupported_reason","title","cover","cover_kind","nls","nls_options",
+ * "evidence"}.  nls and cover_cache_dir may be NULL. */
+char *game_probe_json(const char *root_utf8, const char *nls, const char *cover_cache_dir_utf8);
+/* Every game at or below path (depth folder levels), as a JSON array. */
+char *game_scan_json(const char *path_utf8, int32_t depth, const char *cover_cache_dir_utf8);
+/* Registers a font file for game text (e.g. the system CJK font). 0 = ok. */
+int32_t game_add_font_file(const char *path_utf8);
+
+typedef struct GameFbHandle GameFbHandle;
+/* engine: "reallive", "avg32", "uk2" or NULL to detect; nls: "sjis", "gbk",
+ * "big5", "utf8", "western", "korean", "auto" or NULL (Shift-JIS). */
+GameFbHandle *game_fb_open(const char *root_utf8, const char *engine, const char *nls, char **error_out);
+/* 0 while running, 1 once the game has ended. */
+int32_t game_fb_step(GameFbHandle *game, uint32_t dt_ms);
+/* Tightly packed RGBA8 frame, valid until the next call on the handle. */
+const uint8_t *game_fb_frame(GameFbHandle *game, uint32_t *width, uint32_t *height);
+void game_fb_pointer_move(GameFbHandle *game, int32_t x, int32_t y);
+/* button: 0 left, 1 right. */
+void game_fb_pointer_button(GameFbHandle *game, int32_t button, int32_t pressed);
+void game_fb_wheel(GameFbHandle *game, int32_t up);
+/* 1 Enter, 2 Escape, 3 Space, 4 Up, 5 Down, 6 Left, 7 Right, 8 PageUp,
+ * 9 PageDown, 10 Home, 11 End, 12 Backspace, 13 Tab, 14 Ctrl, 15 Shift,
+ * 0x100+n F-n, 0x10000+c Unicode character c. */
+void game_fb_key(GameFbHandle *game, uint32_t code, int32_t pressed);
+void game_fb_text(GameFbHandle *game, const char *text_utf8);
+int32_t game_fb_cursor_visible(GameFbHandle *game);
+const char *game_fb_title(GameFbHandle *game);
+void game_fb_close(GameFbHandle *game);
+
+#if defined(__APPLE__) && TARGET_OS_MAC && !TARGET_OS_IPHONE
+/* Runs any supported game in its own window until it ends (main thread). */
+int32_t game_run_entry(const char *root_utf8, const char *nls);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,7 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLATFORM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$PLATFORM_DIR/.." && pwd)"
 
-PKG="${SIGLUS_CARGO_PKG:-siglus_scene_vm}"
+# The app library package. Deliberately not SIGLUS_CARGO_PKG: CI sets that to
+# siglus_scene_vm for the desktop binary builds.
+PKG="${LAUNCHER_CARGO_PKG:-game_launcher}"
 WASM_BINDGEN_TARGET="${WASM_BINDGEN_TARGET:-web}"
 WASM_BINDGEN_VERSION="0.2.111"
 DIST="$ROOT_DIR/dist/wasm"
