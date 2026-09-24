@@ -226,6 +226,9 @@ impl Engine {
     /// J3/load restart.
     pub fn run(&mut self) -> Result<()> {
         self.init()?;
+        if let Some(name) = self.start_override.take() {
+            self.mem.strcpy_bytes(ds_ptr(NEXT_MES_NAME), &name);
+        }
         loop {
             let name = self.mem.cstr(ds_ptr(NEXT_MES_NAME));
             match self.call_mes(&name) {

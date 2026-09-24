@@ -244,6 +244,8 @@ fn main() -> Result<()> {
     let mut out = PathBuf::from(".");
     let mut limit = 20_000u64;
     let mut trace = false;
+    let mut trace_mes = false;
+    let mut start = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--script" => {
@@ -253,6 +255,8 @@ fn main() -> Result<()> {
             "--out" => out = PathBuf::from(args.next().context("--out DIR")?),
             "--ticks" => limit = args.next().context("--ticks N")?.parse()?,
             "--trace" => trace = true,
+            "--trace-mes" => trace_mes = true,
+            "--start" => start = Some(args.next().context("--start NAME")?.into_bytes()),
             other => bail!("unknown option {other}"),
         }
     }
@@ -268,6 +272,8 @@ fn main() -> Result<()> {
     let game = Uk2Game::open(&root)?;
     let mut engine = Engine::new(game, Box::new(platform))?;
     engine.trace = trace;
+    engine.trace_mes = trace_mes;
+    engine.start_override = start;
     let result = engine.run();
     engine.present();
     let _ = save_png(&out.join("final.png"), &{

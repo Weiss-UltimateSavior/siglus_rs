@@ -67,7 +67,7 @@ The older format modules are still available and are used by `uk2_verify`:
 
 ```text
 uk2_player <game-directory>                 desktop player (wgpu + winit + kira)
-uk2_run <game-directory> [--script FILE] [--out DIR] [--ticks N] [--trace]
+uk2_run <game-directory> [--script FILE] [--out DIR] [--ticks N] [--trace|--trace-mes] [--start NAME]
 uk2_music <score.MMM> <out.wav> [seconds]   render a PMD score to WAV
 uk2_disasm <file.MES>
 uk2_verify <game-directory> [--assets|--boot-menu|--boot-path=N|--stats]

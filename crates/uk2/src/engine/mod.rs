@@ -135,6 +135,10 @@ pub struct Engine {
     quit: bool,
     last_present_tick: u64,
     pub trace: bool,
+    /// Log every MES file the interpreter enters.
+    pub trace_mes: bool,
+    /// Debugging aid: MES file to run instead of the configured `START`.
+    pub start_override: Option<Vec<u8>>,
     pub instruction_count: u64,
     pub max_instructions: Option<u64>,
     pending_music: VecDeque<MusicCommand>,
@@ -170,6 +174,8 @@ impl Engine {
             quit: false,
             last_present_tick: 0,
             trace: false,
+            trace_mes: false,
+            start_override: None,
             instruction_count: 0,
             max_instructions: None,
             pending_music: VecDeque::new(),

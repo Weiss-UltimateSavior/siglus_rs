@@ -537,6 +537,13 @@ impl Engine {
         let locals = self.mem.alloc(LOCAL_TABLE_SIZE);
         self.mem.set_d(LOCAL_TABLE, locals);
         let saved_name = self.mem.cstr(ds_ptr(CUR_MES_NAME));
+        if self.trace_mes {
+            eprintln!(
+                "[tick {}] mes {}",
+                self.w(TICKS),
+                String::from_utf8_lossy(&trim_name(name))
+            );
+        }
         self.mem
             .strcpy_bytes(ds_ptr(CUR_MES_NAME), &trim_name(name));
         let stack = self.w(MES_STACK).wrapping_add(len);
