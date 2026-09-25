@@ -137,6 +137,7 @@ This project is non-commercial and intended for research purposes.
 | iOS | arm64 device, arm64 simulator, x86_64 simulator |
 | Android | arm64-v8a, x86_64 |
 | WebAssembly | wasm32-unknown-unknown |
+| PS Vita | armv7 |
 
 The app launchers (macOS bundle, iOS, Android, WebAssembly) import one game or
 many games at once, detect the engine (SiglusEngine, RealLive, AVG32, UK2),
@@ -148,7 +149,7 @@ non-Siglus games. See [crates/game_launcher](crates/game_launcher/README.md).
 
 ## Documentation Availability
 * API documentation is available at [docs](https://xmoezzz.github.io/siglus_rs/)
-* [PS Vita port roadmap](platform/vita/ROADMAP.md) — planned milestones and validation criteria; Vita support is not yet implemented.
+* [PS Vita port](platform/vita/README.md) — experimental SiglusEngine player (`siglus-psvita.vpk` on the releases page); installing it and a game is described there. [Roadmap](platform/vita/ROADMAP.md).
 
 ## Run
 

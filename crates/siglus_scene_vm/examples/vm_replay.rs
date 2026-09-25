@@ -58,6 +58,10 @@ fn main() -> Result<()> {
         .filter(|&n| n >= 3)
         .unwrap_or(20);
     let mut vm_time = std::time::Duration::ZERO;
+    let new_images = std::env::var_os("VM_REPLAY_NEW_IMAGES").is_some();
+    let slow_us: Option<u64> = std::env::var("VM_REPLAY_SLOW_US")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let mut content_hashes = std::collections::HashMap::<(u32, u64), u64>::new();
     let dump_frame = std::env::var("VM_REPLAY_DUMP")
         .ok()
@@ -70,7 +74,19 @@ fn main() -> Result<()> {
         let waited = std::time::Duration::from_nanos(
             siglus_scene_vm::movie::OMV_SETTLE_NS.swap(0, std::sync::atomic::Ordering::Relaxed),
         );
-        vm_time += start.elapsed().saturating_sub(waited);
+        let spent = start.elapsed().saturating_sub(waited);
+        vm_time += spent;
+        // `VM_REPLAY_SLOW_US=<us>`: report the frames that took longer.
+        if let Some(limit) = slow_us
+            && spent.as_micros() as u64 >= limit
+        {
+            eprintln!(
+                "slow frame {frame}: {} us at {:?}:{}",
+                spent.as_micros(),
+                vm.current_scene_name(),
+                vm.current_line_no()
+            );
+        }
         match frame % click_every {
             0 => {
                 vm.ctx.on_mouse_move(960, 540);
@@ -100,6 +116,35 @@ fn main() -> Result<()> {
         );
         for item in sprites {
             let sprite = &item.sprite;
+            // `VM_REPLAY_NEW_IMAGES` also names the sprites the Vita GPU
+            // path cannot draw (it then composites the frame on the CPU).
+            if new_images && sprite.visible {
+                let reason = if sprite.mesh_kind != 0 {
+                    "mesh"
+                } else if sprite.emote_render.is_some() {
+                    "emote"
+                } else if sprite.mask_image_id.is_some() {
+                    "mask"
+                } else if sprite.tonecurve_image_id.is_some() {
+                    "tonecurve"
+                } else if sprite.wipe_src_image_id.is_some() {
+                    "wipe-src"
+                } else if matches!(sprite.blend, siglus_scene_vm::layer::SpriteBlend::Overlay) {
+                    "overlay"
+                } else if sprite.wipe_fx_mode != 0 || sprite.mask_mode != 0 {
+                    "effect"
+                } else {
+                    ""
+                };
+                if !reason.is_empty() {
+                    eprintln!(
+                        "cpu reason frame {frame} {reason} {:?}:{} {:?}",
+                        vm.current_scene_name(),
+                        vm.current_line_no(),
+                        sprite.image_id.as_ref().and_then(|h| vm.ctx.images.debug_image_info(h)).and_then(|i| i.source_path)
+                    );
+                }
+            }
             for handle in [
                 &sprite.image_id,
                 &sprite.mask_image_id,
@@ -120,6 +165,16 @@ fn main() -> Result<()> {
                 .images
                 .debug_image_info(&handle)
                 .map_or(0, |info| info.version);
+            // `VM_REPLAY_NEW_IMAGES`: report each new image version drawn.
+            if new_images && !content_hashes.contains_key(&(key, version)) {
+                let size = vm.ctx.images.get(&handle).map(|i| (i.width, i.height));
+                eprintln!(
+                    "new image frame {frame} key {key} v{version} {size:?} {:?}:{} {:?}",
+                    vm.current_scene_name(),
+                    vm.current_line_no(),
+                    vm.ctx.images.debug_image_info(&handle)
+                );
+            }
             let content = *content_hashes.entry((key, version)).or_insert_with(|| {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 if let Some(image) = vm.ctx.images.get(&handle) {

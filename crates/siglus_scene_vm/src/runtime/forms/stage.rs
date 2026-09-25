@@ -3911,7 +3911,10 @@ fn dispatch_embedded_object_child_item_op(
         )
     };
 
-    ctx.globals.current_object_chain = prev_chain;
+    // The chain being replaced is recycled (see `IntVecPool`).
+    if let Some(used) = std::mem::replace(&mut ctx.globals.current_object_chain, prev_chain) {
+        ctx.int_vec_pool.give(used);
+    }
     ctx.globals.current_stage_object = prev_stage_object;
 
     let child_after = &mut parent.runtime.child_objects[child_u];
@@ -4101,7 +4104,10 @@ fn dispatch_embedded_object_item_op(
         ctx.globals.current_stage_object
     );
 
-    ctx.globals.current_object_chain = prev_chain;
+    // The chain being replaced is recycled (see `IntVecPool`).
+    if let Some(used) = std::mem::replace(&mut ctx.globals.current_object_chain, prev_chain) {
+        ctx.int_vec_pool.give(used);
+    }
     ctx.globals.current_stage_object = prev_stage_object;
 
     if let Some(slot) = original_nested_runtime_slot {
@@ -7946,8 +7952,7 @@ fn dispatch_object_state_op(
             // actions address object children thousands of times a frame.
             let prev_chain = match ctx.globals.current_object_chain.as_deref() {
                 Some(chain) => {
-                    let mut prefix = Vec::with_capacity(chain.len() + 3);
-                    prefix.extend_from_slice(chain);
+                    let mut prefix = ctx.int_vec_pool.take_copy(chain);
                     prefix.extend([
                         crate::runtime::forms::codes::elm_value::OBJECT_CHILD,
                         ctx.ids.elm_array,
@@ -8007,7 +8012,11 @@ fn dispatch_object_state_op(
                     ctx.globals.current_stage_object
                 );
             }
-            ctx.globals.current_object_chain = prev_chain;
+            // The chain being replaced is recycled (see `IntVecPool`).
+            if let Some(used) = std::mem::replace(&mut ctx.globals.current_object_chain, prev_chain)
+            {
+                ctx.int_vec_pool.give(used);
+            }
             ctx.globals.current_stage_object = prev_stage_object;
             if handled {
                 return true;
@@ -15781,7 +15790,12 @@ pub fn dispatch(ctx: &mut CommandContext, args: &[Value]) -> Result<bool> {
                         rhs,
                         al_id,
                     );
-                    ctx.globals.current_object_chain = prev_chain;
+                    // The chain being replaced is recycled (see `IntVecPool`).
+                    if let Some(used) =
+                        std::mem::replace(&mut ctx.globals.current_object_chain, prev_chain)
+                    {
+                        ctx.int_vec_pool.give(used);
+                    }
                     handled
                 } else if child == crate::runtime::forms::codes::STAGE_ELM_OBJBTNGROUP {
                     dispatch_group_item_op(

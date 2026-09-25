@@ -29,6 +29,7 @@ pub mod mesh3d;
 pub mod movie;
 pub mod original_save;
 pub mod render_math;
+pub(crate) mod render_plan;
 pub mod resource;
 pub mod runtime;
 pub mod text_render;
@@ -48,8 +49,11 @@ pub use siglus_assets as formats;
 
 #[cfg(not(any(target_os = "horizon", target_os = "vita")))]
 pub mod render;
-#[cfg(any(target_os = "horizon", target_os = "vita"))]
+#[cfg(target_os = "horizon")]
 #[path = "render/switch.rs"]
+pub mod render;
+#[cfg(target_os = "vita")]
+#[path = "render/vita/mod.rs"]
 pub mod render;
 
 pub mod input;

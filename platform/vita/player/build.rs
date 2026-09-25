@@ -18,4 +18,10 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=static={library}");
     }
+    // vita-elf-create appends the module's SCE tables (a few KiB) to the
+    // code segment; VitaSDK's linker script leaves `__sce_headroom` bytes
+    // for them before the 64 KiB-aligned data segment. Without it a build
+    // whose code happened to end just below a 64 KiB boundary failed with
+    // "segment 1 overlaps".
+    println!("cargo:rustc-link-arg=-Wl,--defsym=__sce_headroom=0x4000");
 }

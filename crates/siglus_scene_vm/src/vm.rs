@@ -2852,7 +2852,10 @@ impl<'a> SceneVm<'a> {
         obj: &crate::runtime::globals::ObjectState,
         stage_idx: i64,
         obj_idx: usize,
-        object_chain: Vec<i32>,
+        // Extended and truncated in place while descending: most objects
+        // (particles) have no frame action, and a copy per child per frame
+        // added up.
+        object_chain: &mut Vec<i32>,
         out: &mut Vec<FrameActionWork>,
     ) {
         let fa = &obj.frame_action;
@@ -2900,17 +2903,20 @@ impl<'a> SceneVm<'a> {
             // every allocated child slot therefore has use_flag=true even when
             // its current type is NONE.  Recurse over the list itself instead
             // of treating ObjectState::used as C_elm_object::is_use().
-            let mut child_chain = object_chain.clone();
-            child_chain.push(crate::runtime::forms::codes::elm_value::OBJECT_CHILD);
-            child_chain.push(crate::runtime::forms::codes::ELM_ARRAY);
-            child_chain.push(child_idx as i32);
+            let depth = object_chain.len();
+            object_chain.extend([
+                crate::runtime::forms::codes::elm_value::OBJECT_CHILD,
+                crate::runtime::forms::codes::ELM_ARRAY,
+                child_idx as i32,
+            ]);
             Self::collect_object_frame_action_work_recursive(
                 child,
                 stage_idx,
                 child_idx,
-                child_chain,
+                object_chain,
                 out,
             );
+            object_chain.truncate(depth);
         }
     }
 
@@ -3730,7 +3736,7 @@ impl<'a> SceneVm<'a> {
                     {
                         continue;
                     }
-                    let object_chain = vec![
+                    let mut object_chain = vec![
                         form_id as i32,
                         self.ctx.ids.elm_array,
                         stage_idx as i32,
@@ -3742,7 +3748,7 @@ impl<'a> SceneVm<'a> {
                         obj,
                         stage_idx,
                         obj_idx,
-                        object_chain,
+                        &mut object_chain,
                         &mut work,
                     );
                 }
@@ -3756,7 +3762,7 @@ impl<'a> SceneVm<'a> {
                 };
                 for (mwnd_idx, mwnd) in mwnds.iter().enumerate() {
                     for (obj_idx, obj) in mwnd.button_list.iter().enumerate() {
-                        let object_chain = vec![
+                        let mut object_chain = vec![
                             form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
@@ -3771,12 +3777,12 @@ impl<'a> SceneVm<'a> {
                             obj,
                             stage_idx,
                             obj_idx,
-                            object_chain,
+                            &mut object_chain,
                             &mut work,
                         );
                     }
                     for (obj_idx, obj) in mwnd.face_list.iter().enumerate() {
-                        let object_chain = vec![
+                        let mut object_chain = vec![
                             form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
@@ -3791,12 +3797,12 @@ impl<'a> SceneVm<'a> {
                             obj,
                             stage_idx,
                             obj_idx,
-                            object_chain,
+                            &mut object_chain,
                             &mut work,
                         );
                     }
                     for (obj_idx, obj) in mwnd.object_list.iter().enumerate() {
-                        let object_chain = vec![
+                        let mut object_chain = vec![
                             form_id as i32,
                             self.ctx.ids.elm_array,
                             stage_idx as i32,
@@ -3811,7 +3817,7 @@ impl<'a> SceneVm<'a> {
                             obj,
                             stage_idx,
                             obj_idx,
-                            object_chain,
+                            &mut object_chain,
                             &mut work,
                         );
                     }
@@ -4861,7 +4867,7 @@ impl<'a> SceneVm<'a> {
                 self.int_stack.len()
             );
         }
-        let elm = self.int_stack[start..].to_vec();
+        let elm = self.ctx.int_vec_pool.take_copy(&self.int_stack[start..]);
         self.int_stack.truncate(start);
         vm_trace!(self, None, format!("pop_element -> {:?}", elm));
         Ok(elm)
@@ -5375,8 +5381,10 @@ impl<'a> SceneVm<'a> {
                 _,
             ) => return Ok(false),
             _ => {
-                let element = prop.element.clone();
-                self.push_element(element);
+                // As `push_element`, copying straight from the call frame.
+                self.element_points.push(self.int_stack.len());
+                self.int_stack
+                    .extend_from_slice(&self.call_stack[frame].user_props[prop_idx].element);
             }
         }
         Ok(true)
@@ -6763,16 +6771,20 @@ impl<'a> SceneVm<'a> {
                 self.int_stack.len()
             );
         }
-        let slice = self.int_stack[start..].to_vec();
-        if self.sg_mwnd_object_trace_enabled() && Self::sg_mwnd_chain_interesting(&slice) {
+        let end = self.int_stack.len();
+        if self.sg_mwnd_object_trace_enabled()
+            && Self::sg_mwnd_chain_interesting(&self.int_stack[start..])
+        {
             self.sg_mwnd_object_trace_emit(format_args!(
                 "COPY_ELM slice={:?} before_current_chain={:?} before_current_stage_object={:?}",
-                slice, self.ctx.globals.current_object_chain, self.ctx.globals.current_stage_object
+                &self.int_stack[start..],
+                self.ctx.globals.current_object_chain,
+                self.ctx.globals.current_stage_object
             ));
         }
-        self.element_points.push(self.int_stack.len());
-        self.int_stack.extend_from_slice(&slice);
-        vm_trace!(self, None, format!("COPY_ELM copied {:?}", slice));
+        self.element_points.push(end);
+        self.int_stack.extend_from_within(start..end);
+        vm_trace!(self, None, format!("COPY_ELM copied {:?}", &self.int_stack[end..]));
         Ok(())
     }
 
@@ -7749,28 +7761,35 @@ impl<'a> SceneVm<'a> {
 
         let form_id = self.canonical_runtime_form_id(head as u32);
         let args: Vec<Value> = Vec::new();
-        self.ctx.vm_call = Some(runtime::VmCallMeta {
-            element: elm.clone(),
-            al_id: 0,
-            ret_form: self.cfg.fm_int as i64,
-        });
-
         vm_trace!(
             self,
             None,
             format!("exec_property dispatch form_id={} elm={:?}", form_id, elm),
         );
-        if !runtime::dispatch_form_code(&mut self.ctx, form_id, &args)? {
-            self.ctx.vm_call = None;
+        // The element moves into the call metadata and comes back after the
+        // dispatch (a dispatch error leaves the metadata as it was).
+        self.ctx.vm_call = Some(runtime::VmCallMeta {
+            element: elm,
+            al_id: 0,
+            ret_form: self.cfg.fm_int as i64,
+        });
+        let handled = runtime::dispatch_form_code(&mut self.ctx, form_id, &args)?;
+        let elm = self
+            .ctx
+            .vm_call
+            .take()
+            .map(|meta| meta.element)
+            .unwrap_or_default();
+        if !handled {
             bail!("unhandled form property chain {:?}", elm);
         }
 
-        self.ctx.vm_call = None;
         if let Some(v) = self.ctx.pop() {
             self.push_return_value_raw(v);
         } else {
             bail!("property chain returned no value: {:?}", elm);
         }
+        self.ctx.int_vec_pool.give(elm);
 
         Ok(())
     }
@@ -7941,16 +7960,22 @@ impl<'a> SceneVm<'a> {
             );
         }
         self.ctx.vm_call = Some(runtime::VmCallMeta {
-            element: elm.clone(),
+            element: elm,
             al_id: al_id as i64,
             ret_form: 0,
         });
 
-        if !runtime::dispatch_form_code(&mut self.ctx, form_id, &args)? {
-            self.ctx.vm_call = None;
+        let handled = runtime::dispatch_form_code(&mut self.ctx, form_id, &args)?;
+        let elm = self
+            .ctx
+            .vm_call
+            .take()
+            .map(|meta| meta.element)
+            .unwrap_or_default();
+        if !handled {
             bail!("unhandled form assignment chain {:?}", elm);
         }
-        self.ctx.vm_call = None;
+        self.ctx.int_vec_pool.give(elm);
         self.ctx.stack.clear();
         self.drain_pending_frame_action_finishes()?;
         Ok(())
@@ -8079,6 +8104,18 @@ impl<'a> SceneVm<'a> {
     fn exec_command(
         &mut self,
         elm: Vec<i32>,
+        al_id: i32,
+        ret_form: i32,
+        args: &mut Vec<Value>,
+    ) -> Result<()> {
+        let result = self.exec_command_element(&elm, al_id, ret_form, args);
+        self.ctx.int_vec_pool.give(elm);
+        result
+    }
+
+    fn exec_command_element(
+        &mut self,
+        elm: &[i32],
         al_id: i32,
         ret_form: i32,
         args: &mut Vec<Value>,
@@ -8233,7 +8270,7 @@ impl<'a> SceneVm<'a> {
 
                 let op_id = if elm.len() >= 2 { elm[1] } else { al_id };
                 self.ctx.vm_call = Some(runtime::VmCallMeta {
-                    element: elm.clone(),
+                    element: self.ctx.int_vec_pool.take_copy(elm),
                     al_id: al_id as i64,
                     ret_form: ret_form as i64,
                 });
@@ -8263,11 +8300,13 @@ impl<'a> SceneVm<'a> {
 
                 self.sg_omv_trace_command("dispatch", &elm, form_id, op_id, al_id, ret_form, args);
 
-                if !runtime::dispatch_form_code(&mut self.ctx, form_id as u32, args)? {
-                    self.ctx.vm_call = None;
+                let handled = runtime::dispatch_form_code(&mut self.ctx, form_id as u32, args);
+                if let Some(call) = self.ctx.vm_call.take() {
+                    self.ctx.int_vec_pool.give(call.element);
+                }
+                if !handled? {
                     bail!("unhandled form command chain {:?}", elm);
                 }
-                self.ctx.vm_call = None;
                 self.drain_pending_frame_action_finishes()?;
             }
             elm_code::ELM_OWNER_USER_CMD | elm_code::ELM_OWNER_CALL_CMD => {

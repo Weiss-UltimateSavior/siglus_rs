@@ -63,6 +63,7 @@ kira = { version = "0.9", default-features = false, features = ["mp3", "ogg", "f
 
 [target.'cfg(target_os = "vita")'.dependencies]
 kira = { version = "0.9", default-features = false, features = ["mp3", "ogg", "flac", "wav"] }
+vitasdk-sys = { version = "=0.3.3", default-features = false, features = ["SceGxm_stub", "SceSysmem_stub"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk-context = "0.1.1"

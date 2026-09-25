@@ -2649,6 +2649,7 @@ dependencies = [
  "siglus_omv_decoder",
  "ttf-parser",
  "ureq",
+ "vitasdk-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

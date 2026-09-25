@@ -5,9 +5,6 @@ fn main() {
     eprintln!("siglus_vita_player must be built with cargo-vita for PS Vita");
 }
 
-#[cfg(target_os = "vita")]
-mod gpu;
-
 // newlib's default heap is too small for decoded images, transition
 // captures and video. The heap is reserved whole at startup, in extended
 // memory mode (cargo-vita sets ATTRIBUTE2=12). With a 256 MiB heap about
@@ -150,13 +147,12 @@ mod vita {
         let scene = host.vm_mut().debug_scene_memory_stats();
         let images = host.vm_mut().ctx.images.debug_live_image_memory_stats();
         log(&format!(
-            "{stage}: scene-pck={} scene-streams={} image-albums={} image-frames={} image-rgba={} gpu-textures={}",
+            "{stage}: scene-pck={} scene-streams={} image-albums={} image-frames={} image-rgba={}",
             scene.scene_pck_bytes,
             scene.cached_scene_streams,
             images.albums,
             images.images,
             images.rgba_bytes,
-            super::gpu::texture_bytes(),
         ));
     }
 
@@ -306,11 +302,28 @@ mod vita {
         if !game_dir.join("Scene.pck").exists() {
             return Err(format!("missing {}", game_dir.join("Scene.pck").display()));
         }
-        let _display = super::gpu::GpuDisplay::new()?;
-        log_memory("after GPU initialization");
+        // The renderer starts vita2d and GXM.
         let renderer = Renderer::new(WIDTH as u32, HEIGHT as u32)
             .map_err(|error| format!("renderer init: {error:#}"))?;
-        let config = SiglusHostConfig::new(game_dir);
+        log_memory("after GPU initialization");
+        let mut config = SiglusHostConfig::new(game_dir);
+        // Local diagnosis: `start-scene` names a scene to boot into instead
+        // of the game's start scene. The engine then starts without the
+        // global save, so such a run must not write it back: it would replace
+        // the player's flags (the "booted before" flag, read text, settings)
+        // with empty ones.
+        let scene_override =
+            match fs::read_to_string(PathBuf::from(ROOT).join("start-scene")) {
+                Ok(scene) if !scene.trim().is_empty() => {
+                    log(&format!(
+                        "start scene override: {} (global save not written)",
+                        scene.trim()
+                    ));
+                    config.scene_name = Some(scene.trim().to_string());
+                    true
+                }
+                _ => false,
+            };
         let mut host = SiglusHost::new_with_renderer_sync(config, renderer)
             .map_err(|error| format!("engine init: {error:#}"))?;
         let (logical_w, logical_h) = host.logical_size();
@@ -375,6 +388,16 @@ mod vita {
                     ))
                 })
                 .collect();
+        // `dump-frames`: frame numbers (one per line) saved as
+        // dump/frame-N.png (the emulator needs surface sync for this).
+        let dump_frames: Vec<u64> = fs::read_to_string(PathBuf::from(ROOT).join("dump-frames"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect();
+        if !dump_frames.is_empty() {
+            let _ = fs::create_dir_all(PathBuf::from(ROOT).join("dump"));
+        }
         if PathBuf::from(ROOT).join("title-tap-smoke").exists() {
             smoke_taps.push((6_700, 445.0, 662.0));
         }
@@ -384,7 +407,10 @@ mod vita {
         let mut period_start = std::time::Instant::now();
         let mut step_us = 0u64;
         let mut step_max_us = 0u64;
-        let mut global_fingerprint = None;
+        // The loaded global data is the baseline: changes from the first
+        // frames on (the game marks its first boot right away) are written.
+        let mut global_fingerprint =
+            (!scene_override).then(|| host.persist_global_if_changed(None));
         let mut silent_samples = [0i16; SILENT_AUDIO_FRAMES * 2];
         loop {
             if frame < 6 {
@@ -420,6 +446,13 @@ mod vita {
             if _audio.is_none() {
                 unsafe { render_stereo_i16(silent_samples.as_mut_ptr(), SILENT_AUDIO_FRAMES) };
             }
+            if dump_frames.contains(&frame) {
+                host.renderer_mut().dump_next_frame(
+                    PathBuf::from(ROOT)
+                        .join("dump")
+                        .join(format!("frame-{frame}.png")),
+                );
+            }
             let step_start = std::time::Instant::now();
             let finished = host
                 .step(16)
@@ -428,10 +461,9 @@ mod vita {
             step_us += us;
             step_max_us = step_max_us.max(us);
             let frame_detail = siglus_scene_vm::render::vita_stats::take_frame_detail();
-            let gpu_detail = super::gpu::take_frame_detail();
             if us > 150_000 {
                 log(&format!(
-                    "slow frame {frame}: step {us} us ({frame_detail}; {gpu_detail}) scene={:?}",
+                    "slow frame {frame}: step {us} us ({frame_detail}) scene={:?}",
                     host.vm_mut().current_scene_name()
                 ));
             }
@@ -445,7 +477,7 @@ mod vita {
             // A Vita app is usually closed without an exit the engine sees:
             // keep global data (flags such as "opening seen", read text)
             // on the card a few seconds after it changes.
-            if frame % 300 == 0 {
+            if frame % 300 == 0 && !scene_override {
                 let now = host.persist_global_if_changed(global_fingerprint);
                 if global_fingerprint.is_some_and(|last| last != now) {
                     log(&format!("frame {frame}: global save written"));
@@ -455,12 +487,11 @@ mod vita {
             if frame % 120 == 0 {
                 let secs = period_start.elapsed().as_secs_f64().max(0.001);
                 log(&format!(
-                    "frame {frame}: fps {:.1}, step avg {} us max {} us; {}; {}",
+                    "frame {frame}: fps {:.1}, step avg {} us max {} us; {}",
                     120.0 / secs,
                     step_us / 120,
                     step_max_us,
                     siglus_scene_vm::render::vita_stats::take_summary(),
-                    super::gpu::take_upload_summary(),
                 ));
                 period_start = std::time::Instant::now();
                 step_us = 0;

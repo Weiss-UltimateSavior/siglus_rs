@@ -5286,10 +5286,8 @@ impl OmvPlanes for PackedOmvPlanes<'_> {
 
 /// The planes as the Theora decoder holds them (no repacked copy: at
 /// 1920x1440 4:4:4 that was 8 MiB per frame per stream).
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 struct DecoderOmvPlanes<'a>(&'a siglus_omv_decoder::YCbCrRef<'a>);
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl OmvPlanes for DecoderOmvPlanes<'_> {
     fn sample(&self, pli: usize, x: usize, y: usize, default: u8) -> u8 {
         let plane = &self.0[pli];
