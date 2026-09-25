@@ -54,6 +54,18 @@ cargo +nightly vita build vpk -- --release
 
 The VPK is written to
 `platform/vita/player/target/armv7-sony-vita-newlibeabihf/release/siglus_vita_player.vpk`.
+
+The same environment is a Docker image, `platform/vita/docker/Dockerfile`
+(VitaSDK with libvita2d, the pinned nightly and cargo-vita). CI publishes it
+as `ghcr.io/xmoezzz/siglus_rs/vita-build`, tagged with the Dockerfile's hash,
+and builds the release VPK in it; the image is rebuilt only when the
+Dockerfile changes. Locally:
+
+```sh
+docker build -t siglus-vita-build platform/vita/docker
+docker run --rm -v "$PWD:/src" -w /src/platform/vita/player \
+    siglus-vita-build cargo vita build vpk -- --release
+```
 Install it on a Vita homebrew environment and place your own game files under
 `ux0:data/siglus_rs/game/`, including `Scene.pck`, `Gameexe.dat`, and any
 required `key.toml`. Saves and logs use `ux0:data/siglus_rs/`. The player log

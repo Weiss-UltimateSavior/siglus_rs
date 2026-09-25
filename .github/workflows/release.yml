@@ -237,11 +237,28 @@ jobs:
           path: dist/wasm/siglus_rs-wasm.zip
           if-no-files-found: error
 
+  vita_image:
+    name: vita build image
+    uses: ./.github/workflows/vita-image.yml
+    permissions:
+      contents: read
+      packages: write
+
   vita:
     name: psvita (vpk)
+    needs: vita_image
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
+    # VitaSDK, libvita2d, the pinned nightly and cargo-vita
+    # (platform/vita/docker/Dockerfile).
+    container:
+      image: ${{ needs.vita_image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
-      VITASDK: /home/runner/vitasdk
       # The workflow's desktop RUSTFLAGS would replace the ones cargo-vita
       # sets for the Vita target.
       RUSTFLAGS: ""
@@ -250,42 +267,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (nightly, with the standard library source)
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: platform/vita/player
 
-      - name: Cache VitaSDK
-        id: vitasdk-cache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/vitasdk
-          key: vitasdk-${{ runner.os }}-v1
-
-      - name: Install VitaSDK and libvita2d
-        if: steps.vitasdk-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/vitasdk/vdpm /tmp/vdpm
-          cd /tmp/vdpm
-          ./bootstrap-vitasdk.sh
-          export PATH="$VITASDK/bin:$PATH"
-          ./vdpm libvita2d
-
-      - name: Install cargo-vita
-        run: cargo install cargo-vita --version 0.2.2 --locked
-
       - name: Build VPK
         run: |
           set -euo pipefail
-          export PATH="$VITASDK/bin:$PATH"
           cd platform/vita/player
-          cargo +nightly vita build vpk -- --release
+          cargo vita build vpk -- --release
           mkdir -p ../../../dist/vita
           cp target/armv7-sony-vita-newlibeabihf/release/siglus_vita_player.vpk \
             ../../../dist/vita/siglus-psvita.vpk
