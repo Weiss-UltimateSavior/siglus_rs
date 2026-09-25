@@ -262,6 +262,10 @@ jobs:
       # The workflow's desktop RUSTFLAGS would replace the ones cargo-vita
       # sets for the Vita target.
       RUSTFLAGS: ""
+    # Steps in a container run under `sh` unless told otherwise.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
